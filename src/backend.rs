@@ -237,6 +237,9 @@ mod tests {
         let all = hid::enumerate().unwrap();
         let mut results = Vec::new();
         for (model, spec) in REGISTRY.iter().enumerate() {
+            if spec.adapter == Adapter::HecateAudio {
+                continue;
+            }
             let name = spec.name;
             let i = all
                 .iter()
@@ -287,6 +290,9 @@ mod tests {
     fn live_extended_readback() {
         let all = hid::enumerate().unwrap();
         for (model, spec) in REGISTRY.iter().enumerate() {
+            if spec.adapter == Adapter::HecateAudio {
+                continue;
+            }
             let interface = all
                 .iter()
                 .find(|i| matches(i, model))
@@ -329,6 +335,9 @@ mod tests {
         }
         let all = hid::enumerate().unwrap();
         for (model, spec) in REGISTRY.iter().enumerate() {
+            if spec.adapter == Adapter::HecateAudio {
+                continue;
+            }
             let interface = all.iter().find(|i| matches(i, model)).unwrap();
             let session = crate::adapters::open(model, interface).unwrap();
             let before = session.read().unwrap();

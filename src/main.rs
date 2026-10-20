@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 mod adapters;
+mod audio_fx;
 mod backend;
 mod devices;
 mod hid;
@@ -10,6 +11,10 @@ mod protocol;
 mod ui;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--audio-fx-worker") {
+        audio_fx::worker_main();
+        return;
+    }
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && (args[1] == "--once" || args[1] == "--diagnose") {
         let result = if args[1] == "--diagnose" {

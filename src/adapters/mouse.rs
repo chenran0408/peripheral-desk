@@ -28,14 +28,18 @@ impl Channel {
     }
     fn razer(&self, class: u8, command: u8, size: u8, args: &[u8]) -> Result<Vec<u8>> {
         let req = protocol::razer_request(class, command, size, args);
-        self.dev.send(&req)?;
         let mut last = "等待设备回复超时".to_string();
-        for _ in 0..6 {
-            thread::sleep(Duration::from_millis(35));
-            let reply = self.dev.receive(0, 91)?;
-            match protocol::razer_reply(&reply, &req) {
-                Ok(body) => return Ok(body.to_vec()),
-                Err(e) => last = e,
+        // Receiver firmware can remain busy when settings are queried in a burst.
+        // Reissue only read commands; never duplicate a setting write.
+        for _ in 0..if command & 0x80 != 0 { 2 } else { 1 } {
+            self.dev.send(&req)?;
+            for poll in 0..6 {
+                thread::sleep(Duration::from_millis(if poll == 0 { 80 } else { 35 }));
+                let reply = self.dev.receive(0, 91)?;
+                match protocol::razer_reply(&reply, &req) {
+                    Ok(body) => return Ok(body.to_vec()),
+                    Err(e) => last = e,
+                }
             }
         }
         Err(last)
@@ -248,7 +252,7 @@ impl Channel {
         };
         if actual != Some(expected) {
             return Err(format!(
-                "已发送，但读回未确认：期望 {expected}，实际 {actual:?}。请关闭官方驱动后刷新"
+                "已发送，但读回未确认：期望 {expected}，实际 {actual:?}。设备尚未给出有效确认，请重新读取"
             ));
         }
         Ok(())

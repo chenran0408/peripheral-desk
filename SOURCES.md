@@ -20,3 +20,12 @@ Images remain the property of their respective manufacturers and are excluded fr
 - `assets/g75.png`: MCHOSE official HUB [G75 Pro illustration](https://cdn.mchose.com.cn/configCenter/assets/img/keyboard/G75Pro_whiteLine.png).
 
 The user-supplied UI reference is not distributed in this repository.
+
+## HECATE G2 Pro
+
+- 用户提供的官方 HECATE 1.1.44 安装包，仅用于本地兼容性研究；不在仓库或发布包中分发。
+- [漫步者官方驱动下载](https://www.edifier.com/cn/driver.html)。
+- [G2 Pro 官方产品页](https://cnweb.edifier.com/product/product-684.html)。
+- `assets/g2pro.png`：官方安装包中的设备缩略图，仅用于识别设备，归 EDIFIER / HECATE 所有。
+- Windows 原生音量使用 Microsoft Core Audio 的 IAudioEndpointVolume。
+- 音效桥接调用用户本机已安装的 C-Media SDK（1.0.8.0 x64）。未分发厂商 DLL、反编译代码或原界面资源。

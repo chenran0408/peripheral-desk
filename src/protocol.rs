@@ -23,6 +23,9 @@ pub fn razer_reply<'a>(wire: &'a [u8], request: &[u8]) -> Result<&'a [u8]> {
         return Err("雷蛇返回了其他请求的报文，请关闭雷云后重试".into());
     }
     if wire[1] != 2 {
+        if wire[1] == 4 {
+            return Err("雷蛇设备未响应，可能已休眠或离线；保留上次电量".into());
+        }
         return Err(format!("雷蛇设备未完成请求（状态 0x{:02X}）", wire[1]));
     }
     Ok(&wire[9..9 + wire[6] as usize])

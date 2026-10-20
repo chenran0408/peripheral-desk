@@ -49,6 +49,8 @@ impl Canvas {
         let mut graphics = null_mut();
         GdipCreateFromHDC(dc, &mut graphics);
         GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
+        GdipSetTextRenderingHint(graphics, TextRenderingHintClearTypeGridFit);
+        GdipSetInterpolationMode(graphics, InterpolationModeHighQualityBicubic);
         let scale = dpi as f32 / 96.;
         GdipScaleWorldTransform(graphics, scale, scale, MatrixOrderAppend);
         SetBkMode(dc, TRANSPARENT as i32);

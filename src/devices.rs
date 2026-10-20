@@ -7,11 +7,13 @@ pub enum Adapter {
     Razer,
     MchoseMouse,
     CompxKeyboard,
+    HecateAudio,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Mouse,
     Keyboard,
+    Headset,
 }
 
 pub struct DeviceSpec {
@@ -108,6 +110,27 @@ pub static REGISTRY: &[DeviceSpec] = &[
                 && i.usage_page == 0xff02
                 && i.input_len == 20
                 && i.output_len == 20
+        },
+    },
+    DeviceSpec {
+        key: "hecate-g2-pro",
+        name: "漫步者 G2 Pro",
+        brand: "HECATE",
+        kind: Kind::Headset,
+        adapter: Adapter::HecateAudio,
+        dpi_range: None,
+        rates: &[],
+        wired_rates: &[],
+        sleeps: &[],
+        image_file: "g2pro.png",
+        image_bytes: include_bytes!("../assets/g2pro.png"),
+        advanced: AUDIO_SETTINGS,
+        matcher: |i| {
+            i.vid == 0x35bb
+                && i.pid == 0xa100
+                && i.usage_page == 12
+                && i.feature_len == 16
+                && i.product.eq_ignore_ascii_case("HECATE G2 PRO")
         },
     },
 ];
@@ -226,7 +249,18 @@ impl DeviceSpec {
             Action::Stage(v) => (v as usize) < state.dpi_stages.len(),
             Action::Tune(key, v) => {
                 self.advanced.iter().any(|setting| {
-                    setting.key == key && setting.choices.iter().any(|(value, _)| *value == v)
+                    setting.key == key
+                        && (if matches!(
+                            key,
+                            Tuning::GameVolume | Tuning::ChatVolume | Tuning::MicVolume
+                        ) {
+                            v <= 100
+                        } else if self.kind == Kind::Headset && crate::audio_fx::spec(key).is_some()
+                        {
+                            crate::audio_fx::spec(key).is_some_and(|s| v <= s.max)
+                        } else {
+                            setting.choices.iter().any(|(value, _)| *value == v)
+                        })
                 }) && state.tuning.contains_key(&key)
             }
         };
@@ -253,3 +287,223 @@ pub const RAZER_ADVANCED: &[SettingSpec] = &[SettingSpec {
         (50, "50%"),
     ],
 }];
+
+const VOLUME_CHOICES: &[(u16, &str)] = &[
+    (0, "0%"),
+    (25, "25%"),
+    (50, "50%"),
+    (75, "75%"),
+    (100, "100%"),
+];
+pub const AUDIO_SETTINGS: &[SettingSpec] = &[
+    SettingSpec {
+        key: Tuning::GameVolume,
+        title: "GAMING 音量",
+        hint: "游戏与媒体播放通道",
+        choices: VOLUME_CHOICES,
+    },
+    SettingSpec {
+        key: Tuning::ChatVolume,
+        title: "CHAT 音量",
+        hint: "语音通信播放通道",
+        choices: VOLUME_CHOICES,
+    },
+    SettingSpec {
+        key: Tuning::MicVolume,
+        title: "麦克风音量",
+        hint: "仅调节输入音量，不启动录音",
+        choices: VOLUME_CHOICES,
+    },
+    SettingSpec {
+        key: Tuning::MicMute,
+        title: "麦克风静音",
+        hint: "静音状态与 Windows 同步",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::EqEnabled,
+        title: "启用均衡器",
+        hint: "GAMING 通道 · 关闭后保留频段数值",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::Eq30,
+        title: "30 Hz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq60,
+        title: "60 Hz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq120,
+        title: "120 Hz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq250,
+        title: "250 Hz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq500,
+        title: "500 Hz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq1k,
+        title: "1 kHz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq2k,
+        title: "2 kHz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq4k,
+        title: "4 kHz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq8k,
+        title: "8 kHz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::Eq16k,
+        title: "16 kHz",
+        hint: "十段均衡器",
+        choices: &[],
+    },
+    SettingSpec {
+        key: Tuning::SurroundEnabled,
+        title: "虚拟环绕",
+        hint: "GAMING 通道 · 复用已安装的音效引擎",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::SurroundRoom,
+        title: "空间大小",
+        hint: "调整虚拟空间的房间尺寸",
+        choices: &[(0, "小"), (1, "中"), (2, "大")],
+    },
+    SettingSpec {
+        key: Tuning::SmartVolumeEnabled,
+        title: "响度均衡",
+        hint: "减少不同声音之间的音量差异",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::SmartVolumeLevel,
+        title: "均衡强度",
+        hint: "GAMING 通道 · 当前设置会读回确认",
+        choices: &[(0, "0"), (25, "25"), (50, "50"), (75, "75"), (100, "100")],
+    },
+    SettingSpec {
+        key: Tuning::BrillianceEnabled,
+        title: "声音提亮",
+        hint: "增强高频细节",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::BrillianceLevel,
+        title: "提亮强度",
+        hint: "作用于声音提亮效果",
+        choices: &[
+            (0, "0"),
+            (1, "1"),
+            (2, "2"),
+            (3, "3"),
+            (4, "4"),
+            (5, "5"),
+            (6, "6"),
+            (7, "7"),
+            (8, "8"),
+            (9, "9"),
+            (10, "10"),
+        ],
+    },
+    SettingSpec {
+        key: Tuning::BassEnabled,
+        title: "动态低音",
+        hint: "增强低频听感",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::BassLevel,
+        title: "低音强度",
+        hint: "保留当前低频截止频率",
+        choices: &[
+            (0, "0"),
+            (1, "1"),
+            (2, "2"),
+            (3, "3"),
+            (4, "4"),
+            (5, "5"),
+            (6, "6"),
+            (7, "7"),
+            (8, "8"),
+            (9, "9"),
+            (10, "10"),
+        ],
+    },
+    SettingSpec {
+        key: Tuning::ClarityEnabled,
+        title: "人声清晰",
+        hint: "突出语音细节",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::ClarityLevel,
+        title: "清晰度强度",
+        hint: "保留原有噪声抑制参数",
+        choices: &[
+            (0, "0"),
+            (1, "1"),
+            (2, "2"),
+            (3, "3"),
+            (4, "4"),
+            (5, "5"),
+            (6, "6"),
+            (7, "7"),
+            (8, "8"),
+            (9, "9"),
+            (10, "10"),
+        ],
+    },
+    SettingSpec {
+        key: Tuning::MicNoise,
+        title: "麦克风降噪",
+        hint: "作用于麦克风输入，不启动录音",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::ChatNoise,
+        title: "通话降噪",
+        hint: "作用于 CHAT 播放通道",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::VoiceEnabled,
+        title: "麦克风变声",
+        hint: "只改变原有输入效果，不开启监听",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::VoiceMode,
+        title: "变声模式",
+        hint: "C-Media 原有变声效果",
+        choices: &[(0, "模式 1"), (1, "模式 2"), (2, "模式 3"), (3, "模式 4")],
+    },
+];

@@ -1,4 +1,5 @@
 //! Each protocol implements DeviceSession; the refresh engine and UI stay shared.
+pub mod audio;
 pub mod mouse;
 use crate::{
     devices::{Adapter, REGISTRY},
@@ -29,6 +30,7 @@ pub fn open(model: usize, interface: &Interface) -> Result<Box<dyn DeviceSession
         Adapter::Razer | Adapter::MchoseMouse => {
             Ok(Box::new(mouse::Channel::new(interface, spec)?))
         }
+        Adapter::HecateAudio => Ok(Box::new(audio::AudioSession::open()?)),
         Adapter::CompxKeyboard => {
             let keyboard = crate::keyboard::Keyboard::open(&interface.path)?;
             keyboard.verify_model()?;

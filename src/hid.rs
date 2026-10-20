@@ -146,6 +146,7 @@ unsafe fn enumerate_set(set: HDEVINFO, guid: &windows_sys::core::GUID) -> Result
         let lower = path.to_lowercase();
         if ![
             "vid_1532", "vid_5253", "vid_0bda", "vid_3837", "vid_3554", "vid_41e4", "vid_258a",
+            "vid_35bb",
         ]
         .iter()
         .any(|v| lower.contains(v))
