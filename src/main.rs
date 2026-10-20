@@ -1,7 +1,11 @@
 #![windows_subsystem = "windows"]
+mod adapters;
 mod backend;
+mod devices;
 mod hid;
 mod keyboard;
+mod model;
+mod paint;
 mod protocol;
 mod ui;
 
@@ -22,5 +26,8 @@ fn main() {
             }
         }
     }
-    ui::run(args.iter().any(|s| s == "--hidden"));
+    ui::run(
+        args.iter().any(|s| s == "--hidden"),
+        args.iter().any(|s| s == "--battery"),
+    );
 }

@@ -137,10 +137,97 @@ impl MchoseConfig {
     }
 }
 
+/// 0 means leave untouched for M HUB processing flags; 1 on, 2 off.
+pub fn mchose_tuning_arguments(
+    config: &MchoseConfig,
+    key: crate::model::Tuning,
+    value: u16,
+) -> Result<Vec<u8>> {
+    use crate::model::Tuning;
+    let lod = config.raw[17] & 3;
+    if !(1..=2).contains(&lod) {
+        return Err("传感器 LOD 字段未知，停止写入".into());
+    }
+    let mut args = vec![lod, 0, 0, 0, 0, 0, 0, 0, 0];
+    match key {
+        Tuning::Lod if (1..=2).contains(&value) => args[0] = value as u8,
+        Tuning::Ripple | Tuning::Angle | Tuning::Motion if value <= 1 => {
+            let offset = match key {
+                Tuning::Ripple => 1,
+                Tuning::Angle => 2,
+                _ => 3,
+            };
+            args[offset] = if value == 1 { 1 } else { 2 };
+        }
+        _ => return Err("传感器参数不在已知范围内".into()),
+    }
+    Ok(args)
+}
+
+/// Preserve the device's stage numbering, Y DPI and reserved bytes.
+pub fn razer_stage_table(body: &[u8]) -> Result<(Vec<u16>, u8)> {
+    if body.len() != 38 || !(1..=5).contains(&body[2]) || !(1..=body[2]).contains(&body[1]) {
+        return Err("雷蛇 DPI 档位结构未知".into());
+    }
+    let mut stages = Vec::new();
+    for i in 0..body[2] as usize {
+        let at = 3 + i * 7;
+        let dpi = u16::from_be_bytes([body[at + 1], body[at + 2]]);
+        if !(100..=30000).contains(&dpi) {
+            return Err("雷蛇 DPI 档位值异常".into());
+        }
+        stages.push(dpi);
+    }
+    Ok((stages, body[1] - 1))
+}
+pub fn razer_stage_arguments(body: &[u8], stage: u8, dpi: Option<u16>) -> Result<Vec<u8>> {
+    let (stages, _) = razer_stage_table(body)?;
+    if stage as usize >= stages.len() {
+        return Err("DPI 档位越界".into());
+    }
+    let mut out = body.to_vec();
+    out[0] = 1;
+    out[1] = stage + 1;
+    if let Some(v) = dpi {
+        if !(100..=30000).contains(&v) || v % 50 != 0 {
+            return Err("DPI 值越界".into());
+        }
+        let at = 3 + stage as usize * 7;
+        out[at + 1..at + 3].copy_from_slice(&v.to_be_bytes());
+        out[at + 3..at + 5].copy_from_slice(&v.to_be_bytes());
+    }
+    Ok(out)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn sensor_write_changes_only_requested_toggle() {
+        let mut raw = vec![0; 63];
+        raw[16] = 1;
+        raw[17] = 0x95;
+        let c = MchoseConfig::decode(&raw).unwrap();
+        assert_eq!(
+            mchose_tuning_arguments(&c, crate::model::Tuning::Angle, 0).unwrap(),
+            vec![1, 0, 2, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(mchose_tuning_arguments(&c, crate::model::Tuning::Lod, 3).is_err());
+    }
+    #[test]
+    fn razer_stage_edit_preserves_other_slots_and_reserved_bytes() {
+        let mut table = vec![0; 38];
+        table[1] = 2;
+        table[2] = 2;
+        table[3..10].copy_from_slice(&[1, 1, 144, 1, 144, 7, 9]);
+        table[10..17].copy_from_slice(&[2, 3, 32, 3, 32, 6, 8]);
+        let mut edited = razer_stage_arguments(&table, 1, Some(1200)).unwrap();
+        assert_eq!(&edited[11..15], &[4, 176, 4, 176]);
+        edited[0] = 0;
+        edited[11..15].copy_from_slice(&table[11..15]);
+        assert_eq!(edited, table);
+        assert!(razer_stage_arguments(&table, 2, None).is_err());
+    }
     fn response(req: &[u8; 91]) -> [u8; 91] {
         let mut r = *req;
         r[1] = 2;

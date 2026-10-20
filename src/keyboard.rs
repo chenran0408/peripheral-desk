@@ -1,3 +1,4 @@
+use crate::model::Tuning;
 use crate::{
     backend::{now, Action, State},
     hid::wide,
@@ -31,18 +32,35 @@ pub struct Keyboard {
 /// notification. Reading the feature before E5 arrives returns a blank echo.
 pub struct FeatureReady(Handle);
 impl FeatureReady {
-    pub fn open(path:&str)->Result<Self> {unsafe {
-        let h=CreateFileW(wide(path).as_ptr(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,
-            null(),OPEN_EXISTING,FILE_FLAG_OVERLAPPED,null_mut());
-        if h==INVALID_HANDLE_VALUE {Err(std::io::Error::last_os_error().to_string())}
-        else {Ok(Self(Handle(h)))}
-    }}
-    pub fn wait(&self,command:u8)->Result<()> {
-        let deadline=Instant::now()+Duration::from_millis(1200);
-        while Instant::now()<deadline {
-            let mut data=[0u8;65];
-            if Keyboard::transfer(&self.0,&mut data,false)?==65 && data[0]==0x13
-                && data[1]==!0xe5 && data[2]==!command {return Ok(());}
+    pub fn open(path: &str) -> Result<Self> {
+        unsafe {
+            let h = CreateFileW(
+                wide(path).as_ptr(),
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                OPEN_EXISTING,
+                FILE_FLAG_OVERLAPPED,
+                null_mut(),
+            );
+            if h == INVALID_HANDLE_VALUE {
+                Err(std::io::Error::last_os_error().to_string())
+            } else {
+                Ok(Self(Handle(h)))
+            }
+        }
+    }
+    pub fn wait(&self, command: u8) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_millis(1200);
+        while Instant::now() < deadline {
+            let mut data = [0u8; 65];
+            if Keyboard::transfer(&self.0, &mut data, false)? == 65
+                && data[0] == 0x13
+                && data[1] == !0xe5
+                && data[2] == !command
+            {
+                return Ok(());
+            }
         }
         Err(format!("等待迈从命令 0x{command:02X} 完成通知超时"))
     }
@@ -144,31 +162,38 @@ impl Keyboard {
         let mut req = [0; 20];
         req[..3].copy_from_slice(&[0x13, command, 1]);
         for _ in 0..3 {
-        self.send(&mut req)?;
-        let deadline = Instant::now() + Duration::from_millis(1500);
-        let mut chunks = std::collections::BTreeMap::new();
-        let mut total = None;
-        while Instant::now() < deadline {
-            let Some(p) = self.frame()? else {
-                continue;
-            };
-            if p[1] != command {
-                continue;
+            self.send(&mut req)?;
+            let deadline = Instant::now() + Duration::from_millis(1500);
+            let mut chunks = std::collections::BTreeMap::new();
+            let mut total = None;
+            while Instant::now() < deadline {
+                let Some(p) = self.frame()? else {
+                    continue;
+                };
+                if p[1] != command {
+                    continue;
+                }
+                if p[2] == 0 || p[2] > 40 || p[3] >= p[2] || p[4] > 14 {
+                    return Err("键盘分包字段异常".into());
+                }
+                if total.is_some_and(|t| t != p[2]) {
+                    return Err("键盘分包总数不一致".into());
+                }
+                total = Some(p[2]);
+                chunks.insert(p[3], p[5..5 + p[4] as usize].to_vec());
+                if chunks.len() == p[2] as usize {
+                    return Ok(chunks.into_values().flatten().collect());
+                }
             }
-            if p[2] == 0 || p[2] > 40 || p[3] >= p[2] || p[4] > 14 {
-                return Err("键盘分包字段异常".into());
-            }
-            if total.is_some_and(|t| t != p[2]) {
-                return Err("键盘分包总数不一致".into());
-            }
-            total = Some(p[2]);
-            chunks.insert(p[3], p[5..5 + p[4] as usize].to_vec());
-            if chunks.len() == p[2] as usize {
-                return Ok(chunks.into_values().flatten().collect());
-            }
-        }
         }
         Err("键盘分包不完整，请唤醒键盘后刷新".into())
+    }
+    pub fn verify_model(&self) -> Result<()> {
+        let signature = self.read_block(0x05)?;
+        if signature.len() < 6 || signature[..6] != [3, 0, 0, 0, 1, 0x15] {
+            return Err("接收器连接的设备不是已确认的 G75 Pro，已停止读写设置".into());
+        }
+        Ok(())
     }
     fn config(&self) -> Result<Vec<u8>> {
         let b = self.read_block(0x44)?;
@@ -200,6 +225,16 @@ impl Keyboard {
                 s.rate = Some([250, 500, 1000][c[1] as usize - 1]);
                 s.sleep_seconds = Some(c[24] as u16 * 30);
                 s.light = Some(c[10]);
+                s.tuning.insert(Tuning::WinLock, u16::from(c[15] == 1));
+                s.tuning.insert(Tuning::Latency, u16::from(c[3] == 0));
+                if let Some(offset) = light_offset(c[10]) {
+                    if (1..=9).contains(&c[offset]) {
+                        s.tuning.insert(Tuning::Brightness, c[offset] as u16);
+                    }
+                    if c[10] != 1 && (1..=4).contains(&(c[offset + 1] >> 4)) {
+                        s.tuning.insert(Tuning::Speed, (c[offset + 1] >> 4) as u16);
+                    }
+                }
             }
             Err(e) => s.settings_error = e,
         }
@@ -220,6 +255,7 @@ impl Keyboard {
                 config[9] = 0;
                 config[10] = v;
             }
+            Action::Tune(key, value) => edit_tuning(&mut config, key, value)?,
             _ => return Err("G75 Pro 参数不在允许范围内".into()),
         }
         for (index, block) in config.chunks(14).enumerate() {
@@ -228,22 +264,33 @@ impl Keyboard {
             p[5..5 + block.len()].copy_from_slice(block);
             let mut ack = false;
             for _ in 0..3 {
-            self.send(&mut p)?;
-            let deadline = Instant::now() + Duration::from_millis(900);
-            while Instant::now() < deadline {
-                let Some(r) = self.frame()? else {
-                    continue;
-                };
-                if r == p {
-                    ack = true;
+                self.send(&mut p)?;
+                let deadline = Instant::now() + Duration::from_millis(900);
+                while Instant::now() < deadline {
+                    let Some(r) = self.frame()? else {
+                        continue;
+                    };
+                    if r == p {
+                        ack = true;
+                        break;
+                    }
+                }
+                if ack {
                     break;
                 }
             }
-            if ack {break;}
-            }
             if !ack {
-                return Err("键盘未确认配置分包；请刷新核对当前设置".into());
+                // Some receiver firmware drops an ACK after applying a changed
+                // setting. Accept only a full, exact read-back of the target.
+                if self.config().is_ok_and(|read| read == config) {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "键盘未确认第 {} 个配置分包，且读回未匹配；请刷新核对",
+                    index + 1
+                ));
             }
+            std::thread::sleep(Duration::from_millis(15));
         }
         std::thread::sleep(Duration::from_millis(150));
         if self.config()? != config {
@@ -258,9 +305,79 @@ fn validate(p: &[u8; 20]) -> Result<()> {
     }
     Ok(())
 }
+
+fn light_offset(mode: u8) -> Option<usize> {
+    Some(match mode {
+        1 => 58,
+        2 => 60,
+        3 => 62,
+        4 => 64,
+        5 => 66,
+        7 => 70,
+        8 => 72,
+        10 => 76,
+        11 => 78,
+        12 => 80,
+        13 => 82,
+        15 => 84,
+        16 => 88,
+        17 => 90,
+        _ => return None,
+    })
+}
+fn edit_tuning(config: &mut [u8], key: Tuning, value: u16) -> Result<()> {
+    match key {
+        Tuning::WinLock if value <= 1 => config[15] = value as u8,
+        Tuning::Latency if value <= 1 => config[3] = if value == 1 { 0 } else { 2 },
+        Tuning::Brightness | Tuning::Speed => {
+            let offset = light_offset(config[10]).ok_or("请先开启一种灯效")?;
+            if key == Tuning::Brightness && (1..=9).contains(&value) {
+                config[offset] = value as u8;
+            } else if key == Tuning::Speed && (1..=4).contains(&value) {
+                config[offset + 1] = config[offset + 1] & 15 | ((value as u8) << 4);
+            } else {
+                return Err("灯效参数越界".into());
+            }
+        }
+        _ => return Err("G75 Pro 不支持该参数".into()),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn declared_keyboard_choices_match_codec_bounds() {
+        let mut config = vec![0; 128];
+        config[10] = 2;
+        for setting in crate::devices::G75_ADVANCED {
+            for (value, _) in setting.choices {
+                assert!(
+                    edit_tuning(&mut config, setting.key, *value).is_ok(),
+                    "{:?} {}",
+                    setting.key,
+                    value
+                );
+            }
+        }
+    }
+    #[test]
+    fn light_tuning_preserves_color_nibble_and_other_config() {
+        let mut before = vec![0x5a; 128];
+        before[10] = 2;
+        before[61] = 0x27;
+        let mut after = before.clone();
+        edit_tuning(&mut after, Tuning::Speed, 4).unwrap();
+        assert_eq!(after[61], 0x47);
+        after[61] = before[61];
+        assert_eq!(after, before);
+        assert!(edit_tuning(&mut after, Tuning::Brightness, 100).is_err());
+        edit_tuning(&mut after, Tuning::Brightness, 9).unwrap();
+        assert_eq!(after[60], 9);
+        after[10] = 0;
+        assert!(edit_tuning(&mut after, Tuning::Brightness, 9).is_err());
+    }
     #[test]
     fn real_g75_full_battery_fixture() {
         let mut p = [0u8; 20];

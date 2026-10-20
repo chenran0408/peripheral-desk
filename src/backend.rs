@@ -1,37 +1,19 @@
 use crate::{
-    hid::{self, Device, Interface},
-    protocol::{self, MchoseConfig, Result, MCHOSE_RATES},
+    hid::{self, Interface},
+    protocol::Result,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     path::PathBuf,
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-pub const NAMES: [&str; 3] = ["炼狱蝰蛇 V3 专业版", "迈从 A5 Ultra", "迈从 G75 Pro"];
-
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub struct State {
-    pub present: bool,
-    pub fresh: bool,
-    pub percent: Option<u8>,
-    pub charging: Option<bool>,
-    pub wired: bool,
-    pub light: Option<u8>,
-    pub dpi: Option<u16>,
-    pub rate: Option<u16>,
-    pub sleep_seconds: Option<u16>,
-    pub updated: u64,
-    pub identity: String,
-    pub error: String,
-    pub settings_error: String,
-    pub alerted: bool,
-}
+use crate::devices::{Adapter, REGISTRY};
+pub use crate::model::{Action, State};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
-    pub devices: [State; 3],
+    pub devices: Vec<State>,
     pub interval: u32,
     pub threshold: u8,
     pub notices: bool,
@@ -40,7 +22,13 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
-            devices: [State::default(), State::default(), State::default()],
+            devices: REGISTRY
+                .iter()
+                .map(|spec| State {
+                    key: spec.key.into(),
+                    ..State::default()
+                })
+                .collect(),
             interval: 60,
             threshold: 20,
             notices: true,
@@ -68,6 +56,21 @@ impl Snapshot {
             .ok()
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
+        let saved = std::mem::take(&mut s.devices);
+        s.devices = REGISTRY
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| {
+                let mut state = saved
+                    .iter()
+                    .find(|d| d.key == spec.key)
+                    .cloned()
+                    .or_else(|| saved.get(index).filter(|d| d.key.is_empty()).cloned())
+                    .unwrap_or_default();
+                state.key = spec.key.into();
+                state
+            })
+            .collect();
         s.interval = s.interval.clamp(30, 1800);
         s.threshold = s.threshold.clamp(5, 50);
         for d in &mut s.devices {
@@ -80,6 +83,10 @@ impl Snapshot {
             d.dpi = None;
             d.rate = None;
             d.sleep_seconds = None;
+            d.light = None;
+            d.tuning.clear();
+            d.dpi_stages.clear();
+            d.active_stage = None;
         }
         s
     }
@@ -128,196 +135,27 @@ impl Snapshot {
 }
 
 pub fn matches(i: &Interface, model: usize) -> bool {
-    if model == 0 {
-        i.vid == 0x1532
-            && [0x00b6, 0x00b7].contains(&i.pid)
-            && i.path.to_lowercase().contains("mi_00")
-            && i.feature_len == 91
-    } else if model == 1 {
-        // Name and vendor AND descriptor shape are mandatory. A5 Pro/Max/V2,
-        // G3 sharing a PID, and unrelated Realtek devices must never be queried.
-        [0x5253, 0x0bda, 0x3837].contains(&i.vid)
-            && ["a5 ultra", "mchose a5 ultra"].contains(&i.product.trim().to_lowercase().as_str())
-            && i.usage_page == 0xff01
-            && i.feature_len >= 65
-    } else {
-        ((i.vid == 0x3554 && i.pid == 0xfa09) || (i.vid == 0x41e4 && i.pid == 0x2001))
-            && i.usage_page == 0xff02
-            && i.input_len == 20
-            && i.output_len == 20
-    }
-}
-
-pub struct Channel {
-    dev: Device,
-    ready: Option<crate::keyboard::FeatureReady>,
-    pub interface: Interface,
-}
-impl Channel {
-    pub fn new(i: &Interface) -> Result<Self> {
-        Ok(Self {
-            dev: Device::open(&i.path)?,
-            ready: if i.vid==0x1532 {None} else {Some(crate::keyboard::FeatureReady::open(&i.path)?)},
-            interface: i.clone(),
-        })
-    }
-    fn razer(&self, class: u8, command: u8, size: u8, args: &[u8]) -> Result<Vec<u8>> {
-        let req = protocol::razer_request(class, command, size, args);
-        self.dev.send(&req)?;
-        let mut last = "等待设备回复超时".to_string();
-        for _ in 0..6 {
-            thread::sleep(Duration::from_millis(35));
-            let reply = self.dev.receive(0, 91)?;
-            match protocol::razer_reply(&reply, &req) {
-                Ok(body) => return Ok(body.to_vec()),
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
-    }
-    fn mchose(&self, report: u8, command: u8, args: &[u8], read: bool) -> Result<Vec<u8>> {
-        let req = protocol::mchose_request(report, command, args);
-        let mut last = String::new();
-        for _ in 0..if read {3} else {1} {
-        self.dev.send(&req)?;
-        if let Err(e)=self.ready.as_ref().unwrap().wait(command) {
-            if !read {return Err(e);}
-            last=e;continue;
-        }
-        if !read {return Ok(Vec::new());}
-        for _ in 0..4 {
-            let reply = self
-                .dev
-                .receive(report, self.interface.feature_len as usize)?;
-            let len = if report == 0x11 { 21 } else { 65 };
-            match protocol::mchose_reply(&reply[..len], report, command) {
-                Ok(body) if command == 6 && body[2..4] == [0, 0] => {
-                    last = "迈从鼠标暂未在线，保留上次电量".into()
-                }
-                Ok(body) if command == 0x67 && MchoseConfig::decode(&body).is_err() => {
-                    last="迈从暂未返回有效配置，请关闭官方驱动后刷新".into()
-                }
-                Ok(body) => return Ok(body),
-                Err(e) => last = e,
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-        thread::sleep(Duration::from_millis(150));
-        }
-        Err(last)
-    }
-    fn config(&self) -> Result<MchoseConfig> {
-        MchoseConfig::decode(&self.mchose(0x12, 0x67, &[], true)?)
-    }
-    pub fn read(&self, model: usize) -> Result<State> {
-        let mut s = State {
-            present: true,
-            fresh: true,
-            updated: now(),
-            identity: format!("{:04X}:{:04X}", self.interface.vid, self.interface.pid),
-            ..State::default()
-        };
-        if model == 0 {
-            s.percent = Some(protocol::razer_percent(self.razer(7, 0x80, 2, &[])?[1]));
-            s.charging = self.razer(7, 0x84, 2, &[]).ok().and_then(|v| match v[1] {
-                0 => Some(false),
-                1 => Some(true),
-                _ => None,
-            });
-            s.wired = self.interface.pid == 0xb6;
-            // Each optional setting fails independently of the battery reading.
-            match self.razer(4, 0x85, 7, &[1]) {
-                Ok(v) => s.dpi = Some(u16::from_be_bytes([v[1], v[2]])),
-                Err(e) => s.settings_error.push_str(&format!("DPI: {e}; ")),
-            }
-            match self.razer(0, 0x85, 1, &[]) {
-                Ok(v) if [1, 2, 8].contains(&v[0]) => s.rate = Some(1000 / v[0] as u16),
-                Ok(_) => s.settings_error.push_str("回报率字段未知; "),
-                Err(e) => s.settings_error.push_str(&format!("回报率: {e}; ")),
-            }
-            match self.razer(7, 0x83, 2, &[]) {
-                Ok(v) => s.sleep_seconds = Some(u16::from_be_bytes([v[0], v[1]])),
-                Err(e) => s.settings_error.push_str(&format!("休眠: {e}")),
-            }
-        } else {
-            let (p, charging, wired) =
-                protocol::mchose_battery(&self.mchose(0x11, 6, &[], true)?)?;
-            s.percent = Some(p);
-            s.charging = charging;
-            s.wired = wired;
-            match self.config() {
-                Ok(c) => {
-                    s.dpi = Some(c.dpi(wired));
-                    s.rate = Some(MCHOSE_RATES[if wired { c.wired_rate } else { c.wireless_rate }]);
-                    s.sleep_seconds = Some(c.raw[19] as u16 * 60);
-                }
-                Err(e) => s.settings_error = e,
-            }
-        }
-        Ok(s)
-    }
-    pub fn apply(&self, model: usize, action: Action) -> Result<()> {
-        let current = self.read(model)?;
-        match (model, action) {
-            (0, Action::Dpi(dpi)) if (100..=30000).contains(&dpi) && dpi % 50 == 0 => {
-                let [hi, lo] = dpi.to_be_bytes();
-                self.razer(4, 5, 7, &[1, hi, lo, hi, lo, 0, 0])?;
-            }
-            (0, Action::Rate(rate)) if [125, 500, 1000].contains(&rate) => {
-                self.razer(0, 5, 1, &[(1000 / rate) as u8])?;
-            }
-            (0, Action::Sleep(seconds)) if (60..=900).contains(&seconds) => {
-                self.razer(7, 3, 2, &seconds.to_be_bytes())?;
-            }
-            (1, Action::Dpi(dpi)) if (50..=26000).contains(&dpi) && dpi % 50 == 0 => {
-                let cfg = self.config()?;
-                self.mchose(0x12, 0x40, &cfg.dpi_arguments(dpi, current.wired), false)?;
-            }
-            (1, Action::Rate(rate))
-                if MCHOSE_RATES.contains(&rate) && (current.wired || rate <= 4000) =>
-            {
-                let cfg = self.config()?;
-                let code = MCHOSE_RATES.iter().position(|r| *r == rate).unwrap() as u8;
-                let (usb, wireless) = if current.wired {
-                    (code, cfg.wireless_rate as u8)
-                } else {
-                    (cfg.wired_rate as u8, code)
-                };
-                self.mchose(0x11, 0x41, &[usb, wireless], false)?;
-            }
-            (1, Action::Sleep(seconds)) if (60..=3600).contains(&seconds) && seconds % 60 == 0 => {
-                self.mchose(0x11, 0x0a, &[1, (seconds / 60) as u8], false)?;
-            }
-            _ => return Err("参数不在该设备的已知范围内".into()),
-        }
-        thread::sleep(Duration::from_millis(180));
-        let check = self.read(model)?;
-        let (actual, expected) = match action {
-            Action::Dpi(v) => (check.dpi, v),
-            Action::Rate(v) => (check.rate, v),
-            Action::Sleep(v) => (check.sleep_seconds, v),
-            Action::Light(_) => unreachable!(),
-        };
-        if actual != Some(expected) {
-            return Err(format!(
-                "已发送，但读回未确认：期望 {expected}，实际 {actual:?}。请关闭官方驱动后刷新"
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum Action {
-    Dpi(u16),
-    Rate(u16),
-    Sleep(u16),
-    Light(u8),
+    (REGISTRY[model].matcher)(i)
 }
 
 pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapshot, Result<()>) {
+    refresh_with(previous, action, hid::enumerate(), crate::adapters::open)
+}
+
+fn refresh_with<F>(
+    previous: &Snapshot,
+    action: Option<(usize, Action)>,
+    interfaces: Result<Vec<Interface>>,
+    mut open: F,
+) -> (Snapshot, Result<()>)
+where
+    F: FnMut(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>>,
+{
     let mut next = previous.clone();
-    let interfaces = match hid::enumerate() {
+    if action.is_some_and(|(model, _)| model >= REGISTRY.len()) {
+        return (next, Err("设备编号无效".into()));
+    }
+    let interfaces = match interfaces {
         Ok(v) => v,
         Err(e) => {
             for d in &mut next.devices {
@@ -329,9 +167,15 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
         }
     };
     let mut action_result = Ok(());
-    for model in 0..3 {
+    for (model, spec) in REGISTRY.iter().enumerate() {
         let mut candidates: Vec<_> = interfaces.iter().filter(|i| matches(i, model)).collect();
-        candidates.sort_by_key(|i| if model == 0 && i.pid == 0xb6 { 0 } else { 1 });
+        candidates.sort_by_key(|i| {
+            if spec.adapter == Adapter::Razer && i.pid == 0xb6 {
+                0
+            } else {
+                1
+            }
+        });
         let d = &mut next.devices[model];
         d.present = !candidates.is_empty();
         d.fresh = false;
@@ -339,6 +183,10 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
         d.dpi = None;
         d.rate = None;
         d.sleep_seconds = None;
+        d.light = None;
+        d.tuning.clear();
+        d.dpi_stages.clear();
+        d.active_stage = None;
         if candidates.is_empty() {
             d.error = "未检测到支持的接口，请连接接收器或 USB 数据线".into();
             if action.is_some_and(|a| a.0 == model) {
@@ -348,25 +196,20 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
         }
         let mut read = None;
         for interface in candidates {
-            let result = if model == 2 {
-                crate::keyboard::Keyboard::open(&interface.path).and_then(|k| {
-                    if let Some((2, a)) = action {
-                        action_result = k.apply(a);
+            let result = open(model, interface).and_then(|session| {
+                if let Some((m, a)) = action {
+                    if m == model {
+                        action_result = session.read().and_then(|current| {
+                            spec.validate(a, &current)?;
+                            session.apply(a)
+                        });
                     }
-                    k.read(format!("{:04X}:{:04X}", interface.vid, interface.pid))
-                })
-            } else {
-                Channel::new(interface).and_then(|channel| {
-                    if let Some((m, a)) = action {
-                        if m == model {
-                            action_result = channel.apply(model, a);
-                        }
-                    }
-                    channel.read(model)
-                })
-            };
+                }
+                session.read()
+            });
             match result {
                 Ok(mut s) => {
+                    s.key = spec.key.into();
                     s.alerted = d.alerted;
                     read = Some(s);
                     break;
@@ -376,8 +219,8 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
         }
         if let Some(s) = read {
             *d = s;
-        } else if action.is_some_and(|a| a.0==model) {
-            action_result=Err(d.error.clone());
+        } else if action.is_some_and(|a| a.0 == model) {
+            action_result = Err(d.error.clone());
         }
     }
     (next, action_result)
@@ -386,35 +229,231 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::adapters::mouse::Channel;
+    use std::{thread, time::Duration};
     #[test]
     #[ignore = "Requires all three physical peripherals; writes the existing values and checks read-back"]
     fn live_settings_readback() {
-        let all=hid::enumerate().unwrap();
-        let mut results=Vec::new();
-        for (model,name) in NAMES.iter().enumerate() {
-            let i=all.iter().find(|i|matches(i,model)).expect("Required peripheral missing");
-            if model<2 {
-                let channel=Channel::new(i).unwrap();
-                let before=channel.read(model).unwrap();
-                let actions=[Action::Dpi(before.dpi.unwrap()),Action::Rate(before.rate.unwrap()),Action::Sleep(before.sleep_seconds.unwrap())];
+        let all = hid::enumerate().unwrap();
+        let mut results = Vec::new();
+        for (model, spec) in REGISTRY.iter().enumerate() {
+            let name = spec.name;
+            let i = all
+                .iter()
+                .find(|i| matches(i, model))
+                .expect("Required peripheral missing");
+            if spec.adapter != Adapter::CompxKeyboard {
+                let channel = Channel::new(i, spec).unwrap();
+                let before = channel.read().unwrap();
+                let actions = [
+                    Action::Dpi(before.dpi.unwrap()),
+                    Action::Rate(before.rate.unwrap()),
+                    Action::Sleep(before.sleep_seconds.unwrap()),
+                ];
                 for action in actions {
                     thread::sleep(Duration::from_millis(450));
-                    let result=channel.apply(model,action);
-                    let line=format!("{name} {action:?}: {result:?}");println!("{line}");results.push(line);
+                    let result = channel.apply(action);
+                    let line = format!("{name} {action:?}: {result:?}");
+                    println!("{line}");
+                    results.push(line);
                 }
             } else {
-                let k=crate::keyboard::Keyboard::open(&i.path).unwrap();
-                let before=k.read(format!("{:04X}:{:04X}",i.vid,i.pid)).unwrap();
-                let actions=[Action::Rate(before.rate.unwrap()),Action::Sleep(before.sleep_seconds.unwrap()),Action::Light(before.light.unwrap())];
+                let k = crate::keyboard::Keyboard::open(&i.path).unwrap();
+                let before = k.read(format!("{:04X}:{:04X}", i.vid, i.pid)).unwrap();
+                let actions = [
+                    Action::Rate(before.rate.unwrap()),
+                    Action::Sleep(before.sleep_seconds.unwrap()),
+                    Action::Light(before.light.unwrap()),
+                ];
                 for action in actions {
                     thread::sleep(Duration::from_millis(450));
-                    let result=k.apply(action);
-                    let line=format!("{name} {action:?}: {result:?}");println!("{line}");results.push(line);
+                    let result = k.apply(action);
+                    let line = format!("{name} {action:?}: {result:?}");
+                    println!("{line}");
+                    results.push(line);
                 }
             }
         }
-        for result in &results {println!("{result}");}
-        assert!(results.iter().all(|r|r.ends_with("Ok(())")),"Hardware read-back failed");
+        for result in &results {
+            println!("{result}");
+        }
+        assert!(
+            results.iter().all(|r| r.ends_with("Ok(())")),
+            "Hardware read-back failed"
+        );
+    }
+    #[test]
+    #[ignore = "Requires awake physical devices; writes only current setting values"]
+    fn live_extended_readback() {
+        let all = hid::enumerate().unwrap();
+        for (model, spec) in REGISTRY.iter().enumerate() {
+            let interface = all
+                .iter()
+                .find(|i| matches(i, model))
+                .expect("Required device missing");
+            let session = crate::adapters::open(model, interface).unwrap();
+            let state = session.read().unwrap();
+            let mut actions = Vec::new();
+            if let Some(stage) = state.active_stage {
+                actions.push(Action::Stage(stage));
+            }
+            for setting in spec.advanced {
+                if let Some(value) = state.tuning.get(&setting.key) {
+                    actions.push(Action::Tune(setting.key, *value));
+                }
+            }
+            assert!(!actions.is_empty());
+            for action in actions {
+                let result = session.apply(action);
+                println!("{} {:?}: {:?}", spec.name, action, result);
+                assert!(result.is_ok());
+                thread::sleep(Duration::from_millis(250));
+            }
+        }
+    }
+    #[test]
+    #[ignore = "Changes then restores settings on awake physical devices"]
+    fn live_feature_roundtrips_restore_original_values() {
+        fn roundtrip(
+            session: &dyn crate::adapters::DeviceSession,
+            change: Action,
+            original: Action,
+        ) {
+            let changed = session.apply(change);
+            let restored = session.apply(original);
+            println!(
+                "roundtrip {:?}: {:?}; restore {:?}: {:?}",
+                change, changed, original, restored
+            );
+            assert!(changed.is_ok() && restored.is_ok());
+        }
+        let all = hid::enumerate().unwrap();
+        for (model, spec) in REGISTRY.iter().enumerate() {
+            let interface = all.iter().find(|i| matches(i, model)).unwrap();
+            let session = crate::adapters::open(model, interface).unwrap();
+            let before = session.read().unwrap();
+            if let Some(dpi) = before.dpi {
+                roundtrip(
+                    &*session,
+                    Action::Dpi(if dpi == 1600 { 1650 } else { 1600 }),
+                    Action::Dpi(dpi),
+                );
+            }
+            if let Some(stage) = before.active_stage {
+                let other = if stage == 0 { 1 } else { 0 };
+                roundtrip(&*session, Action::Stage(other), Action::Stage(stage));
+            }
+            for setting in spec.advanced {
+                if let Some(value) = before.tuning.get(&setting.key) {
+                    if let Some((other, _)) = setting.choices.iter().find(|(v, _)| v != value) {
+                        roundtrip(
+                            &*session,
+                            Action::Tune(setting.key, *other),
+                            Action::Tune(setting.key, *value),
+                        );
+                    }
+                }
+            }
+            if spec.adapter == Adapter::CompxKeyboard {
+                let original = before.light.unwrap();
+                let enable = session.apply(Action::Light(2));
+                let checked = (|| -> Result<()> {
+                    enable?;
+                    let active = session.read()?;
+                    for key in [
+                        crate::model::Tuning::Brightness,
+                        crate::model::Tuning::Speed,
+                    ] {
+                        let value = *active.tuning.get(&key).ok_or("灯效未返回参数")?;
+                        let other = if value == 1 { 2 } else { 1 };
+                        let changed = session.apply(Action::Tune(key, other));
+                        let restored = session.apply(Action::Tune(key, value));
+                        println!(
+                            "keyboard {:?} {} -> {}: {:?}; restore: {:?}",
+                            key, value, other, changed, restored
+                        );
+                        changed?;
+                        restored?;
+                    }
+                    Ok(())
+                })();
+                let restore = session.apply(Action::Light(original));
+                assert!(checked.is_ok(), "{checked:?}");
+                assert!(restore.is_ok(), "{restore:?}");
+            }
+        }
+    }
+    struct FakeSession {
+        state: State,
+        writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+    impl crate::adapters::DeviceSession for FakeSession {
+        fn read(&self) -> Result<State> {
+            Ok(self.state.clone())
+        }
+        fn apply(&self, _: Action) -> Result<()> {
+            self.writes
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                Err("read-back mismatch".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+    #[test]
+    fn unplug_keeps_cached_battery_but_disables_settings() {
+        let mut previous = Snapshot::default();
+        previous.devices[0].fresh = true;
+        previous.devices[0].percent = Some(90);
+        previous.devices[0].dpi = Some(1600);
+        let (next, result) = refresh_with(&previous, None, Ok(vec![]), |_, _| {
+            panic!("must not open absent device")
+        });
+        assert!(result.is_ok());
+        assert_eq!(next.devices[0].percent, Some(90));
+        assert!(!next.devices[0].fresh);
+        assert!(!next.devices[0].present);
+        assert_eq!(next.devices[0].dpi, None);
+    }
+    #[test]
+    fn failed_write_is_reported_while_fresh_status_is_kept() {
+        let i = Interface {
+            path: "mi_00".into(),
+            vid: 0x1532,
+            pid: 0xb7,
+            usage_page: 1,
+            usage: 2,
+            feature_len: 91,
+            input_len: 0,
+            output_len: 0,
+            product: "test".into(),
+        };
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = writes.clone();
+        let (next, result) = refresh_with(
+            &Snapshot::default(),
+            Some((0, Action::Dpi(1600))),
+            Ok(vec![i]),
+            move |_, _| {
+                Ok(Box::new(FakeSession {
+                    state: State {
+                        present: true,
+                        fresh: true,
+                        percent: Some(90),
+                        dpi: Some(1600),
+                        ..State::default()
+                    },
+                    writes: counter.clone(),
+                    fail: true,
+                }))
+            },
+        );
+        assert!(result.is_err());
+        assert!(next.devices[0].fresh);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(!next.devices[1].present);
     }
     #[test]
     fn notification_cycle_ignores_stale_and_charging() {

@@ -1,6 +1,8 @@
 use crate::{
-    backend::{self, Action, Snapshot, NAMES},
+    backend::{self, Action, Snapshot},
+    devices::{Kind, LIGHTS, REGISTRY},
     hid::wide,
+    paint::{self, Canvas, Images, R, *},
 };
 use std::{
     mem::{size_of, zeroed},
@@ -10,58 +12,74 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
+    Graphics::{Dwm::*, Gdi::*},
     System::{LibraryLoader::*, Threading::*},
-    UI::{
-        Controls::*, HiDpi::*, Input::KeyboardAndMouse::EnableWindow, Shell::*,
-        WindowsAndMessaging::*,
-    },
+    UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
 const DONE: u32 = WM_APP + 1;
 const TRAY: u32 = WM_APP + 2;
-const REFRESH: usize = 100;
-const DEVICE: usize = 101;
-const DPI_EDIT: usize = 102;
-const DPI_APPLY: usize = 103;
-const RATE: usize = 104;
-const RATE_APPLY: usize = 105;
-const SLEEP: usize = 106;
-const SLEEP_APPLY: usize = 107;
-const LIGHT: usize = 108;
-const LIGHT_APPLY: usize = 109;
-const INTERVAL: usize = 110;
-const THRESHOLD: usize = 111;
-const NOTICES: usize = 112;
-const PREFS: usize = 113;
-const DIAGNOSE: usize = 114;
-const EXIT: usize = 115;
-const INK: u32 = 0x00352a21;
-const MUTED: u32 = 0x0087796a;
-const BG: u32 = 0x00faf7f3;
-const ACCENT: u32 = 0x00b87d21;
-const GREEN: u32 = 0x006c8a18;
-const BORDER: u32 = 0x00e8e2dc;
-const SS_LEFT: u32 = 0;
+const OPEN: u32 = WM_APP + 3;
+const BATTERY: u32 = WM_APP + 4;
+const CHIP: i32 = 1;
+const GHOST: i32 = 3;
+const CARD: i32 = 4;
+type WorkResult = (Snapshot, Result<(), String>);
 
-type WorkResult = (Snapshot, std::result::Result<(), String>);
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Page {
+    Home,
+    Device(usize),
+    Preferences,
+}
+#[derive(Clone, Copy, Debug)]
+enum Command {
+    Home,
+    Device(usize),
+    Refresh,
+    Close,
+    Minimize,
+    Quit,
+    Prefs,
+    Setting(Action),
+    Step(i32),
+    Interval(u32),
+    Threshold(u8),
+    Notices,
+    Diagnose,
+    Advanced(bool),
+    HomePage(i32),
+}
+struct Button {
+    hwnd: HWND,
+    command: Command,
+    label: String,
+    rect: R,
+    style: i32,
+}
 struct App {
     snapshot: Snapshot,
+    page: Page,
+    advanced: bool,
+    home_page: usize,
+    controls: Vec<Button>,
     pending: Option<Receiver<WorkResult>>,
-    controls: Vec<(usize, HWND)>,
-    cards: Vec<HWND>,
-    detail: HWND,
-    status: HWND,
-    font: HFONT,
+    queued: std::collections::VecDeque<(usize, Action)>,
+    inflight: Option<(usize, Action)>,
+    preview_dpi: Option<u16>,
     dpi: u32,
-    tray_icons: [HICON; 3],
-    tray_added: [bool; 3],
+    width: i32,
+    height: i32,
+    slider: R,
+    dragging: bool,
+    status: String,
+    status_error: bool,
+    images: Images,
+    icon: HICON,
+    tray_added: bool,
     taskbar_created: u32,
-    mutex: HANDLE,
-    rates: Vec<u16>,
-    sleeps: Vec<u16>,
-    lights: Vec<u8>,
-    writing: bool,
+    flyout: HWND,
+    main: HWND,
 }
 
 pub fn message(text: &str) {
@@ -74,130 +92,165 @@ pub fn message(text: &str) {
         );
     }
 }
-
-pub fn run(hidden: bool) {
+pub fn run(hidden: bool, battery: bool) {
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let mutex = CreateMutexW(null(), 0, wide("Local\\PeripheralDesk-0.1").as_ptr());
+        let mutex = CreateMutexW(null(), 0, wide("Local\\PeripheralDesk").as_ptr());
         if mutex.is_null() {
             message("无法创建程序实例锁");
             return;
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let existing = FindWindowW(wide("PeripheralDeskWindow").as_ptr(), null());
-            if !existing.is_null() {
-                ShowWindow(existing, SW_RESTORE);
-                SetForegroundWindow(existing);
+            let window = FindWindowW(wide("PeripheralDeskWindow").as_ptr(), null());
+            if !window.is_null() {
+                PostMessageW(window, if battery { BATTERY } else { OPEN }, 0, 0);
             }
             CloseHandle(mutex);
             return;
         }
+        let images = Images::load();
+        let icon = paint::tray_icon();
         let instance = GetModuleHandleW(null());
-        let class = wide("PeripheralDeskWindow");
-        let wc = WNDCLASSEXW {
-            cbSize: size_of::<WNDCLASSEXW>() as u32,
-            lpfnWndProc: Some(window_proc),
-            hInstance: instance,
-            hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-            lpszClassName: class.as_ptr(),
-            hIcon: LoadIconW(null_mut(), IDI_APPLICATION),
-            ..zeroed()
-        };
-        RegisterClassExW(&wc);
+        for (name, proc) in [
+            (
+                "PeripheralDeskWindow",
+                Some(window_proc as unsafe extern "system" fn(_, _, _, _) -> _),
+            ),
+            (
+                "PeripheralDeskBattery",
+                Some(flyout_proc as unsafe extern "system" fn(_, _, _, _) -> _),
+            ),
+        ] {
+            let class = wide(name);
+            let wc = WNDCLASSEXW {
+                cbSize: size_of::<WNDCLASSEXW>() as u32,
+                lpfnWndProc: proc,
+                hInstance: instance,
+                hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+                hIcon: icon,
+                lpszClassName: class.as_ptr(),
+                ..zeroed()
+            };
+            RegisterClassExW(&wc);
+        }
         let mut app = Box::new(App {
             snapshot: Snapshot::load(),
-            pending: None,
+            page: Page::Home,
+            advanced: false,
+            home_page: 0,
             controls: vec![],
-            cards: vec![],
-            detail: null_mut(),
-            status: null_mut(),
-            font: null_mut(),
-            dpi: 96,
-            tray_icons: [null_mut(); 3],
-            tray_added: [false; 3],
+            pending: None,
+            queued: std::collections::VecDeque::new(),
+            inflight: None,
+            preview_dpi: None,
+            dpi: GetDpiForSystem(),
+            width: 1240,
+            height: 860,
+            slider: R::default(),
+            dragging: false,
+            status: "正在读取设备…".into(),
+            status_error: false,
+            images,
+            icon,
+            tray_added: false,
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
-            mutex,
-            rates: vec![],
-            sleeps: vec![],
-            lights: vec![0, 1, 2, 3, 4, 5, 7, 8, 10, 11, 12, 13, 15, 16, 17],
-            writing: false,
+            flyout: null_mut(),
+            main: null_mut(),
         });
+        let dpi = app.dpi;
         let raw = &mut *app as *mut App;
-        let dpi = GetDpiForSystem();
         let hwnd = CreateWindowExW(
             0,
-            class.as_ptr(),
-            wide("Peripheral Desk · 外设控制台").as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+            wide("PeripheralDeskWindow").as_ptr(),
+            wide("Peripheral Desk · 外设控制中心").as_ptr(),
+            WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            (1110 * dpi / 96) as i32,
-            (790 * dpi / 96) as i32,
+            (1240 * dpi / 96) as i32,
+            (860 * dpi / 96) as i32,
             null_mut(),
             null_mut(),
             instance,
             raw as _,
         );
         if hwnd.is_null() {
-            CloseHandle(app.mutex);
-            message("创建窗口失败");
+            CloseHandle(mutex);
+            message("无法创建窗口");
             return;
         }
-        if !hidden {
+        app.main = hwnd;
+        let dark = 1i32;
+        DwmSetWindowAttribute(hwnd, 20, &dark as *const _ as _, 4);
+        let corner = 2i32;
+        DwmSetWindowAttribute(hwnd, 33, &corner as *const _ as _, 4);
+        if !hidden && !battery {
             ShowWindow(hwnd, SW_SHOW);
+        }
+        if battery {
+            PostMessageW(hwnd, BATTERY, 0, 0);
         }
         let mut msg: MSG = zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            if msg.message == WM_KEYDOWN
+                && msg.wParam == b'B' as usize
+                && GetKeyState(VK_CONTROL as i32) < 0
+            {
+                SendMessageW(hwnd, BATTERY, 0, 0);
+                continue;
+            }
             if IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
+        DestroyIcon(icon);
+        CloseHandle(mutex);
     }
 }
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_NCCREATE {
-        let cs = &*(l as *const CREATESTRUCTW);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, cs.lpCreateParams as isize);
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_USERDATA,
+            (*(l as *const CREATESTRUCTW)).lpCreateParams as isize,
+        );
         return DefWindowProcW(hwnd, msg, w, l);
     }
     let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, w, l);
     }
-    let app = &mut *ptr;
-    if msg == app.taskbar_created {
-        app.tray_added = [false; 3];
-        app.trays(hwnd);
+    let a = &mut *ptr;
+    if msg == a.taskbar_created {
+        a.tray_added = false;
+        a.tray(hwnd);
         return 0;
     }
     match msg {
         WM_CREATE => {
-            app.dpi = GetDpiForWindow(hwnd);
-            app.init(hwnd);
-            app.layout(hwnd);
-            app.populate();
-            app.render();
-            SetTimer(hwnd, 1, app.snapshot.interval * 1000, None);
-            app.begin(hwnd, None);
+            a.main = hwnd;
+            a.dpi = GetDpiForWindow(hwnd);
+            a.layout(hwnd);
+            SetTimer(hwnd, 1, a.snapshot.interval * 1000, None);
+            a.tray(hwnd);
+            a.begin(hwnd, None);
             0
         }
         WM_SIZE => {
-            app.layout(hwnd);
+            a.layout(hwnd);
             InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_GETMINMAXINFO => {
             let m = &mut *(l as *mut MINMAXINFO);
-            m.ptMinTrackSize.x = app.px(1040);
-            m.ptMinTrackSize.y = app.px(760);
+            m.ptMinTrackSize.x = a.px(1080);
+            m.ptMinTrackSize.y = a.px(820);
             0
         }
         WM_DPICHANGED => {
-            app.dpi = (w & 0xffff) as u32;
+            a.dpi = (w & 65535) as u32;
             let r = &*(l as *const RECT);
-            app.reset_font();
             SetWindowPos(
                 hwnd,
                 null_mut(),
@@ -207,120 +260,159 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 r.bottom - r.top,
                 SWP_NOZORDER | SWP_NOACTIVATE,
             );
+            a.layout(hwnd);
             0
         }
-        WM_PAINT => {
-            app.paint(hwnd);
-            0
+        WM_NCHITTEST => {
+            let original = DefWindowProcW(hwnd, msg, w, l);
+            if original != HTCLIENT as isize {
+                return original;
+            }
+            let mut p = POINT {
+                x: l as i16 as i32,
+                y: (l >> 16) as i16 as i32,
+            };
+            ScreenToClient(hwnd, &mut p);
+            let x = a.logical(p.x);
+            let y = a.logical(p.y);
+            if y < 62 && !a.controls.iter().any(|b| b.rect.contains(x, y)) {
+                HTCAPTION as isize
+            } else {
+                HTCLIENT as isize
+            }
         }
         WM_ERASEBKGND => 1,
-        WM_CTLCOLORSTATIC => {
-            let dc = w as HDC;
-            SetTextColor(dc, INK);
-            SetBkMode(dc, TRANSPARENT as i32);
-            SetDCBrushColor(
-                dc,
-                if app.cards.contains(&(l as HWND)) || l as HWND == app.detail {
-                    0xffffff
-                } else {
-                    BG
-                },
-            );
-            GetStockObject(DC_BRUSH) as isize
+        WM_PAINT => {
+            a.paint(hwnd);
+            0
         }
         WM_DRAWITEM => {
-            app.draw_button(&*(l as *const DRAWITEMSTRUCT));
+            a.draw_button(&*(l as *const DRAWITEMSTRUCT));
             1
         }
+        WM_COMMAND => {
+            if (w >> 16) & 65535 == BN_CLICKED as usize {
+                if let Some(c) = a
+                    .controls
+                    .iter()
+                    .find(|b| b.hwnd == l as HWND)
+                    .map(|b| b.command)
+                {
+                    a.command(hwnd, c);
+                }
+            }
+            0
+        }
         WM_TIMER if w == 1 => {
-            app.begin(hwnd, None);
+            if a.queued.is_empty() {
+                a.begin(hwnd, None);
+            }
+            0
+        }
+        WM_TIMER if w == 2 => {
+            if a.pending.is_none() {
+                KillTimer(hwnd, 2);
+                if let Some(action) = a.queued.pop_front() {
+                    a.begin(hwnd, Some(action));
+                }
+            }
             0
         }
         DONE => {
-            app.complete(hwnd);
+            a.complete(hwnd);
             0
         }
-        WM_COMMAND => {
-            let id = w & 0xffff;
-            match id {
-                REFRESH => app.begin(hwnd, None),
-                DEVICE if (w >> 16) & 0xffff == CBN_SELCHANGE as usize => {
-                    app.populate();
-                    app.render();
-                }
-                DPI_APPLY | RATE_APPLY | SLEEP_APPLY | LIGHT_APPLY => app.apply(hwnd, id),
-                PREFS => app.preferences(hwnd),
-                DIAGNOSE => app.diagnose(),
-                EXIT => {
-                    app.quit(hwnd);
-                }
-                _ => {}
+        OPEN => {
+            let page = if w > 0 && w <= REGISTRY.len() {
+                Page::Device(w - 1)
+            } else {
+                Page::Home
+            };
+            a.navigate(hwnd, page);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+            0
+        }
+        BATTERY => {
+            a.show_battery(hwnd);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let (x, y) = a.mouse(l);
+            if a.slider.contains(x, y) && a.can_adjust() {
+                a.dragging = true;
+                SetCapture(hwnd);
+                a.slide(hwnd, x);
             }
+            0
+        }
+        WM_MOUSEMOVE => {
+            if a.dragging {
+                let (x, _) = a.mouse(l);
+                a.slide(hwnd, x);
+            }
+            0
+        }
+        WM_LBUTTONUP => {
+            if a.dragging {
+                a.dragging = false;
+                ReleaseCapture();
+            }
+            0
+        }
+        WM_CAPTURECHANGED => {
+            a.dragging = false;
+            0
+        }
+        WM_MOUSEWHEEL => {
+            if let Page::Device(m) = a.page {
+                if a.can_adjust() && REGISTRY[m].kind == Kind::Mouse {
+                    let mut p = POINT {
+                        x: l as i16 as i32,
+                        y: (l >> 16) as i16 as i32,
+                    };
+                    ScreenToClient(hwnd, &mut p);
+                    if a.slider.contains(a.logical(p.x), a.logical(p.y)) {
+                        a.step(hwnd, if (w >> 16) as i16 > 0 { 50 } else { -50 });
+                    }
+                }
+            }
+            0
+        }
+        WM_KEYDOWN if w == b'B' as usize && GetKeyState(VK_CONTROL as i32) < 0 => {
+            a.show_battery(hwnd);
+            0
+        }
+        WM_KEYDOWN if w == VK_ESCAPE as usize => {
+            a.navigate(hwnd, Page::Home);
             0
         }
         TRAY => {
             match l as u32 {
-                WM_LBUTTONUP => {
-                    ShowWindow(hwnd, SW_RESTORE);
-                    SetForegroundWindow(hwnd);
-                }
-                WM_LBUTTONDBLCLK => app.begin(hwnd, None),
-                WM_RBUTTONUP => {
-                    let menu = CreatePopupMenu();
-                    for (id, label) in [(201, "打开面板"), (202, "立即刷新"), (203, "退出程序")]
-                    {
-                        AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
-                    }
-                    let mut p = zeroed();
-                    GetCursorPos(&mut p);
-                    SetForegroundWindow(hwnd);
-                    let cmd = TrackPopupMenu(
-                        menu,
-                        TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                        p.x,
-                        p.y,
-                        0,
-                        hwnd,
-                        null(),
-                    );
-                    DestroyMenu(menu);
-                    match cmd {
-                        201 => {
-                            ShowWindow(hwnd, SW_RESTORE);
-                        }
-                        202 => app.begin(hwnd, None),
-                        203 => {
-                            app.quit(hwnd);
-                        }
-                        _ => {}
-                    }
-                    PostMessageW(hwnd, WM_NULL, 0, 0);
-                }
+                WM_LBUTTONUP => a.show_battery(hwnd),
+                WM_RBUTTONUP => a.menu(hwnd),
                 _ => {}
             }
             0
         }
         WM_CLOSE => {
+            if !a.queued.is_empty() {
+                a.set_status("待保存的设置将在后台完成", false);
+            }
             ShowWindow(hwnd, SW_HIDE);
             0
         }
         WM_DESTROY => {
             KillTimer(hwnd, 1);
-            for id in 0..3 {
-                let mut n: NOTIFYICONDATAW = zeroed();
-                n.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-                n.hWnd = hwnd;
-                n.uID = id as u32 + 1;
-                Shell_NotifyIconW(NIM_DELETE, &n);
-                if !app.tray_icons[id].is_null() {
-                    DestroyIcon(app.tray_icons[id]);
-                }
+            KillTimer(hwnd, 2);
+            if !a.flyout.is_null() {
+                DestroyWindow(a.flyout);
             }
-            if let Err(e) = app.snapshot.save() {
+            let n = tray_data(hwnd);
+            Shell_NotifyIconW(NIM_DELETE, &n);
+            if let Err(e) = a.snapshot.save() {
                 message(&format!("保存偏好失败：{e}"));
             }
-            DeleteObject(app.font);
-            CloseHandle(app.mutex);
             PostQuitMessage(0);
             0
         }
@@ -333,391 +425,449 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
 }
 
 impl App {
-    unsafe fn quit(&self,hwnd:HWND) {
-        if self.pending.is_some() && self.writing {
-            self.set(self.status,"正在保存设备设置，请等待写入完成后退出");
-        } else {DestroyWindow(hwnd);}
-    }
     fn px(&self, v: i32) -> i32 {
         v * self.dpi as i32 / 96
     }
-    fn get(&self, id: usize) -> HWND {
-        self.controls.iter().find(|(key, _)| *key == id).unwrap().1
+    fn logical(&self, v: i32) -> i32 {
+        v * 96 / self.dpi as i32
     }
-    unsafe fn control(
-        &mut self,
-        parent: HWND,
-        class: &str,
-        text: &str,
-        id: usize,
-        style: u32,
-    ) -> HWND {
-        let c = CreateWindowExW(
+    fn mouse(&self, l: LPARAM) -> (i32, i32) {
+        (
+            self.logical(l as i16 as i32),
+            self.logical((l >> 16) as i16 as i32),
+        )
+    }
+    fn set_status(&mut self, text: &str, error: bool) {
+        self.status = text.into();
+        self.status_error = error;
+    }
+    unsafe fn add(&mut self, hwnd: HWND, label: &str, r: R, style: i32, command: Command) {
+        let h = CreateWindowExW(
             0,
-            wide(class).as_ptr(),
-            wide(text).as_ptr(),
-            WS_CHILD | WS_VISIBLE | style,
-            0,
-            0,
-            0,
-            0,
-            parent,
-            id as HMENU,
+            wide("BUTTON").as_ptr(),
+            wide(label).as_ptr(),
+            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_OWNERDRAW as u32,
+            self.px(r.x),
+            self.px(r.y),
+            self.px(r.w),
+            self.px(r.h),
+            hwnd,
+            (1000 + self.controls.len()) as HMENU,
             GetModuleHandleW(null()),
             null(),
         );
-        SendMessageW(c, WM_SETFONT, self.font as usize, 1);
-        if id > 0 {
-            self.controls.push((id, c));
-        }
-        c
+        SetWindowSubclass(h, Some(button_proc), 1, 0);
+        self.controls.push(Button {
+            hwnd: h,
+            command,
+            label: label.into(),
+            rect: r,
+            style,
+        });
     }
-    unsafe fn reset_font(&mut self) {
-        let previous = self.font;
-        self.font = font(-self.px(14), 400);
-        for (_, c) in &self.controls {
-            SendMessageW(*c, WM_SETFONT, self.font as usize, 1);
-        }
-        for c in &self.cards {
-            SendMessageW(*c, WM_SETFONT, self.font as usize, 1);
-        }
-        for c in [self.detail, self.status] {
-            if !c.is_null() {
-                SendMessageW(c, WM_SETFONT, self.font as usize, 1);
-            }
-        }
-        if !previous.is_null() {
-            DeleteObject(previous);
-        }
-    }
-    unsafe fn init(&mut self, hwnd: HWND) {
-        self.reset_font();
-        for _ in 0..3 {
-            let c = self.control(hwnd, "STATIC", "正在读取…", 0, SS_LEFT);
-            self.cards.push(c);
-        }
-        self.detail = self.control(hwnd, "STATIC", "", 0, SS_LEFT);
-        self.status = self.control(hwnd, "STATIC", "准备就绪", 0, SS_LEFT);
-        self.control(
-            hwnd,
-            "BUTTON",
-            "立即刷新",
-            REFRESH,
-            BS_OWNERDRAW as u32 | WS_TABSTOP,
-        );
-        for id in [DEVICE, RATE, SLEEP, LIGHT, INTERVAL, THRESHOLD] {
-            self.control(
-                hwnd,
-                "COMBOBOX",
-                "",
-                id,
-                CBS_DROPDOWNLIST as u32 | WS_VSCROLL | WS_TABSTOP,
-            );
-        }
-        for n in NAMES {
-            SendMessageW(self.get(DEVICE), CB_ADDSTRING, 0, wide(n).as_ptr() as isize);
-        }
-        SendMessageW(self.get(DEVICE), CB_SETCURSEL, 0, 0);
-        self.control(
-            hwnd,
-            "EDIT",
-            "",
-            DPI_EDIT,
-            WS_BORDER | ES_NUMBER as u32 | ES_AUTOHSCROLL as u32 | WS_TABSTOP,
-        );
-        for (id, title) in [
-            (DPI_APPLY, "应用 DPI"),
-            (RATE_APPLY, "应用回报率"),
-            (SLEEP_APPLY, "应用休眠"),
-            (LIGHT_APPLY, "应用灯效"),
-            (PREFS, "保存偏好"),
-            (DIAGNOSE, "导出诊断"),
-            (EXIT, "退出程序"),
-        ] {
-            self.control(hwnd, "BUTTON", title, id, BS_OWNERDRAW as u32 | WS_TABSTOP);
-        }
-        self.control(
-            hwnd,
-            "BUTTON",
-            "低电提醒",
-            NOTICES,
-            BS_AUTOCHECKBOX as u32 | WS_TABSTOP,
-        );
-        SendMessageW(
-            self.get(NOTICES),
-            BM_SETCHECK,
-            if self.snapshot.notices {
-                BST_CHECKED
-            } else {
-                BST_UNCHECKED
-            } as usize,
-            0,
-        );
-        for n in [30, 60, 120, 300, 600, 1800] {
-            SendMessageW(
-                self.get(INTERVAL),
-                CB_ADDSTRING,
-                0,
-                wide(&format!("{n} 秒")).as_ptr() as isize,
-            );
-        }
-        SendMessageW(
-            self.get(INTERVAL),
-            CB_SETCURSEL,
-            [30, 60, 120, 300, 600, 1800]
-                .iter()
-                .position(|v| *v == self.snapshot.interval)
-                .unwrap_or(1),
-            0,
-        );
-        for n in [5, 10, 15, 20, 25, 30, 40, 50] {
-            SendMessageW(
-                self.get(THRESHOLD),
-                CB_ADDSTRING,
-                0,
-                wide(&format!("{n} %")).as_ptr() as isize,
-            );
-        }
-        SendMessageW(
-            self.get(THRESHOLD),
-            CB_SETCURSEL,
-            [5, 10, 15, 20, 25, 30, 40, 50]
-                .iter()
-                .position(|v| *v == self.snapshot.threshold)
-                .unwrap_or(3),
-            0,
-        );
-    }
-    unsafe fn place(&self, c: HWND, x: i32, y: i32, w: i32, h: i32) {
-        MoveWindow(c, self.px(x), self.px(y), self.px(w), self.px(h), 1);
-    }
-    unsafe fn layout(&self, hwnd: HWND) {
+    unsafe fn layout(&mut self, hwnd: HWND) {
         let mut r = zeroed();
         GetClientRect(hwnd, &mut r);
-        let width = (r.right * 96 / self.dpi as i32).max(1000);
-        let cw = (width - 80) / 3;
-        self.place(self.get(REFRESH), width - 150, 28, 118, 38);
-        for i in 0..3 {
-            self.place(self.cards[i], 50 + i as i32 * (cw + 16), 186, cw - 36, 88);
+        self.width = self.logical(r.right).max(1000);
+        self.height = self.logical(r.bottom).max(780);
+        for b in self.controls.drain(..) {
+            DestroyWindow(b.hwnd);
         }
-        self.place(self.get(DEVICE), 48, 352, 270, 180);
-        self.place(self.detail, 344, 353, width - 395, 64);
-        let col = (width - 128) / 4;
-        for (i, (edit, apply)) in [
-            (DPI_EDIT, DPI_APPLY),
-            (RATE, RATE_APPLY),
-            (SLEEP, SLEEP_APPLY),
-            (LIGHT, LIGHT_APPLY),
-        ]
-        .iter()
-        .enumerate()
-        {
-            let x = 48 + i as i32 * (col + 16);
-            self.place(
-                self.get(*edit),
-                x,
-                449,
-                col,
-                if *edit == DPI_EDIT { 32 } else { 220 },
-            );
-            self.place(self.get(*apply), x, 492, col, 34);
-        }
-        self.place(self.get(INTERVAL), 135, 610, 118, 160);
-        self.place(self.get(THRESHOLD), 348, 610, 90, 220);
-        self.place(self.get(NOTICES), 465, 612, 120, 30);
-        self.place(self.get(PREFS), width - 420, 608, 112, 36);
-        self.place(self.get(DIAGNOSE), width - 294, 608, 112, 36);
-        self.place(self.get(EXIT), width - 168, 608, 120, 36);
-        self.place(self.status, 34, 682, width - 68, 44);
-    }
-    unsafe fn set(&self, c: HWND, s: &str) {
-        SetWindowTextW(c, wide(s).as_ptr());
-    }
-    unsafe fn selected(&self) -> usize {
-        SendMessageW(self.get(DEVICE), CB_GETCURSEL, 0, 0).clamp(0, 2) as usize
-    }
-    unsafe fn populate(&mut self) {
-        let m = self.selected();
-        let d = &self.snapshot.devices[m];
-        self.rates = if m == 0 {
-            vec![125, 500, 1000]
-        } else if m == 2 {
-            vec![250, 500, 1000]
-        } else if d.wired {
-            vec![125, 500, 1000, 2000, 4000, 8000]
-        } else {
-            vec![125, 500, 1000, 2000, 4000]
-        };
-        self.sleeps = if m == 0 {
-            vec![60, 120, 180, 300, 600, 900]
-        } else if m == 2 {
-            vec![60, 120, 300, 600, 900, 1200]
-        } else {
-            vec![60, 120, 300, 600, 900, 1800, 3600]
-        };
-        SendMessageW(self.get(RATE), CB_RESETCONTENT, 0, 0);
-        for v in &self.rates {
-            SendMessageW(
-                self.get(RATE),
-                CB_ADDSTRING,
-                0,
-                wide(&format!("{v} Hz")).as_ptr() as isize,
-            );
-        }
-        SendMessageW(
-            self.get(RATE),
-            CB_SETCURSEL,
-            self.rates
-                .iter()
-                .position(|v| Some(*v) == d.rate)
-                .unwrap_or(2),
-            0,
+        self.slider = R::default();
+        let w = self.width;
+        let h = self.height;
+        self.add(
+            hwnd,
+            "—",
+            R::new(w - 98, 15, 34, 32),
+            GHOST,
+            Command::Minimize,
         );
-        SendMessageW(self.get(SLEEP), CB_RESETCONTENT, 0, 0);
-        for v in &self.sleeps {
-            SendMessageW(
-                self.get(SLEEP),
-                CB_ADDSTRING,
-                0,
-                wide(&format!("{} 分钟", v / 60)).as_ptr() as isize,
-            );
-        }
-        SendMessageW(
-            self.get(SLEEP),
-            CB_SETCURSEL,
-            self.sleeps
-                .iter()
-                .position(|v| Some(*v) == d.sleep_seconds)
-                .unwrap_or(0),
-            0,
-        );
-        SendMessageW(self.get(LIGHT), CB_RESETCONTENT, 0, 0);
-        for s in [
-            "关闭",
-            "常亮",
-            "呼吸",
-            "彩虹",
-            "踏雪无痕",
-            "雨中漫步",
-            "涟漪",
-            "繁星",
-            "川流",
-            "潮汐",
-            "如影随形",
-            "正弦波",
-            "风车",
-            "瀑布",
-            "花开",
-        ] {
-            SendMessageW(self.get(LIGHT), CB_ADDSTRING, 0, wide(s).as_ptr() as isize);
-        }
-        SendMessageW(
-            self.get(LIGHT),
-            CB_SETCURSEL,
-            self.lights
-                .iter()
-                .position(|v| Some(*v) == d.light)
-                .unwrap_or(0),
-            0,
-        );
-        self.set(
-            self.get(DPI_EDIT),
-            &d.dpi.map(|v| v.to_string()).unwrap_or_default(),
-        );
-    }
-    unsafe fn render(&self) {
-        for (i, d) in self.snapshot.devices.iter().enumerate() {
-            let charge = match d.charging {
-                Some(true) => "充电中",
-                Some(false) => "未充电",
-                None => "充电状态未知",
-            };
-            let link = if !d.present {
-                "未连接"
-            } else if d.wired {
-                "USB 有线"
-            } else {
-                "2.4G 无线"
-            };
-            let age = if d.updated == 0 {
-                "尚无有效读数".into()
-            } else {
-                format!("{} 秒前成功读取", backend::now().saturating_sub(d.updated))
-            };
-            self.set(
-                self.cards[i],
-                &if d.fresh {
-                    format!("{link} · {charge}\r\n{age}\r\n{}", d.identity)
-                } else {
-                    format!(
-                        "{link}\r\n{}\r\n{age}",
-                        if d.percent.is_some() {
-                            "上次电量，当前未确认"
-                        } else {
-                            "等待有效电量"
+        self.add(hwnd, "×", R::new(w - 56, 15, 34, 32), GHOST, Command::Close);
+        match self.page {
+            Page::Home => {
+                self.add(
+                    hwnd,
+                    "重新读取",
+                    R::new(w - 154, 102, 122, 40),
+                    GHOST,
+                    Command::Refresh,
+                );
+                let cols = (REGISTRY.len() as i32).clamp(1, 3);
+                let cw = (w - 64 - 20 * (cols - 1)) / cols;
+                let card_h = (h - 275).min(530);
+                for (slot, (index, spec)) in REGISTRY
+                    .iter()
+                    .enumerate()
+                    .skip(self.home_page * 3)
+                    .take(3)
+                    .enumerate()
+                {
+                    let x = 32 + slot as i32 * (cw + 20);
+                    let y = 176;
+                    self.add(
+                        hwnd,
+                        spec.name,
+                        R::new(x, y, cw, card_h),
+                        CARD,
+                        Command::Device(index),
+                    );
+                }
+                if REGISTRY.len() > 3 {
+                    self.add(
+                        hwnd,
+                        "上一页",
+                        R::new(w / 2 - 110, h - 62, 90, 38),
+                        GHOST,
+                        Command::HomePage(-1),
+                    );
+                    self.add(
+                        hwnd,
+                        "下一页",
+                        R::new(w / 2 + 20, h - 62, 90, 38),
+                        GHOST,
+                        Command::HomePage(1),
+                    );
+                }
+                self.add(
+                    hwnd,
+                    "工具设置",
+                    R::new(32, h - 62, 112, 38),
+                    GHOST,
+                    Command::Prefs,
+                );
+                self.add(
+                    hwnd,
+                    "退出程序",
+                    R::new(w - 144, h - 62, 112, 38),
+                    GHOST,
+                    Command::Quit,
+                );
+            }
+            Page::Device(m) => {
+                self.add(
+                    hwnd,
+                    "‹  我的设备",
+                    R::new(28, 16, 133, 34),
+                    GHOST,
+                    Command::Home,
+                );
+                let rx = 394;
+                let rw = w - rx - 28;
+                let cx = rx + 30;
+                if !REGISTRY[m].advanced.is_empty() {
+                    self.add(
+                        hwnd,
+                        "基础设置",
+                        R::new(rx + 10, 17, 112, 34),
+                        GHOST,
+                        Command::Advanced(false),
+                    );
+                    self.add(
+                        hwnd,
+                        "高级设置",
+                        R::new(rx + 132, 17, 112, 34),
+                        GHOST,
+                        Command::Advanced(true),
+                    );
+                }
+                if self.advanced && !REGISTRY[m].advanced.is_empty() {
+                    for (row, setting) in REGISTRY[m].advanced.iter().enumerate() {
+                        let y = 172 + row as i32 * 78;
+                        let bw = ((rw - 280 - 6 * (setting.choices.len() as i32 - 1))
+                            / setting.choices.len() as i32)
+                            .clamp(28, 88);
+                        let x = rx + rw - 30 - (bw + 6) * setting.choices.len() as i32 + 6;
+                        for (i, (value, label)) in setting.choices.iter().enumerate() {
+                            self.add(
+                                hwnd,
+                                label,
+                                R::new(x + i as i32 * (bw + 6), y, bw, 35),
+                                CHIP,
+                                Command::Setting(Action::Tune(setting.key, *value)),
+                            );
                         }
-                    )
-                },
-            );
+                    }
+                } else if let Some((min, max)) = REGISTRY[m].dpi_range {
+                    let stages = self.snapshot.devices[m].dpi_stages.clone();
+                    let count = if stages.is_empty() { 5 } else { stages.len() };
+                    let bw = (rw - 60 - 10 * (count as i32 - 1)) / count as i32;
+                    for i in 0..count {
+                        let (label, action) = if stages.is_empty() {
+                            let v = [400, 800, 1200, 1600, 3200][i];
+                            (format!("{v}"), Action::Dpi(v))
+                        } else {
+                            (format!("{} · {}", i + 1, stages[i]), Action::Stage(i as u8))
+                        };
+                        self.add(
+                            hwnd,
+                            &label,
+                            R::new(cx + i as i32 * (bw + 10), 178, bw, 38),
+                            CHIP,
+                            Command::Setting(action),
+                        );
+                    }
+                    self.slider = R::new(cx, 239, rw - 158, 24);
+                    self.add(
+                        hwnd,
+                        "−",
+                        R::new(rx + rw - 112, 232, 34, 34),
+                        GHOST,
+                        Command::Step(-50),
+                    );
+                    self.add(
+                        hwnd,
+                        "+",
+                        R::new(rx + rw - 68, 232, 34, 34),
+                        GHOST,
+                        Command::Step(50),
+                    );
+                    let _ = (min, max);
+                } else {
+                    let bw = (rw - 60 - 40) / 5;
+                    for (i, (value, label)) in LIGHTS.iter().enumerate() {
+                        self.add(
+                            hwnd,
+                            label,
+                            R::new(
+                                cx + (i % 5) as i32 * (bw + 10),
+                                172 + (i / 5) as i32 * 48,
+                                bw,
+                                36,
+                            ),
+                            CHIP,
+                            Command::Setting(Action::Light(*value)),
+                        );
+                    }
+                }
+                if !self.advanced || REGISTRY[m].advanced.is_empty() {
+                    let rates = REGISTRY[m].rates_for(self.snapshot.devices[m].wired);
+                    let gap = 8;
+                    let bw =
+                        ((rw - 200 - gap * (rates.len() as i32 - 1)) / rates.len() as i32).min(100);
+                    let x = rx + rw - 30 - (bw + gap) * rates.len() as i32 + gap;
+                    for (i, rate) in rates.iter().enumerate() {
+                        self.add(
+                            hwnd,
+                            &format!("{rate} Hz"),
+                            R::new(x + i as i32 * (bw + gap), 358, bw, 37),
+                            CHIP,
+                            Command::Setting(Action::Rate(*rate)),
+                        );
+                    }
+                    let sleeps = REGISTRY[m].sleeps;
+                    let bw =
+                        ((rw - 200 - 6 * (sleeps.len() as i32 - 1)) / sleeps.len() as i32).min(85);
+                    let x = rx + rw - 30 - (bw + 6) * sleeps.len() as i32 + 6;
+                    for (i, sec) in sleeps.iter().enumerate() {
+                        self.add(
+                            hwnd,
+                            &format!("{} 分", sec / 60),
+                            R::new(x + i as i32 * (bw + 6), 425, bw, 35),
+                            CHIP,
+                            Command::Setting(Action::Sleep(*sec)),
+                        );
+                    }
+                }
+                self.add(
+                    hwnd,
+                    "重新读取",
+                    R::new(w - 150, h - 61, 122, 39),
+                    GHOST,
+                    Command::Refresh,
+                );
+                self.add(
+                    hwnd,
+                    "设备诊断",
+                    R::new(w - 280, h - 61, 118, 39),
+                    GHOST,
+                    Command::Diagnose,
+                );
+            }
+            Page::Preferences => {
+                self.add(
+                    hwnd,
+                    "‹  我的设备",
+                    R::new(28, 16, 133, 34),
+                    GHOST,
+                    Command::Home,
+                );
+                for (i, value) in [30, 60, 120, 300, 600, 1800].iter().enumerate() {
+                    self.add(
+                        hwnd,
+                        &format!("{value} 秒"),
+                        R::new(330 + i as i32 * 116, 214, 104, 40),
+                        CHIP,
+                        Command::Interval(*value),
+                    );
+                }
+                for (i, value) in [5, 10, 15, 20, 25, 30, 40, 50].iter().enumerate() {
+                    self.add(
+                        hwnd,
+                        &format!("{value}%"),
+                        R::new(330 + i as i32 * 84, 307, 72, 40),
+                        CHIP,
+                        Command::Threshold(*value),
+                    );
+                }
+                self.add(
+                    hwnd,
+                    "启用低电提醒",
+                    R::new(330, 400, 180, 40),
+                    CHIP,
+                    Command::Notices,
+                );
+                self.add(
+                    hwnd,
+                    "导出设备诊断",
+                    R::new(330, 492, 180, 40),
+                    GHOST,
+                    Command::Diagnose,
+                );
+            }
         }
-        let m = self.selected();
-        let d = &self.snapshot.devices[m];
-        let enabled = d.fresh && self.pending.is_none();
-        for id in [
-            DPI_EDIT,
-            DPI_APPLY,
-            RATE,
-            RATE_APPLY,
-            SLEEP,
-            SLEEP_APPLY,
-            LIGHT,
-            LIGHT_APPLY,
-        ] {
-            let supported = if [DPI_EDIT, DPI_APPLY].contains(&id) {
-                m != 2 && d.dpi.is_some()
-            } else if [LIGHT, LIGHT_APPLY].contains(&id) {
-                m == 2 && d.light.is_some()
-            } else if [RATE, RATE_APPLY].contains(&id) {
-                d.rate.is_some()
-            } else {
-                d.sleep_seconds.is_some()
-            };
-            EnableWindow(self.get(id), (enabled && supported) as i32);
+        self.render(hwnd);
+    }
+    unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
+        self.page = page;
+        self.advanced = false;
+        self.preview_dpi = None;
+        self.layout(hwnd);
+        InvalidateRect(hwnd, null(), 0);
+    }
+    fn can_adjust(&self) -> bool {
+        matches!(self.page,Page::Device(m)if self.snapshot.devices[m].fresh)
+            && self.pending.is_none()
+    }
+    fn value(&self, m: usize) -> Option<u16> {
+        self.queued
+            .iter()
+            .rev()
+            .chain(self.inflight.iter())
+            .find_map(|(id, a)| {
+                if *id == m {
+                    if let Action::Dpi(v) = a {
+                        return Some(*v);
+                    }
+                }
+                None
+            })
+            .or(self.snapshot.devices[m].dpi)
+    }
+    unsafe fn schedule(&mut self, hwnd: HWND, action: Action) {
+        if let Page::Device(m) = self.page {
+            if !self.can_adjust() {
+                return;
+            }
+            if let Action::Dpi(v) = action {
+                self.preview_dpi = Some(v);
+            }
+            coalesce(&mut self.queued, m, action);
+            SetTimer(hwnd, 2, 1500, None);
+            self.set_status("调整将在停止操作 1.5 秒后保存", false);
+            self.render(hwnd);
         }
-        EnableWindow(self.get(REFRESH), self.pending.is_none() as i32);
-        EnableWindow(self.get(DEVICE), self.pending.is_none() as i32);
-        let detail = if !d.error.is_empty() {
-            d.error.clone()
-        } else if !d.settings_error.is_empty() {
-            d.settings_error.clone()
+    }
+    unsafe fn slide(&mut self, hwnd: HWND, x: i32) {
+        if let Page::Device(m) = self.page {
+            if let Some((min, max)) = REGISTRY[m].dpi_range {
+                let ratio = ((x - self.slider.x) as f32 / self.slider.w as f32).clamp(0., 1.);
+                let value = ((min as f32 + (max - min) as f32 * ratio) / 50.).round() as u16 * 50;
+                self.schedule(hwnd, Action::Dpi(value.clamp(min, max)));
+            }
+        }
+    }
+    unsafe fn step(&mut self, hwnd: HWND, delta: i32) {
+        if let Page::Device(m) = self.page {
+            if let (Some((min, max)), Some(value)) = (REGISTRY[m].dpi_range, self.value(m)) {
+                self.schedule(
+                    hwnd,
+                    Action::Dpi((value as i32 + delta).clamp(min as i32, max as i32) as u16),
+                );
+            }
+        }
+    }
+    unsafe fn command(&mut self, hwnd: HWND, command: Command) {
+        match command {
+            Command::Advanced(value) => {
+                self.advanced = value;
+                self.layout(hwnd);
+            }
+            Command::HomePage(delta) => {
+                self.home_page = (self.home_page as i32 + delta)
+                    .clamp(0, (REGISTRY.len().div_ceil(3) - 1) as i32)
+                    as usize;
+                self.layout(hwnd);
+            }
+            Command::Home => self.navigate(hwnd, Page::Home),
+            Command::Device(m) => self.navigate(hwnd, Page::Device(m)),
+            Command::Prefs => self.navigate(hwnd, Page::Preferences),
+            Command::Minimize => {
+                ShowWindow(hwnd, SW_MINIMIZE);
+            }
+            Command::Close => {
+                ShowWindow(hwnd, SW_HIDE);
+            }
+            Command::Quit => self.quit(hwnd),
+            Command::Refresh => self.begin(hwnd, None),
+            Command::Setting(a) => self.schedule(hwnd, a),
+            Command::Step(n) => self.step(hwnd, n),
+            Command::Interval(v) => {
+                self.snapshot.interval = v;
+                SetTimer(hwnd, 1, v * 1000, None);
+                self.save_preference(hwnd);
+            }
+            Command::Threshold(v) => {
+                self.snapshot.threshold = v;
+                self.save_preference(hwnd);
+            }
+            Command::Notices => {
+                self.snapshot.notices = !self.snapshot.notices;
+                self.save_preference(hwnd);
+            }
+            Command::Diagnose => {
+                let path = backend::data_path().with_file_name("diagnostics.json");
+                match crate::hid::enumerate()
+                    .and_then(|v| serde_json::to_vec_pretty(&v).map_err(|e| e.to_string()))
+                    .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
+                {
+                    Ok(()) => message(&format!("设备诊断已保存到：\n{}", path.display())),
+                    Err(e) => message(&format!("导出失败：{e}")),
+                }
+            }
+        }
+    }
+    unsafe fn save_preference(&mut self, hwnd: HWND) {
+        match self.snapshot.save() {
+            Ok(()) => self.set_status("工具设置已保存", false),
+            Err(e) => self.set_status(&format!("保存失败：{e}"), true),
+        }
+        self.render(hwnd);
+    }
+    unsafe fn quit(&self, hwnd: HWND) {
+        if self.inflight.is_some() || !self.queued.is_empty() {
+            message("设备设置正在保存，请等待完成后退出。");
         } else {
-            format!(
-                "当前：{} Hz · 休眠 {} 秒",
-                d.rate.map(|v| v.to_string()).unwrap_or_else(|| "—".into()),
-                d.sleep_seconds
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "—".into())
-            )
-        };
-        self.set(self.detail, &detail);
+            DestroyWindow(hwnd);
+        }
     }
     unsafe fn begin(&mut self, hwnd: HWND, action: Option<(usize, Action)>) {
         if self.pending.is_some() {
             return;
         }
-        self.writing = action.is_some();
         let snapshot = self.snapshot.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
-        self.set(
-            self.status,
-            if self.writing {
-                "正在写入并读回核对…"
+        self.inflight = action;
+        self.set_status(
+            if action.is_some() {
+                "正在保存到设备并读回确认…"
             } else {
                 "正在读取设备…"
             },
+            false,
         );
-        self.render();
+        self.render(hwnd);
         let window = hwnd as usize;
         thread::spawn(move || {
             let result = backend::refresh(&snapshot, action);
@@ -730,442 +880,1036 @@ impl App {
         let Some(rx) = self.pending.take() else {
             return;
         };
+        let writing = self.inflight.take().is_some();
         match rx.try_recv() {
-            Ok((mut snapshot, result)) => {
-                snapshot.interval = self.snapshot.interval;
-                snapshot.threshold = self.snapshot.threshold;
-                snapshot.notices = self.snapshot.notices;
-                self.snapshot = snapshot;
-                let alerts = self.snapshot.alerts();
-                self.trays(hwnd);
-                for i in alerts {
-                    self.balloon(hwnd, i);
+            Ok((mut s, result)) => {
+                s.interval = self.snapshot.interval;
+                s.threshold = self.snapshot.threshold;
+                s.notices = self.snapshot.notices;
+                self.snapshot = s;
+                if self.queued.is_empty() {
+                    self.preview_dpi = None;
                 }
-                let saved = self.snapshot.save();
-                self.populate();
-                self.render();
-                InvalidateRect(hwnd, null(), 0);
-                let online = self.snapshot.devices.iter().filter(|d| d.fresh).count();
-                let s=match(result,saved){(Err(e),_)=>format!("操作未确认：{e}"),(_,Err(e))=>format!("已读取，但保存失败：{e}"),_=>format!("{} · {online}/3 台设备有有效读数 · 每 {} 秒刷新 · 关闭窗口后继续在托盘运行",if self.writing{"写入已读回确认"}else{"已更新"},self.snapshot.interval)};
-                self.set(self.status, &s);
+                let alerts = self.snapshot.alerts();
+                let save = self.snapshot.save();
+                match (result, save) {
+                    (Err(e), _) => self.set_status(&format!("未能确认保存：{e}"), true),
+                    (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
+                    _ => {
+                        let count = self.snapshot.devices.iter().filter(|d| d.fresh).count();
+                        self.set_status(
+                            &if writing {
+                                "已保存到设备，读回确认成功".into()
+                            } else {
+                                format!("{count} 台设备在线 · 电量已更新")
+                            },
+                            false,
+                        );
+                    }
+                }
+                self.tray(hwnd);
+                for i in alerts {
+                    self.notify(hwnd, i);
+                }
+                self.layout(hwnd);
+                if !self.flyout.is_null() {
+                    InvalidateRect(self.flyout, null(), 0);
+                }
             }
             Err(e) => {
-                self.set(self.status, &format!("后台读取异常：{e}"));
-                self.render();
+                self.set_status(&format!("后台读取失败：{e}"), true);
+                self.render(hwnd);
             }
         }
+        if !self.queued.is_empty() {
+            SetTimer(hwnd, 2, 100, None);
+        }
     }
-    unsafe fn apply(&mut self, hwnd: HWND, id: usize) {
-        let m = self.selected();
-        let action = match id {
-            DPI_APPLY => {
-                let mut b = [0u16; 32];
-                GetWindowTextW(self.get(DPI_EDIT), b.as_mut_ptr(), 32);
-                let s =
-                    String::from_utf16_lossy(&b[..b.iter().position(|v| *v == 0).unwrap_or(32)]);
-                let max = if m == 0 { 30000 } else { 26000 };
-                let min = if m == 0 { 100 } else { 50 };
-                match s.parse::<u16>() {
-                    Ok(v) if (min..=max).contains(&v) && v % 50 == 0 => Action::Dpi(v),
-                    _ => {
-                        message(&format!("请输入 {min}–{max} 范围内、50 的整数倍 DPI"));
-                        return;
+    fn selected(&self, command: Command) -> bool {
+        match command {
+            Command::Setting(action) => {
+                if let Page::Device(m) = self.page {
+                    if let Some((id, queued)) = self
+                        .queued
+                        .iter()
+                        .rev()
+                        .copied()
+                        .find(|(id, value)| *id == m && same_kind(*value, action))
+                        .or(self.inflight)
+                    {
+                        if id == m && same_kind(queued, action) {
+                            return queued == action;
+                        }
                     }
-                }
-            }
-            RATE_APPLY => {
-                let n = SendMessageW(self.get(RATE), CB_GETCURSEL, 0, 0);
-                if n < 0 {
-                    return;
-                }
-                Action::Rate(self.rates[n as usize])
-            }
-            SLEEP_APPLY => {
-                let n = SendMessageW(self.get(SLEEP), CB_GETCURSEL, 0, 0);
-                if n < 0 {
-                    return;
-                }
-                Action::Sleep(self.sleeps[n as usize])
-            }
-            LIGHT_APPLY => {
-                let n = SendMessageW(self.get(LIGHT), CB_GETCURSEL, 0, 0);
-                if n < 0 {
-                    return;
-                }
-                Action::Light(self.lights[n as usize])
-            }
-            _ => return,
-        };
-        self.begin(hwnd, Some((m, action)));
-    }
-    unsafe fn preferences(&mut self, hwnd: HWND) {
-        let i = SendMessageW(self.get(INTERVAL), CB_GETCURSEL, 0, 0);
-        let t = SendMessageW(self.get(THRESHOLD), CB_GETCURSEL, 0, 0);
-        if i < 0 || t < 0 {
-            return;
-        }
-        self.snapshot.interval = [30, 60, 120, 300, 600, 1800][i as usize];
-        self.snapshot.threshold = [5, 10, 15, 20, 25, 30, 40, 50][t as usize];
-        self.snapshot.notices =
-            SendMessageW(self.get(NOTICES), BM_GETCHECK, 0, 0) == BST_CHECKED as isize;
-        SetTimer(hwnd, 1, self.snapshot.interval * 1000, None);
-        match self.snapshot.save() {
-            Ok(()) => self.set(self.status, "偏好已保存"),
-            Err(e) => self.set(self.status, &format!("保存失败：{e}")),
-        }
-    }
-    unsafe fn diagnose(&self) {
-        let p = backend::data_path().with_file_name("diagnostics.json");
-        let r = crate::hid::enumerate()
-            .and_then(|v| serde_json::to_vec_pretty(&v).map_err(|e| e.to_string()))
-            .and_then(|v| {
-                std::fs::create_dir_all(p.parent().unwrap())
-                    .and_then(|_| std::fs::write(&p, v))
-                    .map_err(|e| e.to_string())
-            });
-        match r {
-            Ok(()) => message(&format!("诊断已保存：{}", p.display())),
-            Err(e) => message(&format!("导出失败：{e}")),
-        }
-    }
-    unsafe fn trays(&mut self, hwnd: HWND) {
-        for (i,name) in NAMES.iter().enumerate() {
-            let d = &self.snapshot.devices[i];
-            let label = d
-                .percent
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "?".into());
-            let icon = number_icon(
-                &label,
-                if d.fresh {
-                    if i == 0 {
-                        GREEN
-                    } else if i == 1 {
-                        ACCENT
-                    } else {
-                        0x00c67882
+                    let s = &self.snapshot.devices[m];
+                    match action {
+                        Action::Dpi(v) => self.value(m) == Some(v),
+                        Action::Rate(v) => s.rate == Some(v),
+                        Action::Sleep(v) => s.sleep_seconds == Some(v),
+                        Action::Light(v) => s.light == Some(v),
+                        Action::Stage(v) => s.active_stage == Some(v),
+                        Action::Tune(key, v) => s.tuning.get(&key) == Some(&v),
                     }
                 } else {
-                    MUTED
-                },
-            );
-            let mut n: NOTIFYICONDATAW = zeroed();
-            n.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-            n.hWnd = hwnd;
-            n.uID = i as u32 + 1;
-            n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-            n.uCallbackMessage = TRAY;
-            n.hIcon = icon;
-            copy_wide(
-                &mut n.szTip,
-                &format!(
-                    "{}：{}% · {}{}",
-                    name,
-                    d.percent
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "未知".into()),
-                    if d.fresh {
-                        "最新读数"
-                    } else {
-                        "未连接/缓存"
-                    },
-                    if d.charging == Some(true) {
-                        " · 充电中"
-                    } else {
-                        ""
-                    }
-                ),
-            );
-            if Shell_NotifyIconW(
-                if self.tray_added[i] {
-                    NIM_MODIFY
-                } else {
-                    NIM_ADD
-                },
-                &n,
-            ) != 0
-            {
-                self.tray_added[i] = true;
-                if !self.tray_icons[i].is_null() {
-                    DestroyIcon(self.tray_icons[i]);
+                    false
                 }
-                self.tray_icons[i] = icon;
-            } else {
-                DestroyIcon(icon);
-                self.set(self.status, "系统托盘暂不可用，主窗口仍可读取设备");
             }
+            Command::Interval(v) => self.snapshot.interval == v,
+            Command::Threshold(v) => self.snapshot.threshold == v,
+            Command::Notices => self.snapshot.notices,
+            Command::Advanced(value) => self.advanced == value,
+            _ => false,
         }
     }
-    unsafe fn balloon(&self, hwnd: HWND, i: usize) {
-        let mut n: NOTIFYICONDATAW = zeroed();
-        n.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-        n.hWnd = hwnd;
-        n.uID = i as u32 + 1;
-        n.uFlags = NIF_INFO;
-        n.dwInfoFlags = NIIF_WARNING;
-        copy_wide(&mut n.szInfoTitle, &format!("{} 电量偏低", NAMES[i]));
-        copy_wide(
-            &mut n.szInfo,
-            &format!(
-                "当前电量 {}%，请及时充电。",
-                self.snapshot.devices[i].percent.unwrap()
-            ),
-        );
-        Shell_NotifyIconW(NIM_MODIFY, &n);
+    unsafe fn render(&self, hwnd: HWND) {
+        for b in &self.controls {
+            let enabled = match b.command {
+                Command::Setting(action) => {
+                    self.can_adjust()
+                        && if let Page::Device(m) = self.page {
+                            let s = &self.snapshot.devices[m];
+                            match action {
+                                Action::Dpi(_) => s.dpi.is_some(),
+                                Action::Rate(_) => s.rate.is_some(),
+                                Action::Sleep(_) => s.sleep_seconds.is_some(),
+                                Action::Light(_) => s.light.is_some(),
+                                Action::Stage(_) => s.active_stage.is_some(),
+                                Action::Tune(key, _) => s.tuning.contains_key(&key),
+                            }
+                        } else {
+                            false
+                        }
+                }
+                Command::Step(_) => self.can_adjust(),
+                Command::Refresh => self.pending.is_none() && self.queued.is_empty(),
+                _ => true,
+            };
+            EnableWindow(b.hwnd, enabled as i32);
+            InvalidateRect(b.hwnd, null(), 0);
+        }
+        InvalidateRect(hwnd, null(), 0);
     }
     unsafe fn paint(&self, hwnd: HWND) {
         let mut ps: PAINTSTRUCT = zeroed();
-        let target = BeginPaint(hwnd, &mut ps);
+        let dest = BeginPaint(hwnd, &mut ps);
         let mut r = zeroed();
         GetClientRect(hwnd, &mut r);
-        let dc = CreateCompatibleDC(target);
-        let bitmap = CreateCompatibleBitmap(target, r.right, r.bottom);
+        let dc = CreateCompatibleDC(dest);
+        let bitmap = CreateCompatibleBitmap(dest, r.right, r.bottom);
         let old = SelectObject(dc, bitmap);
-        fill(dc, r, BG);
-        SetMapMode(dc, MM_ANISOTROPIC);
-        SetWindowExtEx(dc, 96, 96, null_mut());
-        SetViewportExtEx(dc, self.dpi as i32, self.dpi as i32, null_mut());
-        let width = r.right * 96 / self.dpi as i32;
-        let cw = (width - 80) / 3;
-        text(dc, "Peripheral Desk", rect(32, 23, 440, 44), 28, 700, INK);
-        text(
-            dc,
-            "外设控制台 / 电量、性能与日常设置",
-            rect(34, 70, 650, 24),
-            13,
-            400,
-            MUTED,
-        );
-        for (i,name) in NAMES.iter().enumerate() {
-            let x = 32 + i as i32 * (cw + 16);
-            round(dc, rect(x, 116, cw, 188), 0xffffff, BORDER);
-            let d = &self.snapshot.devices[i];
-            let color = if !d.fresh {
-                MUTED
-            } else if i == 0 {
-                GREEN
-            } else if i == 1 {
-                ACCENT
-            } else {
-                0x00c67882
-            };
-            text(
-                dc,
-                if i == 0 {
-                    "RAZER / MOUSE"
-                } else if i == 1 {
-                    "MCHOSE / MOUSE"
-                } else {
-                    "MCHOSE / KEYBOARD"
-                },
-                rect(x + 18, 131, cw - 95, 18),
-                11,
-                600,
-                color,
-            );
-            text(dc, name, rect(x + 18, 155, cw - 85, 26), 17, 600, INK);
-            text(
-                dc,
-                &d.percent
-                    .map(|v| format!("{v}%"))
-                    .unwrap_or_else(|| "—".into()),
-                rect(x + cw - 89, 137, 78, 40),
-                27,
-                700,
-                color,
-            );
-            fill(dc, rect(x + 18, 281, cw - 36, 5), BORDER);
-            if let Some(p) = d.percent {
-                fill(dc, rect(x + 18, 281, (cw - 36) * p as i32 / 100, 5), color);
-            }
-        }
-        round(dc, rect(32, 324, width - 64, 229), 0xffffff, BORDER);
-        text(dc, "设备设置", rect(48, 327, 240, 23), 12, 600, MUTED);
-        let col = (width - 128) / 4;
-        for (i, label) in ["DPI · X/Y 同步", "回报率", "自动休眠", "键盘灯效"]
-            .iter()
-            .enumerate()
         {
-            text(
-                dc,
-                label,
-                rect(48 + i as i32 * (col + 16), 420, col, 24),
-                13,
-                600,
-                INK,
+            let c = Canvas::new(dc, self.dpi);
+            self.background(&c);
+            match self.page {
+                Page::Home => self.home(&c),
+                Page::Device(m) => self.detail(&c, m),
+                Page::Preferences => self.preferences(&c),
+            }
+            c.text(
+                &self.status,
+                if self.page == Page::Home {
+                    R::new(170, self.height - 58, self.width - 340, 32)
+                } else {
+                    R::new(28, self.height - 58, self.width - 350, 32)
+                },
+                12,
+                400,
+                if self.status_error { RED } else { DIM },
+                DT_LEFT,
             );
         }
-        text(
-            dc,
-            "点击应用保存到设备。每次只更改选中的设置，鼠标 DPI 同步应用于 X/Y 轴。",
-            rect(48, 532, width - 96, 18),
-            11,
-            400,
-            MUTED,
-        );
-        text(dc, "工具偏好", rect(34, 571, 300, 25), 17, 600, INK);
-        text(dc, "自动刷新", rect(36, 615, 100, 24), 13, 400, INK);
-        text(dc, "低电阈值", rect(274, 615, 100, 24), 13, 400, INK);
-        text(
-            dc,
-            "托盘单击打开面板 · 右键刷新或退出 · 电量灰色表示历史值",
-            rect(34, 653, width - 68, 21),
-            12,
-            400,
-            MUTED,
-        );
-        SetMapMode(dc, MM_TEXT);
-        BitBlt(target, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+        BitBlt(dest, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old);
         DeleteObject(bitmap);
         DeleteDC(dc);
         EndPaint(hwnd, &ps);
     }
-    unsafe fn draw_button(&self, item: &DRAWITEMSTRUCT) {
-        let disabled = item.itemState & ODS_DISABLED != 0;
-        let color = if disabled {
-            0x00efeeec
-        } else if item.itemState & ODS_SELECTED != 0 {
-            0x00eadbc9
-        } else {
-            0x00f9f2e8
-        };
-        round(
-            item.hDC,
-            item.rcItem,
-            color,
-            if disabled { BORDER } else { 0x00d7baa1 },
+    unsafe fn background(&self, c: &Canvas) {
+        c.rect(R::new(0, 0, self.width, self.height), BG);
+        c.gradient(R::new(0, 0, self.width * 2 / 3, 68), 0xff261119, BG);
+        c.line(28, 65, self.width - 28, 65, 0xff19191f, 1.);
+        c.ellipse(
+            R::new(if self.page == Page::Home { 28 } else { 186 }, 31, 7, 7),
+            RED,
         );
-        let mut b = [0u16; 80];
-        GetWindowTextW(item.hwndItem, b.as_mut_ptr(), 80);
-        SetBkMode(item.hDC, TRANSPARENT as i32);
-        SetTextColor(item.hDC, if disabled { MUTED } else { INK });
-        let old = SelectObject(item.hDC, self.font);
-        let mut r = item.rcItem;
-        DrawTextW(
-            item.hDC,
-            b.as_ptr(),
-            -1,
-            &mut r,
-            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        c.text(
+            if self.page == Page::Home {
+                "PERIPHERAL DESK  /  外设控制中心"
+            } else {
+                "PERIPHERAL DESK"
+            },
+            R::new(
+                if self.page == Page::Home { 47 } else { 206 },
+                18,
+                if self.page == Page::Home { 450 } else { 182 },
+                32,
+            ),
+            13,
+            400,
+            MUTED,
+            DT_LEFT,
         );
-        SelectObject(item.hDC, old);
-        if item.itemState & ODS_FOCUS != 0 {
-            let mut r = item.rcItem;
-            InflateRect(&mut r, -4, -4);
-            DrawFocusRect(item.hDC, &r);
+    }
+    unsafe fn home(&self, c: &Canvas) {
+        c.text("我的设备", R::new(32, 83, 600, 45), 30, 600, TEXT, DT_LEFT);
+        c.text(
+            "选择设备，查看电量并调整设置",
+            R::new(34, 134, 700, 24),
+            13,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+    }
+    unsafe fn detail(&self, c: &Canvas, m: usize) {
+        let s = &self.snapshot.devices[m];
+        let spec = &REGISTRY[m];
+        let h = self.height;
+        let rx = 394;
+        let rw = self.width - rx - 28;
+        let cx = rx + 30;
+        c.round(R::new(28, 78, 344, h - 160), 20, PANEL, Some(BORDER));
+        c.round(R::new(rx, 78, rw, h - 160), 20, PANEL, Some(BORDER));
+        if s.fresh {
+            c.glow(200, 185, 116);
         }
+        c.image(self.images.images[m], R::new(60, 100, 280, 188), s.fresh);
+        c.text(
+            spec.name,
+            R::new(54, 308, 300, 32),
+            20,
+            600,
+            if s.fresh { TEXT } else { MUTED },
+            DT_LEFT,
+        );
+        c.ellipse(R::new(56, 354, 7, 7), connection_color(s));
+        c.text(
+            connection(s),
+            R::new(74, 340, 272, 32),
+            13,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.line(54, 386, 346, 386, BORDER, 1.);
+        let pairs = [
+            (
+                "当前 DPI",
+                s.dpi
+                    .map(|v| format_number(v as u32))
+                    .unwrap_or_else(|| "—".into()),
+            ),
+            (
+                "回报率",
+                s.rate
+                    .map(|v| format!("{v} Hz"))
+                    .unwrap_or_else(|| "—".into()),
+            ),
+            (
+                "自动休眠",
+                s.sleep_seconds
+                    .map(|v| format!("{} 分钟", v / 60))
+                    .unwrap_or_else(|| "—".into()),
+            ),
+            ("供电状态", power(s).into()),
+        ];
+        for (i, (label, value)) in pairs.iter().enumerate() {
+            if spec.kind == Kind::Keyboard && i == 0 {
+                continue;
+            }
+            let y = 400 + i as i32 * 31;
+            c.text(label, R::new(54, y, 120, 25), 13, 400, DIM, DT_LEFT);
+            c.text(value, R::new(168, y, 178, 25), 13, 400, MUTED, DT_RIGHT);
+        }
+        let ring_y = h - 327;
+        c.ring(
+            R::new(133, ring_y, 134, 134),
+            s.percent.filter(|_| s.fresh),
+            s.fresh,
+        );
+        c.text(
+            if s.fresh {
+                if s.charging == Some(true) {
+                    "正在充电"
+                } else if s.percent.is_some_and(|p| p < 20) {
+                    "电量偏低"
+                } else {
+                    "电量充足"
+                }
+            } else {
+                "等待设备连接"
+            },
+            R::new(60, ring_y + 150, 280, 24),
+            13,
+            400,
+            MUTED,
+            DT_CENTER,
+        );
+        if self.advanced && !spec.advanced.is_empty() {
+            self.advanced_panel(c, m);
+            return;
+        }
+        if spec.kind == Kind::Mouse {
+            c.text(
+                "DPI 灵敏度",
+                R::new(cx, 101, 300, 30),
+                20,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                "点击快捷值或拖动滑块调整，滚轮可 50 步进",
+                R::new(cx, 137, rw - 60, 24),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+            c.text(
+                &self
+                    .value(m)
+                    .map(|v| format_number(v as u32))
+                    .unwrap_or_else(|| "—".into()),
+                R::new(rx + rw - 230, 97, 170, 52),
+                38,
+                300,
+                if s.fresh { TEXT } else { DIM },
+                DT_RIGHT,
+            );
+            c.text(
+                "DPI",
+                R::new(rx + rw - 53, 115, 30, 24),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+            let slider = self.slider;
+            let y = slider.y + slider.h / 2;
+            c.line(slider.x, y, slider.x + slider.w, y, BORDER, 7.);
+            if let (Some(dpi), Some((min, max))) = (self.value(m), spec.dpi_range) {
+                let pos = slider.x
+                    + ((dpi.saturating_sub(min)) as f32 / (max - min) as f32 * slider.w as f32)
+                        as i32;
+                c.line(slider.x, y, pos, y, if s.fresh { RED } else { DIM }, 7.);
+                c.ellipse(
+                    R::new(pos - 15, y - 15, 30, 30),
+                    if s.fresh { 0x25ff3859 } else { 0x255e5e6d },
+                );
+                c.ellipse(
+                    R::new(pos - 9, y - 9, 18, 18),
+                    if s.fresh { ORANGE } else { DIM },
+                );
+                c.ellipse(R::new(pos - 4, y - 4, 8, 8), TEXT);
+            }
+            c.text(
+                "移动滑块可连续调整；点击 − / + 精调",
+                R::new(cx, 286, rw - 60, 24),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+        } else {
+            c.text("键盘灯效", R::new(cx, 101, 300, 32), 20, 600, TEXT, DT_LEFT);
+            c.text(
+                "选择灯光效果，保留其他灯光及按键设置",
+                R::new(cx, 137, rw - 60, 24),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+        }
+        c.line(cx, 337, rx + rw - 30, 337, BORDER, 1.);
+        c.text("回报率", R::new(cx, 354, 160, 29), 15, 500, MUTED, DT_LEFT);
+        c.text(
+            "决定输入上报频率",
+            R::new(cx, 382, 165, 22),
+            11,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.text(
+            "自动休眠",
+            R::new(cx, 421, 165, 29),
+            15,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            "空闲后进入省电状态",
+            R::new(cx, 451, 165, 22),
+            11,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.line(cx, 492, rx + rw - 30, 492, BORDER, 1.);
+        c.text(
+            "更多设备设置",
+            R::new(cx, 513, 200, 27),
+            15,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            if spec.advanced.is_empty() {
+                "更多原驱动功能将逐步接入"
+            } else {
+                "点击上方「高级设置」，调整更多设备参数"
+            },
+            R::new(cx, 548, rw - 70, 24),
+            13,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.round(
+            R::new(cx, h - 238, rw - 60, 64),
+            12,
+            0xff20151c,
+            Some(0xff3c202b),
+        );
+        c.text(
+            "自动保存",
+            R::new(cx + 18, h - 230, rw - 96, 24),
+            13,
+            600,
+            RED,
+            DT_LEFT,
+        );
+        c.text(
+            "停止调整 1.5 秒后写入设备，每次保存都会读回确认。",
+            R::new(cx + 18, h - 204, rw - 96, 22),
+            12,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.round(R::new(cx, h - 160, rw - 60, 42), 10, FIELD, None);
+        c.text(
+            if !s.present {
+                "设备未连接，设置暂不可用"
+            } else if !s.fresh {
+                "读数暂不可用，请唤醒设备并重新读取"
+            } else if !s.settings_error.is_empty() {
+                "电量已读取；部分设置暂不可用，请重新读取"
+            } else {
+                "已连接 · 设备设置可用"
+            },
+            R::new(cx + 16, h - 153, rw - 90, 27),
+            12,
+            400,
+            if s.fresh { MUTED } else { DIM },
+            DT_LEFT,
+        );
+    }
+    unsafe fn advanced_panel(&self, c: &Canvas, m: usize) {
+        let rx = 394;
+        let rw = self.width - rx - 28;
+        let cx = rx + 30;
+        let h = self.height;
+        c.text("高级设置", R::new(cx, 101, 350, 32), 22, 600, TEXT, DT_LEFT);
+        c.text(
+            "从设备读取当前值，调整后自动保存并核对",
+            R::new(cx, 138, rw - 60, 23),
+            13,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        for (i, setting) in REGISTRY[m].advanced.iter().enumerate() {
+            let y = 169 + i as i32 * 78;
+            c.text(
+                setting.title,
+                R::new(cx, y, 210, 27),
+                15,
+                500,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                setting.hint,
+                R::new(cx, y + 31, rw - 60, 22),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+            c.line(cx, y + 65, rx + rw - 30, y + 65, BORDER, 1.);
+        }
+        c.round(R::new(cx, h - 182, rw - 60, 60), 12, FIELD, None);
+        c.text(
+            "自动保存 · 设备读回确认",
+            R::new(cx + 18, h - 172, rw - 96, 24),
+            13,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            "灰色选项表示当前设备或灯效未开放该设置",
+            R::new(cx + 18, h - 148, rw - 96, 20),
+            12,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+    }
+    unsafe fn preferences(&self, c: &Canvas) {
+        c.text("工具设置", R::new(40, 97, 500, 45), 28, 600, TEXT, DT_LEFT);
+        c.round(
+            R::new(32, 170, self.width - 64, 430),
+            20,
+            PANEL,
+            Some(BORDER),
+        );
+        for (y, title, hint) in [
+            (209, "自动刷新", "较长间隔可减少设备唤醒"),
+            (302, "低电阈值", "仅在未充电且读数有效时提醒"),
+            (395, "低电提醒", "同一低电周期只提醒一次"),
+            (487, "设备诊断", "仅导出本地 HID 元数据"),
+        ] {
+            c.text(title, R::new(62, y, 240, 28), 16, 500, TEXT, DT_LEFT);
+            c.text(hint, R::new(62, y + 30, 250, 25), 12, 400, DIM, DT_LEFT);
+        }
+    }
+    unsafe fn draw_button(&self, item: &DRAWITEMSTRUCT) {
+        let dc = CreateCompatibleDC(item.hDC);
+        let width = item.rcItem.right - item.rcItem.left;
+        let height = item.rcItem.bottom - item.rcItem.top;
+        let bitmap = CreateCompatibleBitmap(item.hDC, width, height);
+        let old = SelectObject(dc, bitmap);
+        let mut buffered = *item;
+        buffered.hDC = dc;
+        self.paint_button(&buffered);
+        BitBlt(item.hDC, 0, 0, width, height, dc, 0, 0, SRCCOPY);
+        SelectObject(dc, old);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
+    unsafe fn paint_button(&self, item: &DRAWITEMSTRUCT) {
+        let Some(b) = self.controls.iter().find(|b| b.hwnd == item.hwndItem) else {
+            return;
+        };
+        let brush = CreateSolidBrush(0x000d0a0a);
+        FillRect(item.hDC, &item.rcItem, brush);
+        DeleteObject(brush);
+        let c = Canvas::new(item.hDC, self.dpi);
+        let r = R::new(1, 1, b.rect.w - 2, b.rect.h - 2);
+        if b.style == CARD {
+            if let Command::Device(m) = b.command {
+                self.card(&c, r, m);
+            }
+            return;
+        }
+        c.rect(
+            R::new(0, 0, b.rect.w, b.rect.h),
+            if b.style == CHIP { PANEL } else { BG },
+        );
+        let disabled = item.itemState & ODS_DISABLED != 0;
+        let selected = self.selected(b.command);
+        let mut cursor: POINT = zeroed();
+        GetCursorPos(&mut cursor);
+        ScreenToClient(b.hwnd, &mut cursor);
+        let hover = cursor.x >= 0
+            && cursor.y >= 0
+            && cursor.x < self.px(b.rect.w)
+            && cursor.y < self.px(b.rect.h);
+        let color = if disabled {
+            0xff18181f
+        } else if selected {
+            RED
+        } else if item.itemState & ODS_SELECTED != 0 {
+            0xff33303a
+        } else if hover {
+            0xff292931
+        } else {
+            FIELD
+        };
+        if b.style != GHOST || selected || hover || item.itemState & ODS_SELECTED != 0 {
+            c.round(r, 11, color, Some(if selected { RED } else { BORDER }));
+        }
+        c.text(
+            &b.label,
+            r,
+            if b.label == "×" { 25 } else { 14 },
+            if selected { 500 } else { 400 },
+            if disabled {
+                DIM
+            } else if selected {
+                TEXT
+            } else {
+                MUTED
+            },
+            DT_CENTER,
+        );
+        if item.itemState & ODS_FOCUS != 0 {
+            c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 9, 0, Some(MUTED));
+        }
+    }
+    unsafe fn card(&self, c: &Canvas, r: R, m: usize) {
+        let s = &self.snapshot.devices[m];
+        let spec = &REGISTRY[m];
+        let active = s.fresh;
+        c.rect(R::new(0, 0, r.w + 2, r.h + 2), BG);
+        c.round(
+            r,
+            20,
+            if active { PANEL } else { 0xff101014 },
+            Some(if active { 0xff39313a } else { 0xff222229 }),
+        );
+        c.text(
+            spec.brand,
+            R::new(24, 20, r.w - 110, 22),
+            12,
+            500,
+            if active { MUTED } else { DIM },
+            DT_LEFT,
+        );
+        c.ellipse(R::new(r.w - 72, 27, 6, 6), connection_color(s));
+        c.text(
+            if active {
+                "已连接"
+            } else if s.present {
+                "待唤醒"
+            } else {
+                "未连接"
+            },
+            R::new(r.w - 62, 18, 56, 24),
+            11,
+            400,
+            connection_color(s),
+            DT_LEFT,
+        );
+        if active {
+            c.glow(r.w / 2, 170, 110);
+        }
+        c.image(self.images.images[m], R::new(34, 60, r.w - 68, 222), active);
+        c.text(
+            spec.name,
+            R::new(24, 309, r.w - 48, 34),
+            20,
+            600,
+            if active { TEXT } else { DIM },
+            DT_LEFT,
+        );
+        c.text(
+            if spec.kind == Kind::Mouse {
+                "无线游戏鼠标"
+            } else {
+                "无线机械键盘"
+            },
+            R::new(24, 349, r.w - 48, 24),
+            12,
+            400,
+            if active { MUTED } else { DIM },
+            DT_LEFT,
+        );
+        c.line(24, r.h - 116, r.w - 24, r.h - 116, BORDER, 1.);
+        c.text(
+            if !s.fresh && s.percent.is_some() {
+                "上次电量"
+            } else {
+                "电量"
+            },
+            R::new(24, r.h - 102, 100, 25),
+            12,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.text(
+            &s.percent
+                .map(|p| format!("{p}%"))
+                .unwrap_or_else(|| "—".into()),
+            R::new(24, r.h - 77, 140, 46),
+            32,
+            300,
+            if active { TEXT } else { DIM },
+            DT_LEFT,
+        );
+        c.text(
+            if active {
+                "设备设置  ›"
+            } else {
+                "查看设备  ›"
+            },
+            R::new(r.w - 145, r.h - 72, 120, 36),
+            13,
+            500,
+            if active { RED } else { DIM },
+            DT_RIGHT,
+        );
+    }
+    unsafe fn tray(&mut self, hwnd: HWND) {
+        let mut n = tray_data(hwnd);
+        n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        n.uCallbackMessage = TRAY;
+        n.hIcon = self.icon;
+        let tip = self
+            .snapshot
+            .devices
+            .iter()
+            .zip(REGISTRY)
+            .map(|(s, spec)| {
+                format!(
+                    "{} {}",
+                    spec.name,
+                    if s.fresh {
+                        s.percent
+                            .map(|p| format!("{p}%"))
+                            .unwrap_or_else(|| "未知".into())
+                    } else {
+                        "未连接/待唤醒".into()
+                    }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        copy_wide(&mut n.szTip, &tip);
+        self.tray_added =
+            Shell_NotifyIconW(if self.tray_added { NIM_MODIFY } else { NIM_ADD }, &n) != 0;
+    }
+    unsafe fn notify(&self, hwnd: HWND, index: usize) {
+        let mut n = tray_data(hwnd);
+        n.uFlags = NIF_INFO;
+        n.dwInfoFlags = NIIF_WARNING;
+        copy_wide(
+            &mut n.szInfoTitle,
+            &format!("{} 电量偏低", REGISTRY[index].name),
+        );
+        copy_wide(
+            &mut n.szInfo,
+            &format!(
+                "当前电量 {}%，请及时充电。",
+                self.snapshot.devices[index].percent.unwrap()
+            ),
+        );
+        Shell_NotifyIconW(NIM_MODIFY, &n);
+    }
+    unsafe fn menu(&mut self, hwnd: HWND) {
+        let menu = CreatePopupMenu();
+        for (id, label) in [(1, "打开主页面"), (2, "重新读取电量"), (3, "退出程序")]
+        {
+            AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
+        }
+        let mut p = zeroed();
+        GetCursorPos(&mut p);
+        SetForegroundWindow(hwnd);
+        let command = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON,
+            p.x,
+            p.y,
+            0,
+            hwnd,
+            null(),
+        );
+        DestroyMenu(menu);
+        match command {
+            1 => {
+                self.navigate(hwnd, Page::Home);
+                ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+            2 => self.begin(hwnd, None),
+            3 => self.quit(hwnd),
+            _ => {}
+        }
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+    }
+    unsafe fn show_battery(&mut self, hwnd: HWND) {
+        if !self.flyout.is_null() && IsWindowVisible(self.flyout) != 0 {
+            ShowWindow(self.flyout, SW_HIDE);
+            return;
+        }
+        if self.flyout.is_null() {
+            self.flyout = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+                wide("PeripheralDeskBattery").as_ptr(),
+                wide("Peripheral Desk · 设备电量").as_ptr(),
+                WS_POPUP | WS_BORDER,
+                0,
+                0,
+                1,
+                1,
+                hwnd,
+                null_mut(),
+                GetModuleHandleW(null()),
+                hwnd as _,
+            );
+        }
+        let mut icon_rect = zeroed();
+        let identifier = NOTIFYICONIDENTIFIER {
+            cbSize: size_of::<NOTIFYICONIDENTIFIER>() as u32,
+            hWnd: hwnd,
+            uID: 1,
+            guidItem: zeroed(),
+        };
+        let mut point = zeroed();
+        GetCursorPos(&mut point);
+        if Shell_NotifyIconGetRect(&identifier, &mut icon_rect) >= 0 {
+            point.x = icon_rect.right;
+            point.y = icon_rect.top;
+        }
+        let mut area: RECT = zeroed();
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as _, 0);
+        let width = self.px(350);
+        let height = self.px(112 + REGISTRY.len() as i32 * 66);
+        let x = (point.x - width).clamp(area.left, area.right - width);
+        let y = (point.y - height - 12).clamp(area.top, area.bottom - height);
+        SetWindowPos(
+            self.flyout,
+            HWND_TOPMOST,
+            x,
+            y,
+            width,
+            height,
+            SWP_SHOWWINDOW,
+        );
+        SetForegroundWindow(self.flyout);
+        InvalidateRect(self.flyout, null(), 0);
     }
 }
 
-fn rect(x: i32, y: i32, w: i32, h: i32) -> RECT {
-    RECT {
-        left: x,
-        top: y,
-        right: x + w,
-        bottom: y + h,
+unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_NCCREATE {
+        SetWindowLongPtrW(
+            hwnd,
+            GWLP_USERDATA,
+            (*(l as *const CREATESTRUCTW)).lpCreateParams as isize,
+        );
+        return 1;
+    }
+    let main = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as HWND;
+    let ptr = if main.is_null() {
+        null_mut()
+    } else {
+        GetWindowLongPtrW(main, GWLP_USERDATA) as *mut App
+    };
+    if ptr.is_null() {
+        return DefWindowProcW(hwnd, msg, _w, l);
+    }
+    let a = &*ptr;
+    match msg {
+        WM_KILLFOCUS => {
+            ShowWindow(hwnd, SW_HIDE);
+            0
+        }
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut ps = zeroed();
+            let dc = BeginPaint(hwnd, &mut ps);
+            {
+                let c = Canvas::new(dc, a.dpi);
+                let height = 112 + REGISTRY.len() as i32 * 66;
+                c.rect(R::new(0, 0, 350, height), PANEL);
+                c.text("设备电量", R::new(21, 16, 240, 32), 17, 600, TEXT, DT_LEFT);
+                c.text(
+                    "PERIPHERAL DESK",
+                    R::new(21, 44, 280, 20),
+                    10,
+                    400,
+                    DIM,
+                    DT_LEFT,
+                );
+                for (i, spec) in REGISTRY.iter().enumerate() {
+                    let s = &a.snapshot.devices[i];
+                    let y = 76 + i as i32 * 66;
+                    c.image(a.images.images[i], R::new(18, y, 42, 45), s.fresh);
+                    c.text(
+                        spec.name,
+                        R::new(72, y, 190, 24),
+                        13,
+                        500,
+                        if s.fresh { TEXT } else { DIM },
+                        DT_LEFT,
+                    );
+                    c.text(
+                        connection(s),
+                        R::new(72, y + 25, 185, 20),
+                        11,
+                        400,
+                        DIM,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        &s.percent
+                            .filter(|_| s.fresh)
+                            .map(|p| format!("{p}%"))
+                            .unwrap_or_else(|| "—".into()),
+                        R::new(264, y + 1, 65, 40),
+                        25,
+                        300,
+                        if s.fresh { TEXT } else { DIM },
+                        DT_RIGHT,
+                    );
+                }
+                c.line(18, height - 40, 332, height - 40, BORDER, 1.);
+                c.text(
+                    "打开主页面  ›",
+                    R::new(20, height - 34, 310, 28),
+                    12,
+                    500,
+                    RED,
+                    DT_RIGHT,
+                );
+            }
+            EndPaint(hwnd, &ps);
+            0
+        }
+        WM_LBUTTONUP => {
+            let y = a.logical((l >> 16) as i16 as i32);
+            let row = (y - 76) / 66;
+            let device = if y >= 76 && row >= 0 && (row as usize) < REGISTRY.len() {
+                row as usize + 1
+            } else {
+                0
+            };
+            ShowWindow(hwnd, SW_HIDE);
+            PostMessageW(main, OPEN, device, 0);
+            0
+        }
+        WM_CLOSE => {
+            ShowWindow(hwnd, SW_HIDE);
+            0
+        }
+        _ => DefWindowProcW(hwnd, msg, _w, l),
     }
 }
-unsafe fn fill(dc: HDC, r: RECT, color: u32) {
-    let b = CreateSolidBrush(color);
-    FillRect(dc, &r, b);
-    DeleteObject(b);
+unsafe extern "system" fn button_proc(
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_MOUSEMOVE {
+        let mut tracking = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        TrackMouseEvent(&mut tracking);
+        InvalidateRect(hwnd, null(), 0);
+    }
+    if msg == WM_MOUSELEAVE {
+        InvalidateRect(hwnd, null(), 0);
+    }
+    if msg == WM_NCDESTROY {
+        RemoveWindowSubclass(hwnd, Some(button_proc), 1);
+    }
+    DefSubclassProc(hwnd, msg, w, l)
 }
-unsafe fn round(dc: HDC, r: RECT, color: u32, border: u32) {
-    let b = CreateSolidBrush(color);
-    let p = CreatePen(PS_SOLID, 1, border);
-    let ob = SelectObject(dc, b);
-    let op = SelectObject(dc, p);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, 12, 12);
-    SelectObject(dc, ob);
-    SelectObject(dc, op);
-    DeleteObject(b);
-    DeleteObject(p);
+fn coalesce(queue: &mut std::collections::VecDeque<(usize, Action)>, model: usize, action: Action) {
+    queue.retain(|(id, old)| *id != model || !same_kind(*old, action));
+    queue.push_back((model, action));
 }
-unsafe fn font(size: i32, weight: i32) -> HFONT {
-    CreateFontW(
-        size,
-        0,
-        0,
-        0,
-        weight,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET as u32,
-        0,
-        0,
-        CLEARTYPE_QUALITY as u32,
-        0,
-        wide("Microsoft YaHei UI").as_ptr(),
-    )
+fn same_kind(a: Action, b: Action) -> bool {
+    a.same_setting(b)
 }
-unsafe fn text(dc: HDC, s: &str, mut r: RECT, size: i32, weight: i32, color: u32) {
-    let f = font(-size, weight);
-    let old = SelectObject(dc, f);
-    SetTextColor(dc, color);
-    SetBkMode(dc, TRANSPARENT as i32);
-    DrawTextW(
-        dc,
-        wide(s).as_ptr(),
-        -1,
-        &mut r,
-        DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
-    );
-    SelectObject(dc, old);
-    DeleteObject(f);
+fn format_number(v: u32) -> String {
+    if v >= 1000 {
+        format!("{},{:03}", v / 1000, v % 1000)
+    } else {
+        v.to_string()
+    }
 }
-fn copy_wide<const N: usize>(dest: &mut [u16; N], s: &str) {
-    for (d, c) in dest[..N - 1].iter_mut().zip(s.encode_utf16()) {
+fn connection(s: &backend::State) -> &'static str {
+    if s.fresh {
+        if s.wired {
+            "USB 有线连接"
+        } else {
+            "2.4 GHz 无线连接"
+        }
+    } else if s.present {
+        "接收器在线 · 待唤醒"
+    } else {
+        "设备未连接"
+    }
+}
+fn connection_color(s: &backend::State) -> u32 {
+    if s.fresh {
+        GREEN
+    } else if s.present {
+        AMBER
+    } else {
+        DIM
+    }
+}
+fn power(s: &backend::State) -> &'static str {
+    if !s.fresh {
+        "未知"
+    } else {
+        match s.charging {
+            Some(true) => "正在充电",
+            Some(false) => "电池供电",
+            None => "状态未知",
+        }
+    }
+}
+fn copy_wide<const N: usize>(dest: &mut [u16; N], text: &str) {
+    for (d, c) in dest[..N - 1].iter_mut().zip(text.encode_utf16()) {
         *d = c;
     }
 }
-unsafe fn number_icon(label: &str, color: u32) -> HICON {
-    let dc = CreateCompatibleDC(null_mut());
-    let mut info: BITMAPINFO = zeroed();
-    info.bmiHeader.biSize = size_of::<BITMAPINFOHEADER>() as u32;
-    info.bmiHeader.biWidth = 32;
-    info.bmiHeader.biHeight = -32;
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    let mut pixels = null_mut();
-    let bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut pixels, null_mut(), 0);
-    if bitmap.is_null() {
-        DeleteDC(dc);
-        return CopyIcon(LoadIconW(null_mut(), IDI_APPLICATION));
+unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..zeroed()
     }
-    let old = SelectObject(dc, bitmap);
-    fill(dc, rect(0, 0, 32, 32), color);
-    let f = font(if label.len() > 2 { -20 } else { -26 }, 700);
-    let of = SelectObject(dc, f);
-    SetBkMode(dc, TRANSPARENT as i32);
-    SetTextColor(dc, 0xffffff);
-    let mut r = rect(0, 0, 32, 32);
-    DrawTextW(
-        dc,
-        wide(label).as_ptr(),
-        -1,
-        &mut r,
-        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-    );
-    GdiFlush();
-    for p in std::slice::from_raw_parts_mut(pixels as *mut u32, 1024) {
-        *p |= 0xff000000;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn pending_changes_keep_other_devices_and_settings() {
+        let mut q = std::collections::VecDeque::new();
+        coalesce(&mut q, 0, Action::Dpi(800));
+        coalesce(&mut q, 0, Action::Rate(500));
+        coalesce(&mut q, 1, Action::Dpi(1600));
+        coalesce(&mut q, 0, Action::Dpi(1200));
+        assert_eq!(
+            q.into_iter().collect::<Vec<_>>(),
+            vec![
+                (0, Action::Rate(500)),
+                (1, Action::Dpi(1600)),
+                (0, Action::Dpi(1200))
+            ]
+        );
     }
-    SelectObject(dc, of);
-    DeleteObject(f);
-    SelectObject(dc, old);
-    let bits = [0u8; 128];
-    let mask = CreateBitmap(32, 32, 1, 1, bits.as_ptr() as _);
-    let icon = CreateIconIndirect(&ICONINFO {
-        fIcon: 1,
-        xHotspot: 0,
-        yHotspot: 0,
-        hbmMask: mask,
-        hbmColor: bitmap,
-    });
-    DeleteObject(mask);
-    DeleteObject(bitmap);
-    DeleteDC(dc);
-    icon
+    #[test]
+    fn tuning_queue_keeps_distinct_fields() {
+        use crate::model::Tuning;
+        let mut q = std::collections::VecDeque::new();
+        coalesce(&mut q, 1, Action::Tune(Tuning::Lod, 1));
+        coalesce(&mut q, 1, Action::Tune(Tuning::Motion, 0));
+        coalesce(&mut q, 1, Action::Tune(Tuning::Lod, 2));
+        assert_eq!(q.len(), 2);
+        assert_eq!(q[0].1, Action::Tune(Tuning::Motion, 0));
+        assert_eq!(q[1].1, Action::Tune(Tuning::Lod, 2));
+    }
+    #[test]
+    fn registry_and_view_model() {
+        assert_eq!(format_number(30000), "30,000");
+        assert_eq!(format_number(800), "800");
+        let s = Snapshot::default();
+        assert_eq!(s.devices.len(), REGISTRY.len());
+        let mut keys = std::collections::HashSet::new();
+        for spec in REGISTRY {
+            assert!(keys.insert(spec.key));
+            assert!(!spec.image_bytes.is_empty());
+        }
+    }
 }
