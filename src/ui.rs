@@ -1725,7 +1725,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                     c.image(a.images.images[i], R::new(18, y, 42, 45), s.fresh);
                     c.text(
                         spec.name,
-                        R::new(72, y, 190, 24),
+                        R::new(72, y, 158, 24),
                         13,
                         500,
                         if s.fresh { TEXT } else { DIM },
@@ -1733,7 +1733,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                     );
                     c.text(
                         connection(s),
-                        R::new(72, y + 25, 185, 20),
+                        R::new(72, y + 25, 158, 20),
                         11,
                         400,
                         DIM,
@@ -1744,7 +1744,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                             .filter(|_| s.fresh)
                             .map(|p| format!("{p}%"))
                             .unwrap_or_else(|| "—".into()),
-                        R::new(264, y + 1, 65, 40),
+                        R::new(236, y + 1, 93, 40),
                         25,
                         300,
                         if s.fresh { TEXT } else { DIM },
