@@ -1,0 +1,9 @@
+/target/
+/dist/
+/data/
+/.build/
+*.exe
+*.pdb
+*.zip
+*.tmp
+/.learnings/

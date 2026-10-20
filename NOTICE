@@ -1,0 +1,14 @@
+Peripheral Desk is an independent Rust and Win32 peripheral utility.
+It is not affiliated with Razer, MCHOSE, ASUS or the reference projects.
+
+Protocol research and porting references:
+- OpenMouse-Project/mouse-protocol, AGPL-3.0 (bac031567b28f2a55c616fc525b03f2d5fa452cc)
+- kuz-1/mchosebar, GPL-3.0 (fc18f6952ce167fda6a6aea60af6fd8d47223194)
+- xzeldon/razer-battery-report, MIT (4abf90c280a35fe9c451c17589bedaf237204ec9)
+
+Workflow and interaction references, with no bundled source:
+- TheWebDog/quiet-battery, PolyForm Noncommercial 1.0.0
+- yszyszysz233/2.4G-battery-viewer
+
+Product names and images belong to their respective owners. They identify the
+supported hardware and do not indicate endorsement. See SOURCES.md.
