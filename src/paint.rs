@@ -415,6 +415,7 @@ fn blend(a: u32, b: u32, t: f32) -> u32 {
 
 pub struct Images {
     pub images: Vec<*mut GpImage>,
+    pub installed: Vec<bool>,
     token: usize,
 }
 impl Images {
@@ -426,8 +427,10 @@ impl Images {
         };
         GdiplusStartup(&mut token, &input, null_mut());
         let mut images = Vec::new();
+        let mut installed = Vec::new();
         for spec in crate::devices::REGISTRY.iter() {
             let mut image = null_mut();
+            installed.push(crate::plugin_manager::is_installed(spec.key));
             if let Some(path) = crate::plugin_manager::artwork(spec.key) {
                 let mut source = null_mut();
                 if GdipLoadImageFromFile(wide(&path.to_string_lossy()).as_ptr(), &mut source) == 0 {
@@ -453,7 +456,11 @@ impl Images {
             }
             images.push(image);
         }
-        Self { images, token }
+        Self {
+            images,
+            installed,
+            token,
+        }
     }
 }
 impl Drop for Images {

@@ -1844,7 +1844,7 @@ impl App {
         );
         c.ellipse(R::new(56, 354, 7, 7), connection_color(s));
         c.text(
-            connection(s),
+            connection(s, self.images.installed[m]),
             R::new(74, 340, 272, 32),
             13,
             400,
@@ -2436,7 +2436,7 @@ impl App {
         c.text(
             if active {
                 "已连接"
-            } else if !crate::plugin_manager::is_installed(spec.key) {
+            } else if !self.images.installed[m] {
                 "未安装"
             } else if s.present {
                 if spec.kind == Kind::Headset {
@@ -2808,7 +2808,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                         DT_LEFT,
                     );
                     c.text(
-                        connection(s),
+                        connection(s, a.images.installed[i]),
                         R::new(72, y + 25, 158, 20),
                         11,
                         400,
@@ -2921,8 +2921,8 @@ fn format_number(v: u32) -> String {
         v.to_string()
     }
 }
-fn connection(s: &backend::State) -> &'static str {
-    if !crate::plugin_manager::is_installed(&s.key) {
+fn connection(s: &backend::State, installed: bool) -> &'static str {
+    if !installed {
         return "请从驱动仓库安装插件";
     }
     if s.fresh {

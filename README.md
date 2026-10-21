@@ -2,7 +2,7 @@
 
 Rust + Win32 原生 Windows 外设设置与电量工具。黑灰色界面、红橙强调色、两级设备页面，无浏览器运行时。
 
-[安装与使用](docs/USAGE.md) · [本版测试范围](docs/VALIDATION.md) · [公开设备插件仓库](https://github.com/chenran0408/peripheral-desk-drivers) · [五品牌协议研究](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/PROTOCOL-RESEARCH.md)
+[安装与使用](docs/USAGE.md) · [本版测试范围](docs/VALIDATION.md) · [响应优化队列](docs/RESPONSE-ROADMAP.md) · [公开设备插件仓库](https://github.com/chenran0408/peripheral-desk-drivers) · [五品牌协议研究](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/PROTOCOL-RESEARCH.md)
 
 ## 下载与使用
 
