@@ -91,28 +91,10 @@ impl Snapshot {
         s
     }
     pub fn save(&self) -> Result<()> {
-        let p = data_path();
-        std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-        let temp = p.with_extension("tmp");
-        std::fs::write(
-            &temp,
-            serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?,
+        crate::storage::atomic_write(
+            &data_path(),
+            &serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?,
         )
-        .map_err(|e| e.to_string())?;
-        // Windows rename cannot replace an existing file. MoveFileExW performs
-        // replacement atomically without a delete/write gap.
-        unsafe {
-            use windows_sys::Win32::Storage::FileSystem::*;
-            if MoveFileExW(
-                hid::wide(&temp.to_string_lossy()).as_ptr(),
-                hid::wide(&p.to_string_lossy()).as_ptr(),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            ) == 0
-            {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
-        }
-        Ok(())
     }
     pub fn alerts(&mut self) -> Vec<usize> {
         let mut alerts = Vec::new();
@@ -142,9 +124,30 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
     refresh_with(previous, action, hid::enumerate(), crate::adapters::open)
 }
 
+pub fn refresh_device(previous: &Snapshot, model: usize) -> (Snapshot, Result<()>) {
+    refresh_scoped(
+        previous,
+        None,
+        Some(model),
+        hid::enumerate(),
+        crate::adapters::open,
+    )
+}
 fn refresh_with<F>(
     previous: &Snapshot,
     action: Option<(usize, Action)>,
+    interfaces: Result<Vec<Interface>>,
+    open: F,
+) -> (Snapshot, Result<()>)
+where
+    F: FnMut(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>>,
+{
+    refresh_scoped(previous, action, action.map(|a| a.0), interfaces, open)
+}
+fn refresh_scoped<F>(
+    previous: &Snapshot,
+    action: Option<(usize, Action)>,
+    scope: Option<usize>,
     interfaces: Result<Vec<Interface>>,
     mut open: F,
 ) -> (Snapshot, Result<()>)
@@ -152,7 +155,9 @@ where
     F: FnMut(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>>,
 {
     let mut next = previous.clone();
-    if action.is_some_and(|(model, _)| model >= REGISTRY.len()) {
+    if action.is_some_and(|(model, _)| model >= REGISTRY.len())
+        || scope.is_some_and(|model| model >= REGISTRY.len())
+    {
         return (next, Err("设备编号无效".into()));
     }
     let interfaces = match interfaces {
@@ -168,6 +173,9 @@ where
     };
     let mut action_result = Ok(());
     for (model, spec) in REGISTRY.iter().enumerate() {
+        if scope.is_some_and(|target| target != model) {
+            continue;
+        }
         let mut candidates: Vec<_> = interfaces.iter().filter(|i| matches(i, model)).collect();
         candidates.sort_by_key(|i| {
             if spec.adapter == Adapter::Razer && i.pid == 0xb6 {
@@ -189,7 +197,7 @@ where
         d.active_stage = None;
         if candidates.is_empty() {
             d.error = "未检测到支持的接口，请连接接收器或 USB 数据线".into();
-            if action.is_some_and(|a| a.0 == model) {
+            if scope == Some(model) {
                 action_result = Err(d.error.clone());
             }
             continue;
@@ -219,7 +227,7 @@ where
         }
         if let Some(s) = read {
             *d = s;
-        } else if action.is_some_and(|a| a.0 == model) {
+        } else if scope == Some(model) {
             action_result = Err(d.error.clone());
         }
     }
@@ -353,6 +361,11 @@ mod tests {
                 roundtrip(&*session, Action::Stage(other), Action::Stage(stage));
             }
             for setting in spec.advanced {
+                if setting.key == crate::model::Tuning::DpiStages
+                    || setting.key == crate::model::Tuning::MacMode
+                {
+                    continue;
+                }
                 if let Some(value) = before.tuning.get(&setting.key) {
                     if let Some((other, _)) = setting.choices.iter().find(|(v, _)| v != value) {
                         roundtrip(
@@ -410,6 +423,65 @@ mod tests {
                 Ok(())
             }
         }
+    }
+    #[test]
+    fn setting_refresh_probes_only_target_and_keeps_other_timestamps() {
+        let mut previous = Snapshot::default();
+        previous.devices[1].fresh = true;
+        previous.devices[1].present = true;
+        previous.devices[1].percent = Some(88);
+        previous.devices[1].updated = 123;
+        let interfaces = vec![
+            Interface {
+                path: "mi_00".into(),
+                vid: 0x1532,
+                pid: 0xb7,
+                usage_page: 1,
+                usage: 2,
+                feature_len: 91,
+                input_len: 0,
+                output_len: 0,
+                product: "test".into(),
+            },
+            Interface {
+                path: "a5".into(),
+                vid: 0x3837,
+                pid: 0x100c,
+                usage_page: 0xff01,
+                usage: 1,
+                feature_len: 65,
+                input_len: 65,
+                output_len: 65,
+                product: "A5 ultra".into(),
+            },
+        ];
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = writes.clone();
+        let mut opens = 0;
+        let (next, result) = refresh_with(
+            &previous,
+            Some((0, Action::Dpi(1600))),
+            Ok(interfaces),
+            |model, _| {
+                assert_eq!(model, 0);
+                opens += 1;
+                Ok(Box::new(FakeSession {
+                    state: State {
+                        present: true,
+                        fresh: true,
+                        dpi: Some(1600),
+                        ..State::default()
+                    },
+                    writes: counter.clone(),
+                    fail: false,
+                }))
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(opens, 1);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(next.devices[1].updated, 123);
+        assert_eq!(next.devices[1].percent, Some(88));
     }
     #[test]
     fn unplug_keeps_cached_battery_but_disables_settings() {

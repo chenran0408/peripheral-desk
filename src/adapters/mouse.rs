@@ -144,6 +144,18 @@ impl Channel {
                     } as u8);
                     s.tuning.insert(Tuning::Debounce, c.raw[18] as u16);
                     s.tuning.insert(Tuning::Lod, (c.raw[17] & 3) as u16);
+                    s.tuning.insert(Tuning::DpiStages, c.stages as u16);
+                    // Newer three-state performance modes are not declared for
+                    // the original A5 Ultra; reject an unexpected mode bit.
+                    if c.raw[17] & 0x40 == 0 {
+                        s.tuning
+                            .insert(Tuning::EsportsMode, u16::from(c.raw[17] & 0x80 != 0));
+                    }
+                    let rotation = c.raw[49] as i8;
+                    if (-30..=30).contains(&rotation) {
+                        s.tuning
+                            .insert(Tuning::SensorRotation, (rotation as i16 + 30) as u16);
+                    }
                     for (key, mask) in [
                         (Tuning::Ripple, 4),
                         (Tuning::Angle, 8),
@@ -218,9 +230,14 @@ impl Channel {
                 self.mchose(0x11, 0x41, &[usb, wireless], false)?;
             }
             (Adapter::MchoseMouse, Action::Sleep(seconds))
-                if (60..=3600).contains(&seconds) && seconds % 60 == 0 =>
+                if seconds <= 3600 && seconds % 60 == 0 =>
             {
-                self.mchose(0x11, 0x0a, &[1, (seconds / 60) as u8], false)?;
+                self.mchose(
+                    0x11,
+                    0x0a,
+                    &protocol::mchose_sleep_arguments(seconds)?,
+                    false,
+                )?;
             }
             (Adapter::MchoseMouse, Action::Stage(stage))
                 if (stage as usize) < current.dpi_stages.len() =>
@@ -232,6 +249,10 @@ impl Channel {
             }
             (Adapter::MchoseMouse, Action::Tune(Tuning::Debounce, v)) if v <= 20 => {
                 self.mchose(0x11, 0x43, &[v as u8], false)?;
+            }
+            (Adapter::MchoseMouse, Action::Tune(Tuning::DpiStages, count)) => {
+                let cfg = self.config()?;
+                self.mchose(0x12, 0x40, &cfg.stage_count_arguments(count)?, false)?;
             }
             (Adapter::MchoseMouse, Action::Tune(key, v)) => {
                 let cfg = self.config()?;
@@ -265,5 +286,132 @@ impl super::DeviceSession for Channel {
     }
     fn apply(&self, action: Action) -> Result<()> {
         Channel::apply(self, action)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn require_config(channel: &Channel, expected: &[u8], label: &str) -> Result<()> {
+        let actual = channel.config()?.raw;
+        if actual != expected {
+            let differences: Vec<_> = actual
+                .iter()
+                .zip(expected)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .map(|(i, (a, b))| format!("[{i}] expected=0x{b:02X}, actual=0x{a:02X}"))
+                .collect();
+            return Err(format!("{label}: 完整配置未匹配，差异 {differences:?}"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "Changes/restores physical first-generation A5 settings; optional KEEP_AWAKE keeps Sleep(0)"]
+    fn live_a5_deep_roundtrip() {
+        let spec = crate::devices::REGISTRY
+            .iter()
+            .find(|spec| spec.key == "mchose-a5-ultra")
+            .unwrap();
+        let interfaces = crate::hid::enumerate().unwrap();
+        let matches: Vec<_> = interfaces
+            .iter()
+            .filter(|interface| (spec.matcher)(interface))
+            .collect();
+        assert_eq!(matches.len(), 1, "实机测试要求唯一的首代 A5 Ultra 接口");
+        let channel = Channel::new(matches[0], spec).unwrap();
+        let baseline = channel.config().unwrap();
+        let state = channel.read().unwrap();
+        let sleep = state.sleep_seconds.unwrap();
+        let esports = *state.tuning.get(&Tuning::EsportsMode).unwrap();
+        let rotation = *state.tuning.get(&Tuning::SensorRotation).unwrap();
+        let restore_table = baseline
+            .stage_count_arguments(baseline.stages as u16)
+            .unwrap();
+        println!(
+            "A5 baseline: sleep={sleep}s, stages={}, wired_stage={}, wireless_stage={}, esports={esports}, rotation={}°",
+            baseline.stages, baseline.wired_stage, baseline.wireless_stage, rotation as i16-30
+        );
+
+        // No assertion or early return can bypass the restoration block below.
+        let outcome = (|| -> Result<()> {
+            if baseline.stages != 6 || baseline.wired_stage >= 5 || baseline.wireless_stage >= 5 {
+                return Err("本轮非越界档数测试要求原6档且两个当前索引均小于5".into());
+            }
+            channel.apply(Action::Sleep(0))?;
+            let mut expected = baseline.raw.clone();
+            expected[19] = 0;
+            require_config(&channel, &expected, "不休眠")?;
+            println!("A5 Sleep(0): confirmed");
+
+            channel.apply(Action::Tune(Tuning::EsportsMode, 1 - esports))?;
+            expected[17] = (baseline.raw[17] & !0x80) | if esports == 0 { 0x80 } else { 0 };
+            require_config(&channel, &expected, "电竞模式")?;
+            channel.apply(Action::Tune(Tuning::EsportsMode, esports))?;
+            expected[17] = baseline.raw[17];
+            require_config(&channel, &expected, "恢复电竞模式")?;
+            println!("A5 EsportsMode: toggled and restored");
+
+            for value in [31, 29] {
+                channel.apply(Action::Tune(Tuning::SensorRotation, value))?;
+                expected[49] = (value as i16 - 30) as i8 as u8;
+                require_config(&channel, &expected, "传感器旋转")?;
+            }
+            channel.apply(Action::Tune(Tuning::SensorRotation, rotation))?;
+            expected[49] = baseline.raw[49];
+            require_config(&channel, &expected, "恢复传感器旋转")?;
+            println!("A5 SensorRotation: +1° / -1° and restored");
+
+            for count in [5, 6] {
+                channel.apply(Action::Tune(Tuning::DpiStages, count))?;
+                expected[16] = count as u8;
+                require_config(&channel, &expected, "DPI 档数")?;
+            }
+            println!("A5 DpiStages: 6 -> 5 -> 6, all hidden X/Y values retained");
+
+            if baseline.wired_stage == 0 && baseline.wireless_stage == 0 {
+                return Err("拒绝越界缩档测试要求至少一条链路的当前索引大于0".into());
+            }
+            let rejected = channel.apply(Action::Tune(Tuning::DpiStages, 1));
+            require_config(&channel, &expected, "拒绝越界缩档后完整配置保持不变")?;
+            if rejected.is_ok() {
+                return Err("本应拒绝会改变当前 DPI 档位的缩档请求".into());
+            }
+            println!("A5 unsafe stage reduction rejected, complete config unchanged: {rejected:?}");
+            Ok(())
+        })();
+
+        // Attempt every restoration even if a prior command or read-back failed.
+        let mut failures = Vec::new();
+        if let Err(error) = channel.mchose(0x12, 0x40, &restore_table, false) {
+            failures.push(format!("DPI 表恢复失败：{error}"));
+        }
+        for action in [
+            Action::Tune(Tuning::EsportsMode, esports),
+            Action::Tune(Tuning::SensorRotation, rotation),
+            Action::Sleep(sleep),
+        ] {
+            if let Err(error) = channel.apply(action) {
+                failures.push(format!("恢复 {action:?} 失败：{error}"));
+            }
+        }
+        if let Err(error) = require_config(&channel, &baseline.raw, "最终恢复核对") {
+            failures.push(error);
+        }
+        println!("A5 deep roundtrip result: {outcome:?}; restore errors: {failures:?}");
+        assert!(failures.is_empty(), "{failures:?}");
+        assert!(outcome.is_ok(), "{outcome:?}");
+
+        if std::env::var("PERIPHERAL_DESK_A5_KEEP_AWAKE").as_deref() == Ok("1") {
+            let keep_awake = channel.apply(Action::Sleep(0));
+            if keep_awake.is_err() {
+                let restore_sleep = channel.apply(Action::Sleep(sleep));
+                assert!(restore_sleep.is_ok(), "{restore_sleep:?}");
+            }
+            assert!(keep_awake.is_ok(), "{keep_awake:?}");
+            println!("A5 KEEP_AWAKE enabled for this test session: Sleep(0); original Sleep({sleep}) must be restored before release.");
+        }
     }
 }

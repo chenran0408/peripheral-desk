@@ -33,7 +33,7 @@ enum Page {
     Device(usize),
     Preferences,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Home,
     Device(usize),
@@ -47,12 +47,15 @@ enum Command {
     AudioStep(Tuning, i16),
     AudioPage(u8),
     ConnectAudio,
+    ExportAudio,
+    ImportAudio,
     FlatEq,
     Interval(u32),
     Threshold(u8),
     Notices,
     Diagnose,
     Advanced(bool),
+    SettingsPage(i32),
     HomePage(i32),
 }
 struct Button {
@@ -66,13 +69,16 @@ struct App {
     snapshot: Snapshot,
     page: Page,
     advanced: bool,
+    settings_page: usize,
     audio_page: u8,
     eq_drag: Option<(Tuning, R)>,
     home_page: usize,
     controls: Vec<Button>,
     pending: Option<Receiver<WorkResult>>,
+    modal_open: bool,
     queued: std::collections::VecDeque<(usize, Action)>,
     inflight: Option<(usize, Action)>,
+    profile_notice: Option<&'static str>,
     preview_dpi: Option<u16>,
     dpi: u32,
     width: i32,
@@ -144,13 +150,16 @@ pub fn run(hidden: bool, battery: bool) {
             snapshot: Snapshot::load(),
             page: Page::Home,
             advanced: false,
+            settings_page: 0,
             audio_page: 0,
             eq_drag: None,
             home_page: 0,
             controls: vec![],
             pending: None,
+            modal_open: false,
             queued: std::collections::VecDeque::new(),
             inflight: None,
+            profile_notice: None,
             preview_dpi: None,
             dpi: GetDpiForSystem(),
             width: 1240,
@@ -319,7 +328,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_TIMER if w == 2 => {
-            if a.pending.is_none() && !a.dragging && a.eq_drag.is_none() {
+            if a.pending.is_none() && !a.modal_open && !a.dragging && a.eq_drag.is_none() {
                 KillTimer(hwnd, 2);
                 if let Some(action) = a.queued.pop_front() {
                     a.begin(hwnd, Some(action));
@@ -465,7 +474,7 @@ impl App {
             0,
             wide("BUTTON").as_ptr(),
             wide(label).as_ptr(),
-            WS_VISIBLE | WS_CHILD | WS_TABSTOP | BS_OWNERDRAW as u32,
+            WS_CHILD | WS_TABSTOP | BS_OWNERDRAW as u32,
             self.px(r.x),
             self.px(r.y),
             self.px(r.w),
@@ -485,6 +494,17 @@ impl App {
         });
     }
     unsafe fn layout(&mut self, hwnd: HWND) {
+        // Controls are created hidden and shown only after their owner-draw
+        // metadata exists. Preserve keyboard focus across background refreshes.
+        let focus = GetFocus();
+        let focused = if GetForegroundWindow() == hwnd {
+            self.controls
+                .iter()
+                .find(|b| b.hwnd == focus)
+                .map(|b| b.command)
+        } else {
+            None
+        };
         let mut r = zeroed();
         GetClientRect(hwnd, &mut r);
         self.width = self.logical(r.right).max(1000);
@@ -497,6 +517,9 @@ impl App {
             ReleaseCapture();
         }
         self.eq_drag = None;
+        if let Page::Device(m) = self.page {
+            self.settings_page = self.settings_page.min(self.settings_pages(m) - 1);
+        }
         let w = self.width;
         let h = self.height;
         self.add(
@@ -604,6 +627,20 @@ impl App {
                         GHOST,
                         Command::ConnectAudio,
                     );
+                    self.add(
+                        hwnd,
+                        "导出音效",
+                        R::new(188, h - 62, 96, 38),
+                        GHOST,
+                        Command::ExportAudio,
+                    );
+                    self.add(
+                        hwnd,
+                        "导入音效",
+                        R::new(296, h - 62, 96, 38),
+                        GHOST,
+                        Command::ImportAudio,
+                    );
                 }
                 if REGISTRY[m].kind != Kind::Headset && !REGISTRY[m].advanced.is_empty() {
                     self.add(
@@ -624,6 +661,22 @@ impl App {
                 if (self.advanced || REGISTRY[m].kind == Kind::Headset)
                     && !REGISTRY[m].advanced.is_empty()
                 {
+                    if REGISTRY[m].kind != Kind::Headset && self.settings_pages(m) > 1 {
+                        self.add(
+                            hwnd,
+                            "上一页",
+                            R::new(rx + rw - 240, 101, 64, 34),
+                            GHOST,
+                            Command::SettingsPage(-1),
+                        );
+                        self.add(
+                            hwnd,
+                            "下一页",
+                            R::new(rx + rw - 94, 101, 64, 34),
+                            GHOST,
+                            Command::SettingsPage(1),
+                        );
+                    }
                     for (row, setting) in self.visible_settings(m).iter().enumerate() {
                         let y = 172 + row as i32 * 78;
                         let volume = is_volume(setting.key);
@@ -753,17 +806,21 @@ impl App {
                         );
                     }
                     let sleeps = REGISTRY[m].sleeps;
-                    let bw =
-                        ((rw - 200 - 6 * (sleeps.len() as i32 - 1)) / sleeps.len() as i32).min(85);
-                    let x = rx + rw - 30 - (bw + 6) * sleeps.len() as i32 + 6;
-                    for (i, sec) in sleeps.iter().enumerate() {
+                    let zero_extra = if sleeps.contains(&0) { 18 } else { 0 };
+                    let bw = ((rw - 200 - 6 * (sleeps.len() as i32 - 1) - zero_extra)
+                        / sleeps.len() as i32)
+                        .min(85);
+                    let mut x = rx + rw - 30 - ((bw + 6) * sleeps.len() as i32 - 6 + zero_extra);
+                    for sec in sleeps {
+                        let width = bw + if *sec == 0 { zero_extra } else { 0 };
                         self.add(
                             hwnd,
-                            &format!("{} 分", sec / 60),
-                            R::new(x + i as i32 * (bw + 6), 425, bw, 35),
+                            &sleep_label(*sec, false),
+                            R::new(x, 425, width, 35),
                             CHIP,
                             Command::Setting(Action::Sleep(*sec)),
                         );
+                        x += width + 6;
                     }
                 }
                 self.add(
@@ -824,10 +881,29 @@ impl App {
             }
         }
         self.render(hwnd);
+        for b in &self.controls {
+            ShowWindow(b.hwnd, SW_SHOWNA);
+        }
+        if let Some(command) = focused {
+            let target = self
+                .controls
+                .iter()
+                .find(|b| b.command == command && IsWindowEnabled(b.hwnd) != 0)
+                .or_else(|| {
+                    self.controls.iter().find(|b| {
+                        IsWindowEnabled(b.hwnd) != 0
+                            && !matches!(b.command, Command::Close | Command::Minimize)
+                    })
+                });
+            if let Some(b) = target {
+                SetFocus(b.hwnd);
+            }
+        }
     }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
         self.page = page;
         self.advanced = false;
+        self.settings_page = 0;
         self.audio_page = 0;
         self.preview_dpi = None;
         self.layout(hwnd);
@@ -836,6 +912,7 @@ impl App {
     fn can_adjust(&self) -> bool {
         matches!(self.page,Page::Device(m)if self.snapshot.devices[m].fresh)
             && self.pending.is_none()
+            && !self.modal_open
     }
     fn value(&self, m: usize) -> Option<u16> {
         self.queued
@@ -892,6 +969,8 @@ impl App {
                 self.layout(hwnd);
             }
             Command::ConnectAudio => self.connect_audio(hwnd),
+            Command::ExportAudio => self.audio_profile(hwnd, false),
+            Command::ImportAudio => self.audio_profile(hwnd, true),
             Command::FlatEq => {
                 if let Page::Device(m) = self.page {
                     for (key, _) in crate::audio_fx::EQ_BANDS {
@@ -901,8 +980,17 @@ impl App {
                     }
                 }
             }
+            Command::SettingsPage(delta) => {
+                if let Page::Device(m) = self.page {
+                    self.settings_page = (self.settings_page as i32 + delta)
+                        .clamp(0, self.settings_pages(m) as i32 - 1)
+                        as usize;
+                    self.layout(hwnd);
+                }
+            }
             Command::Advanced(value) => {
                 self.advanced = value;
+                self.settings_page = 0;
                 self.layout(hwnd);
             }
             Command::HomePage(delta) => {
@@ -977,20 +1065,24 @@ impl App {
         self.render(hwnd);
     }
     unsafe fn quit(&self, hwnd: HWND) {
-        if self.inflight.is_some() || !self.queued.is_empty() {
+        if self.modal_open {
+            return;
+        }
+        if self.inflight.is_some() || self.profile_notice.is_some() || !self.queued.is_empty() {
             message("设备设置正在保存，请等待完成后退出。");
         } else {
             DestroyWindow(hwnd);
         }
     }
     unsafe fn begin(&mut self, hwnd: HWND, action: Option<(usize, Action)>) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.modal_open {
             return;
         }
         let snapshot = self.snapshot.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.inflight = action;
+        self.profile_notice = None;
         self.set_status(
             if action.is_some() {
                 "正在保存到设备并读回确认…"
@@ -1013,6 +1105,7 @@ impl App {
             return;
         };
         let writing = self.inflight.take().is_some();
+        let profile_notice = self.profile_notice.take();
         match rx.try_recv() {
             Ok((mut s, result)) => {
                 s.interval = self.snapshot.interval;
@@ -1025,12 +1118,24 @@ impl App {
                 let alerts = self.snapshot.alerts();
                 let save = self.snapshot.save();
                 match (result, save) {
-                    (Err(e), _) => self.set_status(&format!("未能确认保存：{e}"), true),
+                    (Err(e), _) => self.set_status(
+                        &format!(
+                            "{}：{e}",
+                            if profile_notice.is_some() {
+                                "音效配置操作失败"
+                            } else {
+                                "未能确认保存"
+                            }
+                        ),
+                        true,
+                    ),
                     (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
                     _ => {
                         let count = self.snapshot.devices.iter().filter(|d| d.fresh).count();
                         self.set_status(
-                            &if writing {
+                            &if let Some(notice) = profile_notice {
+                                notice.into()
+                            } else if writing {
                                 "设置已保存，读回确认成功".into()
                             } else {
                                 format!("{count} 台设备在线 · 状态已更新")
@@ -1057,7 +1162,22 @@ impl App {
             SetTimer(hwnd, 2, 100, None);
         }
     }
+    fn setting_rows(&self) -> usize {
+        ((self.height - 351) / 78).max(1) as usize
+    }
+    fn settings_pages(&self, m: usize) -> usize {
+        if REGISTRY[m].kind == Kind::Headset {
+            1
+        } else {
+            REGISTRY[m]
+                .advanced
+                .len()
+                .div_ceil(self.setting_rows())
+                .max(1)
+        }
+    }
     fn visible_settings(&self, m: usize) -> Vec<&'static crate::devices::SettingSpec> {
+        let audio = REGISTRY[m].kind == Kind::Headset;
         REGISTRY[m]
             .advanced
             .iter()
@@ -1065,6 +1185,16 @@ impl App {
                 REGISTRY[m].kind != Kind::Headset
                     || (crate::audio_fx::page(s.key) == self.audio_page
                         && !(self.audio_page == 1 && s.key != Tuning::EqEnabled))
+            })
+            .skip(if audio {
+                0
+            } else {
+                self.settings_page * self.setting_rows()
+            })
+            .take(if audio {
+                usize::MAX
+            } else {
+                self.setting_rows()
             })
             .collect()
     }
@@ -1120,7 +1250,7 @@ impl App {
             }
             c.text(
                 &value
-                    .map(|v| format!("{:+.1}", v as f32 - 20.))
+                    .map(|v| format!("{:+}", v as i16 - 20))
                     .unwrap_or_else(|| "—".into()),
                 R::new(x - 5, 239, bw, 25),
                 12,
@@ -1133,6 +1263,9 @@ impl App {
     }
     unsafe fn connect_audio(&mut self, hwnd: HWND) {
         use windows_sys::Win32::UI::Controls::Dialogs::*;
+        if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+            return;
+        }
         let mut file = [0u16; 32768];
         let filter = wide("C-Media 音效组件 (osConfLib.dll)\0osConfLib.dll\0\0");
         let mut dialog: OPENFILENAMEW = zeroed();
@@ -1144,7 +1277,10 @@ impl App {
         dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
         let title = wide("选择官方安装目录中的 x64 / osConfLib.dll");
         dialog.lpstrTitle = title.as_ptr();
-        if GetOpenFileNameW(&mut dialog) != 0 {
+        self.modal_open = true;
+        let accepted = GetOpenFileNameW(&mut dialog);
+        self.modal_open = false;
+        if accepted != 0 {
             let end = file.iter().position(|&v| v == 0).unwrap_or(file.len());
             let path = std::path::PathBuf::from(String::from_utf16_lossy(&file[..end]));
             match crate::audio_fx::configure(&path) {
@@ -1161,6 +1297,92 @@ impl App {
             }
         }
         self.render(hwnd);
+    }
+    unsafe fn audio_profile(&mut self, hwnd: HWND, import: bool) {
+        let Page::Device(model) = self.page else {
+            return;
+        };
+        use windows_sys::Win32::UI::Controls::Dialogs::*;
+        if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+            return;
+        }
+        let mut file = [0u16; 32768];
+        if !import {
+            let name = wide("G2-Pro-effects.json");
+            file[..name.len()].copy_from_slice(&name);
+        }
+        let filter = wide("G2 Pro 音效配置 (*.json)\0*.json\0\0");
+        let extension = wide("json");
+        let title = wide(if import {
+            "导入 G2 Pro 音效配置"
+        } else {
+            "导出 G2 Pro 音效配置"
+        });
+        let mut dialog: OPENFILENAMEW = zeroed();
+        dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+        dialog.hwndOwner = hwnd;
+        dialog.lpstrFilter = filter.as_ptr();
+        dialog.lpstrFile = file.as_mut_ptr();
+        dialog.nMaxFile = file.len() as u32;
+        dialog.lpstrDefExt = extension.as_ptr();
+        dialog.lpstrTitle = title.as_ptr();
+        dialog.Flags = OFN_PATHMUSTEXIST
+            | OFN_EXPLORER
+            | OFN_NOCHANGEDIR
+            | if import {
+                OFN_FILEMUSTEXIST
+            } else {
+                OFN_OVERWRITEPROMPT
+            };
+        self.modal_open = true;
+        let accepted = if import {
+            GetOpenFileNameW(&mut dialog)
+        } else {
+            GetSaveFileNameW(&mut dialog)
+        };
+        self.modal_open = false;
+        if accepted == 0 {
+            let error = CommDlgExtendedError();
+            if error != 0 {
+                self.set_status(&format!("选择配置文件失败：{error}"), true);
+                self.render(hwnd);
+            }
+            return;
+        }
+        let end = file.iter().position(|&v| v == 0).unwrap_or(file.len());
+        let path = std::path::PathBuf::from(String::from_utf16_lossy(&file[..end]));
+        let snapshot = self.snapshot.clone();
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        self.inflight = None;
+        self.profile_notice = Some(if import {
+            "音效配置已导入，读回确认成功"
+        } else {
+            "音效配置已导出"
+        });
+        self.set_status(
+            if import {
+                "正在导入音效配置并读回确认…"
+            } else {
+                "正在读取并导出音效配置…"
+            },
+            false,
+        );
+        self.render(hwnd);
+        let window = hwnd as usize;
+        thread::spawn(move || {
+            let result = if import {
+                crate::profiles::load_audio(&path)
+                    .and_then(|values| crate::audio_fx::apply_profile(&values))
+                    .map(|_| ())
+            } else {
+                crate::profiles::export_audio(&path)
+            };
+            let (state, _) = backend::refresh_device(&snapshot, model);
+            if tx.send((state, result)).is_ok() {
+                PostMessageW(window as HWND, DONE, 0, 0);
+            }
+        });
     }
     fn tuning_value(&self, m: usize, key: Tuning) -> Option<u16> {
         self.queued
@@ -1249,7 +1471,36 @@ impl App {
                             false
                         }
                 }
+                Command::ExportAudio | Command::ImportAudio => {
+                    self.pending.is_none()
+                        && self.queued.is_empty()
+                        && if let Page::Device(m) = self.page {
+                            self.snapshot.devices[m].fresh
+                                && self.snapshot.devices[m].settings_error.is_empty()
+                        } else {
+                            false
+                        }
+                }
                 Command::ConnectAudio => self.pending.is_none() && self.queued.is_empty(),
+                Command::SettingsPage(delta) => {
+                    if let Page::Device(m) = self.page {
+                        if delta < 0 {
+                            self.settings_page > 0
+                        } else {
+                            self.settings_page + 1 < self.settings_pages(m)
+                        }
+                    } else {
+                        false
+                    }
+                }
+                Command::HomePage(delta) => {
+                    if delta < 0 {
+                        self.home_page > 0
+                    } else {
+                        (self.home_page + 1) * if REGISTRY.len() > 3 { 4 } else { 3 }
+                            < REGISTRY.len()
+                    }
+                }
                 Command::Refresh => self.pending.is_none() && self.queued.is_empty(),
                 _ => true,
             };
@@ -1277,9 +1528,18 @@ impl App {
             c.text(
                 &self.status,
                 if matches!(self.page,Page::Device(m) if REGISTRY[m].kind==Kind::Headset) {
-                    R::new(194, self.height - 58, self.width - 515, 32)
+                    R::new(410, self.height - 58, self.width - 730, 32)
                 } else if self.page == Page::Home {
-                    R::new(170, self.height - 58, self.width - 340, 32)
+                    R::new(
+                        170,
+                        self.height - 58,
+                        if REGISTRY.len() > 4 {
+                            (self.width / 2 - 300).max(120)
+                        } else {
+                            self.width - 340
+                        },
+                        32,
+                    )
                 } else {
                     R::new(28, self.height - 58, self.width - 350, 32)
                 },
@@ -1386,7 +1646,7 @@ impl App {
                     DT_RIGHT,
                 );
             }
-            let y = h - 312;
+            let y = (h - 312).max(520);
             c.round(R::new(112, y, 176, 112), 20, FIELD, Some(BORDER));
             c.text(
                 "USB",
@@ -1423,7 +1683,7 @@ impl App {
             (
                 "自动休眠",
                 s.sleep_seconds
-                    .map(|v| format!("{} 分钟", v / 60))
+                    .map(|v| sleep_label(v, true))
                     .unwrap_or_else(|| "—".into()),
             ),
             ("供电状态", power(s).into()),
@@ -1436,7 +1696,7 @@ impl App {
             c.text(label, R::new(54, y, 120, 25), 13, 400, DIM, DT_LEFT);
             c.text(value, R::new(168, y, 178, 25), 13, 400, MUTED, DT_RIGHT);
         }
-        let ring_y = h - 327;
+        let ring_y = (h - 303).max(538);
         c.ring(
             R::new(133, ring_y, 134, 134),
             s.percent.filter(|_| s.fresh),
@@ -1578,7 +1838,7 @@ impl App {
             } else {
                 "点击上方「高级设置」，调整更多设备参数"
             },
-            R::new(cx, 548, rw - 70, 24),
+            R::new(cx, 542, rw - 70, 24),
             13,
             400,
             DIM,
@@ -1666,6 +1926,16 @@ impl App {
             DIM,
             DT_LEFT,
         );
+        if !audio && self.settings_pages(m) > 1 {
+            c.text(
+                &format!("{} / {}", self.settings_page + 1, self.settings_pages(m)),
+                R::new(rx + rw - 174, 101, 72, 34),
+                12,
+                400,
+                MUTED,
+                DT_CENTER,
+            );
+        }
         for (i, setting) in self.visible_settings(m).iter().enumerate() {
             let y = 169 + i as i32 * 78;
             c.text(
@@ -1757,6 +2027,9 @@ impl App {
         let height = item.rcItem.bottom - item.rcItem.top;
         let bitmap = CreateCompatibleBitmap(item.hDC, width, height);
         let old = SelectObject(dc, bitmap);
+        let brush = CreateSolidBrush(0x000d0a0a);
+        FillRect(dc, &item.rcItem, brush);
+        DeleteObject(brush);
         let mut buffered = *item;
         buffered.hDC = dc;
         self.paint_button(&buffered);
@@ -1774,18 +2047,6 @@ impl App {
         DeleteObject(brush);
         let c = Canvas::new(item.hDC, self.dpi);
         let r = R::new(1, 1, b.rect.w - 2, b.rect.h - 2);
-        if b.style == CARD {
-            if let Command::Device(m) = b.command {
-                self.card(&c, r, m);
-            }
-            return;
-        }
-        c.rect(
-            R::new(0, 0, b.rect.w, b.rect.h),
-            if b.style == CHIP { PANEL } else { BG },
-        );
-        let disabled = item.itemState & ODS_DISABLED != 0;
-        let selected = self.selected(b.command);
         let mut cursor: POINT = zeroed();
         GetCursorPos(&mut cursor);
         ScreenToClient(b.hwnd, &mut cursor);
@@ -1793,6 +2054,42 @@ impl App {
             && cursor.y >= 0
             && cursor.x < self.px(b.rect.w)
             && cursor.y < self.px(b.rect.h);
+        if b.style == CARD {
+            if let Command::Device(m) = b.command {
+                self.card(&c, r, m);
+                if hover || item.itemState & ODS_FOCUS != 0 {
+                    c.round(
+                        R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
+                        18,
+                        0,
+                        Some(if item.itemState & ODS_FOCUS != 0 {
+                            RED
+                        } else {
+                            0xff66505c
+                        }),
+                    );
+                }
+            }
+            return;
+        }
+        c.rect(
+            R::new(0, 0, b.rect.w, b.rect.h),
+            if b.style == CHIP || (b.rect.x >= 394 && b.rect.y >= 78 && b.rect.y < self.height - 82)
+            {
+                PANEL
+            } else {
+                BG
+            },
+        );
+        if b.rect.y < 65 {
+            c.gradient(
+                R::new(-b.rect.x, -b.rect.y, self.width * 2 / 3, 68),
+                0xff261119,
+                BG,
+            );
+        }
+        let disabled = item.itemState & ODS_DISABLED != 0;
+        let selected = self.selected(b.command);
         let color = if disabled {
             0xff18181f
         } else if selected {
@@ -1867,7 +2164,12 @@ impl App {
             if active {
                 c.glow(120, r.h / 2 + 12, 83);
             }
-            c.image(self.images.images[m], R::new(28, 58, 176, r.h - 78), active);
+            let image_area = match spec.kind {
+                Kind::Keyboard => R::new(18, 72, 196, r.h - 106),
+                Kind::Mouse => R::new(36, 66, 160, r.h - 98),
+                Kind::Headset => R::new(26, 66, 180, r.h - 98),
+            };
+            c.image(self.images.images[m], image_area, active);
             c.text(
                 spec.name,
                 R::new(222, 72, r.w - 244, 34),
@@ -2243,6 +2545,9 @@ unsafe extern "system" fn button_proc(
     _id: usize,
     _data: usize,
 ) -> LRESULT {
+    if msg == WM_ERASEBKGND {
+        return 1;
+    }
     if msg == WM_MOUSEMOVE {
         let mut tracking = TRACKMOUSEEVENT {
             cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -2267,6 +2572,15 @@ fn coalesce(queue: &mut std::collections::VecDeque<(usize, Action)>, model: usiz
 }
 fn same_kind(a: Action, b: Action) -> bool {
     a.same_setting(b)
+}
+fn sleep_label(seconds: u16, full: bool) -> String {
+    if seconds == 0 {
+        "不休眠".into()
+    } else if full {
+        format!("{} 分钟", seconds / 60)
+    } else {
+        format!("{} 分", seconds / 60)
+    }
 }
 fn is_volume(key: Tuning) -> bool {
     matches!(

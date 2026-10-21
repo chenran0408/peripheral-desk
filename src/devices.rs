@@ -80,7 +80,7 @@ pub static REGISTRY: &[DeviceSpec] = &[
         dpi_range: Some((50, 26000)),
         rates: &[125, 500, 1000, 2000, 4000],
         wired_rates: &[125, 500, 1000, 2000, 4000, 8000],
-        sleeps: &[60, 120, 180, 300, 600, 900, 1800, 3600],
+        sleeps: &[0, 60, 120, 180, 300, 600, 900, 1800, 3600],
         advanced: A5_ADVANCED,
         image_file: "a5.png",
         image_bytes: include_bytes!("../assets/a5.png"),
@@ -101,7 +101,7 @@ pub static REGISTRY: &[DeviceSpec] = &[
         dpi_range: None,
         rates: &[250, 500, 1000],
         wired_rates: &[250, 500, 1000],
-        sleeps: &[60, 120, 300, 600, 900, 1200],
+        sleeps: &[0, 60, 120, 300, 600, 900, 1200],
         advanced: G75_ADVANCED,
         image_file: "g75.png",
         image_bytes: include_bytes!("../assets/g75.png"),
@@ -155,6 +155,32 @@ pub struct SettingSpec {
 const SWITCH: &[(u16, &str)] = &[(0, "关闭"), (1, "开启")];
 pub const A5_ADVANCED: &[SettingSpec] = &[
     SettingSpec {
+        key: Tuning::DpiStages,
+        title: "DPI 档位数量",
+        hint: "启用 1～6 档，保留其他槽位的 DPI 数值",
+        choices: &[(1, "1"), (2, "2"), (3, "3"), (4, "4"), (5, "5"), (6, "6")],
+    },
+    SettingSpec {
+        key: Tuning::SensorRotation,
+        title: "传感器角度",
+        hint: "按握持习惯调整移动方向，0° 为默认",
+        choices: &[
+            (0, "−30°"),
+            (10, "−20°"),
+            (20, "−10°"),
+            (30, "0°"),
+            (40, "10°"),
+            (50, "20°"),
+            (60, "30°"),
+        ],
+    },
+    SettingSpec {
+        key: Tuning::EsportsMode,
+        title: "电竞模式",
+        hint: "初代 A5 的设备内置性能开关",
+        choices: SWITCH,
+    },
+    SettingSpec {
         key: Tuning::Debounce,
         title: "按键防抖",
         hint: "降低数值可缩短响应时间",
@@ -194,6 +220,33 @@ pub const A5_ADVANCED: &[SettingSpec] = &[
     },
 ];
 pub const G75_ADVANCED: &[SettingSpec] = &[
+    SettingSpec {
+        key: Tuning::LightColor,
+        title: "单色灯光颜色",
+        hint: "仅当前支持的单色灯效可调，自定义色会原样保留",
+        choices: &[
+            (0, "红"),
+            (1, "橙"),
+            (2, "黄"),
+            (3, "绿"),
+            (4, "青"),
+            (5, "蓝"),
+            (6, "紫"),
+            (7, "白"),
+        ],
+    },
+    SettingSpec {
+        key: Tuning::MacMode,
+        title: "Mac 模式",
+        hint: "切换设备内置布局，启用时解除 Windows 键锁定",
+        choices: SWITCH,
+    },
+    SettingSpec {
+        key: Tuning::MultiColor,
+        title: "灯光配色",
+        hint: "切换当前灯效单色 / 多色，保留亮度与速度",
+        choices: &[(0, "单色"), (1, "多色")],
+    },
     SettingSpec {
         key: Tuning::Brightness,
         title: "灯光亮度",

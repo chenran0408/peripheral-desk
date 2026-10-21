@@ -127,17 +127,52 @@ impl MchoseConfig {
         } else {
             self.wireless_stage
         };
-        let mut args = vec![self.wired_stage as u8, self.wireless_stage as u8, 0];
-        let mut x = self.raw[4..16].to_vec();
-        x[stage * 2..stage * 2 + 2].copy_from_slice(&value.to_le_bytes());
-        args.extend(x);
-        args.push(self.stages as u8);
-        args.push(self.raw[50]);
-        let mut y = self.raw[51..63].to_vec();
-        y[stage * 2..stage * 2 + 2].copy_from_slice(&value.to_le_bytes());
-        args.extend(y);
+        let mut args = self.dpi_table_arguments();
+        args[3 + stage * 2..5 + stage * 2].copy_from_slice(&value.to_le_bytes());
+        args[17 + stage * 2..19 + stage * 2].copy_from_slice(&value.to_le_bytes());
         args
     }
+
+    /// Full 0x40 body, retaining all six X/Y slots, including hidden stages.
+    fn dpi_table_arguments(&self) -> Vec<u8> {
+        // M HUB echoes its read-config `reserved` field into the 0x40 schema.
+        // First-generation A5 uses nonzero values here, so zeroing it changes
+        // another stored field when the current DPI stage is clamped.
+        let mut args = vec![
+            self.wired_stage as u8,
+            self.wireless_stage as u8,
+            self.raw[3],
+        ];
+        args.extend_from_slice(&self.raw[4..16]);
+        args.push(self.stages as u8);
+        args.push(self.raw[50]);
+        args.extend_from_slice(&self.raw[51..63]);
+        args
+    }
+
+    pub fn stage_count_arguments(&self, count: u16) -> Result<Vec<u8>> {
+        if !(1..=6).contains(&count) {
+            return Err("DPI 档位数量应在 1–6 之间".into());
+        }
+        if self.wired_stage >= count as usize || self.wireless_stage >= count as usize {
+            return Err(format!(
+                "请先将有线和无线连接的当前 DPI 档位切换到前 {count} 档，再减少档位数量"
+            ));
+        }
+        let mut args = self.dpi_table_arguments();
+        // Firmware changes the undocumented config byte 3 when an active
+        // index is clamped. Until that relation is fully understood, only
+        // change the count while both current link indices remain valid.
+        args[15] = count as u8;
+        Ok(args)
+    }
+}
+
+pub fn mchose_sleep_arguments(seconds: u16) -> Result<[u8; 2]> {
+    if seconds > 3600 || !seconds.is_multiple_of(60) {
+        return Err("休眠时间应为 0–60 分钟，0 表示不休眠".into());
+    }
+    Ok([u8::from(seconds != 0), (seconds / 60) as u8])
 }
 
 /// 0 means leave untouched for M HUB processing flags; 1 on, 2 off.
@@ -161,6 +196,15 @@ pub fn mchose_tuning_arguments(
                 _ => 3,
             };
             args[offset] = if value == 1 { 1 } else { 2 };
+        }
+        // First-generation A5 exposes the two-state esports control, not the
+        // newer models' three-state performance selector. Zero leaves it alone.
+        Tuning::EsportsMode if value <= 1 && config.raw[17] & 0x40 == 0 => {
+            args[6] = value as u8 + 1
+        }
+        Tuning::SensorRotation if value <= 60 => {
+            args[7] = 1;
+            args[8] = (value as i16 - 30) as i8 as u8;
         }
         _ => return Err("传感器参数不在已知范围内".into()),
     }
@@ -204,6 +248,97 @@ pub fn razer_stage_arguments(body: &[u8], stage: u8, dpi: Option<u16>) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a5_never_sleep_has_explicit_disable_flag() {
+        assert_eq!(mchose_sleep_arguments(0).unwrap(), [0, 0]);
+        assert_eq!(mchose_sleep_arguments(60).unwrap(), [1, 1]);
+        assert_eq!(mchose_sleep_arguments(3600).unwrap(), [1, 60]);
+        assert!(mchose_sleep_arguments(30).is_err());
+        assert!(mchose_sleep_arguments(3660).is_err());
+    }
+
+    #[test]
+    fn a5_rotation_and_esports_preserve_other_sensor_controls() {
+        use crate::model::Tuning;
+        let mut raw = vec![0; 63];
+        raw[16] = 1;
+        raw[17] = 0x9e;
+        let config = MchoseConfig::decode(&raw).unwrap();
+        for (value, wire) in [(0, 226), (30, 0), (60, 30)] {
+            assert_eq!(
+                mchose_tuning_arguments(&config, Tuning::SensorRotation, value).unwrap(),
+                vec![2, 0, 0, 0, 0, 0, 0, 1, wire]
+            );
+        }
+        assert_eq!(
+            mchose_tuning_arguments(&config, Tuning::EsportsMode, 0).unwrap(),
+            vec![2, 0, 0, 0, 0, 0, 1, 0, 0]
+        );
+        assert_eq!(
+            mchose_tuning_arguments(&config, Tuning::EsportsMode, 1).unwrap(),
+            vec![2, 0, 0, 0, 0, 0, 2, 0, 0]
+        );
+        assert!(mchose_tuning_arguments(&config, Tuning::SensorRotation, 61).is_err());
+        assert!(mchose_tuning_arguments(&config, Tuning::EsportsMode, 2).is_err());
+        raw[17] |= 0x40;
+        let unknown_mode = MchoseConfig::decode(&raw).unwrap();
+        assert!(mchose_tuning_arguments(&unknown_mode, Tuning::EsportsMode, 1).is_err());
+    }
+
+    #[test]
+    fn a5_stage_count_preserves_hidden_xy_slots_and_rejects_clamping() {
+        let mut raw = vec![0; 63];
+        raw[1] = 0x31;
+        raw[2] = 0x20;
+        raw[3] = 2;
+        raw[16] = 6;
+        raw[50] = 0xff;
+        for i in 0..6 {
+            raw[4 + i * 2..6 + i * 2].copy_from_slice(&(400u16 * (i as u16 + 1)).to_le_bytes());
+            raw[51 + i * 2..53 + i * 2].copy_from_slice(&(450u16 * (i as u16 + 1)).to_le_bytes());
+        }
+        let cfg = MchoseConfig::decode(&raw).unwrap();
+        let reduced = cfg.stage_count_arguments(2).unwrap();
+        assert_eq!(&reduced[..3], &[1, 0, 2]);
+        assert_eq!(reduced[15], 2);
+        assert_eq!(reduced[16], 0xff);
+        assert_eq!(&reduced[3..15], &raw[4..16]);
+        assert_eq!(&reduced[17..29], &raw[51..63]);
+        raw[1] = (raw[1] & 0xf0) | reduced[0];
+        raw[2] = (raw[2] & 0xf0) | reduced[1];
+        raw[16] = reduced[15];
+        let restored_count = MchoseConfig::decode(&raw)
+            .unwrap()
+            .stage_count_arguments(6)
+            .unwrap();
+        assert_eq!(&restored_count[3..15], &cfg.raw[4..16]);
+        assert_eq!(&restored_count[17..29], &cfg.raw[51..63]);
+        assert_eq!(&restored_count[..2], &[1, 0]);
+        assert_eq!(restored_count[2], 2);
+        assert_eq!(restored_count[15], 6);
+        assert!(cfg.stage_count_arguments(0).is_err());
+        assert!(cfg.stage_count_arguments(7).is_err());
+        assert!(cfg.stage_count_arguments(1).is_err());
+        raw[1] = 0x30;
+        raw[2] = 0x21;
+        let wireless_outside = MchoseConfig::decode(&raw).unwrap();
+        assert!(wireless_outside.stage_count_arguments(1).is_err());
+    }
+
+    #[test]
+    fn a5_dpi_edits_echo_reserved_config_byte() {
+        let mut raw = vec![0; 63];
+        raw[1] = 0x32;
+        raw[2] = 0x21;
+        raw[3] = 2;
+        raw[16] = 6;
+        let config = MchoseConfig::decode(&raw).unwrap();
+        for wired in [false, true] {
+            let args = config.dpi_arguments(1600, wired);
+            assert_eq!(&args[..3], &[2, 1, 2]);
+        }
+    }
 
     #[test]
     fn sensor_write_changes_only_requested_toggle() {

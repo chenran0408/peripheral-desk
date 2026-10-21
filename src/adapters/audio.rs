@@ -119,6 +119,14 @@ impl AudioSession {
         }
     }
 }
+pub fn effects_available() -> Result<()> {
+    let session = AudioSession::open()?;
+    if session.fx_disabled {
+        Err("Windows 已关闭音频增强，音效暂不可用；音量控制不受影响".into())
+    } else {
+        Ok(())
+    }
+}
 impl super::DeviceSession for AudioSession {
     fn read(&self) -> Result<State> {
         unsafe {

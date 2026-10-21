@@ -277,6 +277,8 @@ fn validate_library(path: &Path) -> Result<()> {
 struct Request {
     path: PathBuf,
     action: Option<(Tuning, u16)>,
+    #[serde(default)]
+    values: BTreeMap<Tuning, u16>,
 }
 #[derive(Default, Serialize, Deserialize)]
 pub struct Reply {
@@ -284,6 +286,14 @@ pub struct Reply {
     pub error: String,
 }
 pub fn query(action: Option<(Tuning, u16)>) -> Result<Reply> {
+    request(action, BTreeMap::new())
+}
+pub fn apply_profile(values: &BTreeMap<Tuning, u16>) -> Result<Reply> {
+    crate::profiles::validate_audio_values(values)?;
+    request(None, values.clone())
+}
+fn request(action: Option<(Tuning, u16)>, values: BTreeMap<Tuning, u16>) -> Result<Reply> {
+    crate::adapters::audio::effects_available()?;
     let config: Config = serde_json::from_slice(
         &std::fs::read(config_path())
             .map_err(|_| "请先连接已安装的 HECATE 音效组件".to_string())?,
@@ -292,6 +302,7 @@ pub fn query(action: Option<(Tuning, u16)>) -> Result<Reply> {
     let request = serde_json::to_vec(&Request {
         path: config.path,
         action,
+        values,
     })
     .map_err(|e| e.to_string())?;
     let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
@@ -530,37 +541,135 @@ fn check(code: u32, operation: &str) -> Result<()> {
         Err(format!("{operation} 失败（{code:#x}）"))
     }
 }
-fn run(req: Request) -> Result<Reply> {
-    let sdk = Sdk::open(&req.path)?;
-    let devices = sdk.devices()?;
-    if let Some((key, value)) = req.action {
-        let setting = spec(key).ok_or("未开放的音效参数")?;
-        let dev = devices.get(&setting.channel).ok_or("该音频通道未连接")?;
-        // Reading first prevents writes to a property absent from the current APO.
-        let original = sdk.get_value(dev, setting)?;
-        if let Err(error) = sdk.set_value(dev, setting, value) {
-            return match sdk.set_value(dev, setting, original) {
-                Ok(()) => Err(format!("{error}；已恢复原值")),
-                Err(restore) => Err(format!("{error}；恢复原值失败：{restore}")),
+fn read_values(sdk: &Sdk, devices: &BTreeMap<usize, Dev>) -> BTreeMap<Tuning, u16> {
+    SPECS
+        .iter()
+        .filter_map(|setting| {
+            devices
+                .get(&setting.channel)
+                .and_then(|dev| sdk.get_value(dev, setting).ok())
+                .map(|v| (setting.key, v))
+        })
+        .collect()
+}
+fn apply_requested<F>(
+    desired: &BTreeMap<Tuning, u16>,
+    baseline: &BTreeMap<Tuning, u16>,
+    mut write: F,
+) -> Result<()>
+where
+    F: FnMut(Tuning, u16) -> Result<()>,
+{
+    for (key, value) in desired {
+        let setting = spec(*key).ok_or("未开放的音效参数")?;
+        if *value > setting.max {
+            return Err(format!("{key:?} 超出允许范围"));
+        }
+        if !baseline.contains_key(key) {
+            return Err(format!("当前驱动未提供 {key:?}，没有修改任何设置"));
+        }
+    }
+    let mut plan: Vec<_> = desired
+        .iter()
+        .filter(|(key, value)| baseline.get(key) != Some(*value))
+        .map(|(key, value)| (*key, *value))
+        .collect();
+    // Turn requested effects off before parameters; turn them on only after parameters.
+    plan.sort_by_key(|(key, value)| {
+        if spec(*key).unwrap().max == 1 {
+            if *value == 0 {
+                0
+            } else {
+                2
+            }
+        } else {
+            1
+        }
+    });
+    let mut attempted = Vec::new();
+    for (key, value) in plan {
+        attempted.push(key);
+        if let Err(error) = write(key, value) {
+            let mut errors = Vec::new();
+            for key in attempted.into_iter().rev() {
+                if let Err(e) = write(key, baseline[&key]) {
+                    errors.push(e);
+                }
+            }
+            return if errors.is_empty() {
+                Err(format!("{error}；已恢复原设置"))
+            } else {
+                Err(format!("{error}；部分设置恢复失败：{}", errors.join("；")))
             };
         }
     }
-    let mut reply = Reply::default();
-    for setting in SPECS {
-        if let Some(dev) = devices.get(&setting.channel) {
-            if let Ok(value) = sdk.get_value(dev, setting) {
-                reply.values.insert(setting.key, value);
-            }
+    Ok(())
+}
+fn run(req: Request) -> Result<Reply> {
+    let mut desired = req.values;
+    if let Some((key, value)) = req.action {
+        if !desired.is_empty() {
+            return Err("音效请求同时包含单项与配置，已拒绝执行".into());
         }
+        desired.insert(key, value);
     }
-    if reply.values.is_empty() {
+    if !desired.is_empty() {
+        crate::profiles::validate_audio_values(&desired)?;
+    }
+    let sdk = Sdk::open(&req.path)?;
+    let devices = sdk.devices()?;
+    let baseline = read_values(&sdk, &devices);
+    if baseline.is_empty() {
         return Err("未读取到可用音效，请检查原驱动和音效组件是否安装完整".into());
     }
-    Ok(reply)
+    apply_requested(&desired, &baseline, |key, value| {
+        let setting = spec(key).unwrap();
+        let dev = devices.get(&setting.channel).ok_or("音频通道未连接")?;
+        sdk.set_value(dev, setting, value)
+    })?;
+    Ok(Reply {
+        values: read_values(&sdk, &devices),
+        error: String::new(),
+    })
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profile_failure_restores_every_attempted_parameter() {
+        let baseline = BTreeMap::from([
+            (Tuning::Eq30, 20),
+            (Tuning::BassLevel, 5),
+            (Tuning::EqEnabled, 0),
+        ]);
+        let wanted = BTreeMap::from([
+            (Tuning::Eq30, 21),
+            (Tuning::BassLevel, 7),
+            (Tuning::EqEnabled, 1),
+        ]);
+        let mut actual = baseline.clone();
+        let mut failed = false;
+        let result = apply_requested(&wanted, &baseline, |key, value| {
+            actual.insert(key, value);
+            if key == Tuning::BassLevel && value == 7 && !failed {
+                failed = true;
+                Err("injected read-back failure".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.unwrap_err().contains("已恢复原设置"));
+        assert_eq!(actual, baseline);
+        let unknown = BTreeMap::from([(Tuning::LightColor, 0)]);
+        let mut calls = 0;
+        assert!(apply_requested(&unknown, &baseline, |_, _| {
+            calls += 1;
+            Ok(())
+        })
+        .is_err());
+        assert_eq!(calls, 0);
+    }
     #[test]
     fn signed_eq_is_bounded_and_roundtrips() {
         let s = spec(Tuning::Eq30).unwrap();

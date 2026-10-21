@@ -10,6 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
+    Devices::HumanInterfaceDevice::HidD_SetNumInputBuffers,
     Foundation::*,
     Storage::FileSystem::*,
     System::{Threading::*, IO::*},
@@ -89,6 +90,15 @@ impl Keyboard {
         unsafe {
             let writer = open(path, GENERIC_READ | GENERIC_WRITE)?;
             let reader = open(path, GENERIC_READ)?;
+            // A 490-byte color reply contains 35 reports, exceeding Windows'
+            // default 32-report HID input ring. Leave room for up to 40 chunks
+            // and queued notifications before starting any device request.
+            if !HidD_SetNumInputBuffers(reader.0, 128) {
+                return Err(format!(
+                    "设置键盘接收缓冲区失败：{}",
+                    std::io::Error::last_os_error()
+                ));
+            }
             Ok(Self { reader, writer })
         }
     }
@@ -225,14 +235,34 @@ impl Keyboard {
                 s.rate = Some([250, 500, 1000][c[1] as usize - 1]);
                 s.sleep_seconds = Some(c[24] as u16 * 30);
                 s.light = Some(c[10]);
-                s.tuning.insert(Tuning::WinLock, u16::from(c[15] == 1));
+                if [0, 2].contains(&c[27]) {
+                    s.tuning.insert(Tuning::MacMode, u16::from(c[27] == 2));
+                }
+                // The official driver disables Windows-key locking in Mac mode.
+                if c[27] == 0 && c[15] <= 1 {
+                    s.tuning.insert(Tuning::WinLock, c[15] as u16);
+                }
                 s.tuning.insert(Tuning::Latency, u16::from(c[3] == 0));
                 if let Some(offset) = light_offset(c[10]) {
-                    if (1..=9).contains(&c[offset]) {
+                    if supports_brightness(c[10]) && (1..=9).contains(&c[offset]) {
                         s.tuning.insert(Tuning::Brightness, c[offset] as u16);
                     }
-                    if c[10] != 1 && (1..=4).contains(&(c[offset + 1] >> 4)) {
+                    if c[9] == 0 && supports_color(c[10]) && [0, 7].contains(&(c[offset + 1] & 15))
+                    {
+                        s.tuning
+                            .insert(Tuning::MultiColor, u16::from(c[offset + 1] & 15 == 7));
+                    }
+                    if supports_speed(c[10]) && (1..=4).contains(&(c[offset + 1] >> 4)) {
                         s.tuning.insert(Tuning::Speed, (c[offset + 1] >> 4) as u16);
+                    }
+                }
+                if color_is_available(&c) {
+                    match self.colors() {
+                        Ok(colors) => {
+                            s.tuning
+                                .insert(Tuning::LightColor, color_preset(&c, &colors));
+                        }
+                        Err(e) => s.settings_error = format!("灯色读取失败：{e}"),
                     }
                 }
             }
@@ -240,13 +270,25 @@ impl Keyboard {
         }
         Ok(s)
     }
+    fn colors(&self) -> Result<Vec<u8>> {
+        let bytes = self.read_block(0x49)?;
+        validate_colors(&bytes)?;
+        Ok(bytes)
+    }
     pub fn apply(&self, action: Action) -> Result<()> {
         let mut config = self.config()?;
+        if let Action::Tune(Tuning::LightColor, value) = action {
+            let original = self.colors()?;
+            let mut desired = original.clone();
+            edit_color(&config, &mut desired, value)?;
+            return self.write_with_rollback(9, 0x49, &desired, &original);
+        }
+        let original = config.clone();
         match action {
             Action::Rate(v) if [250, 500, 1000].contains(&v) => {
                 config[1] = [250, 500, 1000].iter().position(|x| *x == v).unwrap() as u8 + 1
             }
-            Action::Sleep(v) if (60..=1200).contains(&v) && v % 30 == 0 => {
+            Action::Sleep(v) if (v == 0 || (60..=1200).contains(&v)) && v % 30 == 0 => {
                 config[24] = (v / 30) as u8
             }
             Action::Light(v)
@@ -258,9 +300,31 @@ impl Keyboard {
             Action::Tune(key, value) => edit_tuning(&mut config, key, value)?,
             _ => return Err("G75 Pro 参数不在允许范围内".into()),
         }
-        for (index, block) in config.chunks(14).enumerate() {
+        self.write_with_rollback(4, 0x44, &config, &original)
+    }
+    fn write_with_rollback(
+        &self,
+        command: u8,
+        query: u8,
+        desired: &[u8],
+        original: &[u8],
+    ) -> Result<()> {
+        if let Err(error) = self.write_block(command, query, desired) {
+            return match self.write_block(command, query, original) {
+                Ok(()) => Err(format!("{error}；已恢复原配置")),
+                Err(restore) => Err(format!("{error}；恢复原配置失败：{restore}")),
+            };
+        }
+        Ok(())
+    }
+    fn write_block(&self, command: u8, query: u8, data: &[u8]) -> Result<()> {
+        let total = data.len().div_ceil(14);
+        if data.is_empty() || total > 40 {
+            return Err("键盘配置块长度异常".into());
+        }
+        for (index, block) in data.chunks(14).enumerate() {
             let mut p = [0; 20];
-            p[..5].copy_from_slice(&[0x13, 4, 10, index as u8, block.len() as u8]);
+            p[..5].copy_from_slice(&[0x13, command, total as u8, index as u8, block.len() as u8]);
             p[5..5 + block.len()].copy_from_slice(block);
             let mut ack = false;
             for _ in 0..3 {
@@ -270,7 +334,7 @@ impl Keyboard {
                     let Some(r) = self.frame()? else {
                         continue;
                     };
-                    if r == p {
+                    if acknowledges(&r, &p) {
                         ack = true;
                         break;
                     }
@@ -280,21 +344,21 @@ impl Keyboard {
                 }
             }
             if !ack {
-                // Some receiver firmware drops an ACK after applying a changed
-                // setting. Accept only a full, exact read-back of the target.
-                if self.config().is_ok_and(|read| read == config) {
+                // A dropped ACK is accepted only if the complete configuration
+                // already equals the target, including every preserved byte.
+                if self.read_block(query).is_ok_and(|read| read == data) {
                     return Ok(());
                 }
                 return Err(format!(
-                    "键盘未确认第 {} 个配置分包，且读回未匹配；请刷新核对",
+                    "键盘未确认第 {} 个配置分包，且读回未匹配",
                     index + 1
                 ));
             }
             std::thread::sleep(Duration::from_millis(15));
         }
         std::thread::sleep(Duration::from_millis(150));
-        if self.config()? != config {
-            return Err("键盘配置读回与写入不一致，请刷新核对".into());
+        if self.read_block(query)? != data {
+            return Err("键盘配置读回与写入不一致".into());
         }
         Ok(())
     }
@@ -304,6 +368,13 @@ fn validate(p: &[u8; 20]) -> Result<()> {
         return Err("键盘报文 Report ID 或校验和错误".into());
     }
     Ok(())
+}
+
+fn acknowledges(response: &[u8; 20], request: &[u8; 20]) -> bool {
+    // M HUB's waitForAck matches command and sequence, not an echoed payload.
+    // Also require the same report/packet count and a valid checksum. The ACK
+    // only advances transport; write_block still compares the entire readback.
+    validate(response).is_ok() && response[..4] == request[..4]
 }
 
 fn light_offset(mode: u8) -> Option<usize> {
@@ -325,15 +396,83 @@ fn light_offset(mode: u8) -> Option<usize> {
         _ => return None,
     })
 }
+// G75 Pro's verified 490-byte color block has 21-byte effect slots.
+// The leading seven-color table is a format guard, not editable preset data.
+const COLOR_HEADER: [u8; 21] = [
+    255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 0, 255, 0, 255, 0, 255, 255, 255, 255, 255,
+];
+const COLOR_PRESETS: [[u8; 3]; 8] = [
+    [255, 0, 0],
+    [255, 128, 0],
+    [255, 255, 0],
+    [0, 255, 0],
+    [0, 255, 255],
+    [0, 0, 255],
+    [255, 0, 255],
+    [255, 255, 255],
+];
+fn validate_colors(bytes: &[u8]) -> Result<()> {
+    if bytes.len() != 490 || bytes[..21] != COLOR_HEADER {
+        return Err("G75 Pro 灯色配置结构不匹配，已禁止写入".into());
+    }
+    Ok(())
+}
+fn color_is_available(config: &[u8]) -> bool {
+    config[9] == 0
+        && supports_color(config[10])
+        && light_offset(config[10]).is_some_and(|offset| config[offset + 1] & 15 == 0)
+}
+fn color_preset(config: &[u8], colors: &[u8]) -> u16 {
+    let offset = config[10] as usize * 21;
+    COLOR_PRESETS
+        .iter()
+        .position(|rgb| colors[offset..offset + 3] == *rgb)
+        .map_or(8, |index| index as u16)
+}
+fn edit_color(config: &[u8], colors: &mut [u8], value: u16) -> Result<()> {
+    validate_colors(colors)?;
+    if !color_is_available(config) {
+        return Err("请先选择支持颜色的单色灯效".into());
+    }
+    let rgb = COLOR_PRESETS.get(value as usize).ok_or("灯色预设越界")?;
+    let offset = config[10] as usize * 21;
+    colors[offset..offset + 3].copy_from_slice(rgb);
+    Ok(())
+}
+fn supports_brightness(mode: u8) -> bool {
+    light_offset(mode).is_some() && ![15, 17].contains(&mode)
+}
+fn supports_speed(mode: u8) -> bool {
+    supports_brightness(mode) && mode != 1
+}
+fn supports_color(mode: u8) -> bool {
+    // M HUB disables both color controls for rainbow, pinwheel, waterfall,
+    // rich-flowers and off. Other verified G75 Pro effects support 0 / 7.
+    [1, 2, 4, 5, 7, 8, 10, 11, 12, 13].contains(&mode)
+}
 fn edit_tuning(config: &mut [u8], key: Tuning, value: u16) -> Result<()> {
     match key {
-        Tuning::WinLock if value <= 1 => config[15] = value as u8,
+        Tuning::WinLock if value <= 1 && config[27] == 0 => config[15] = value as u8,
+        Tuning::MacMode if value <= 1 => {
+            config[27] = if value == 1 { 2 } else { 0 };
+            if value == 1 {
+                config[15] = 0;
+            }
+        }
+        Tuning::MultiColor if value <= 1 && config[9] == 0 && supports_color(config[10]) => {
+            let offset = light_offset(config[10]).ok_or("当前灯效不支持颜色切换")?;
+            config[offset + 1] = (config[offset + 1] & 0xf0) | if value == 1 { 7 } else { 0 };
+        }
         Tuning::Latency if value <= 1 => config[3] = if value == 1 { 0 } else { 2 },
         Tuning::Brightness | Tuning::Speed => {
             let offset = light_offset(config[10]).ok_or("请先开启一种灯效")?;
-            if key == Tuning::Brightness && (1..=9).contains(&value) {
+            if key == Tuning::Brightness
+                && supports_brightness(config[10])
+                && (1..=9).contains(&value)
+            {
                 config[offset] = value as u8;
-            } else if key == Tuning::Speed && (1..=4).contains(&value) {
+            } else if key == Tuning::Speed && supports_speed(config[10]) && (1..=4).contains(&value)
+            {
                 config[offset + 1] = config[offset + 1] & 15 | ((value as u8) << 4);
             } else {
                 return Err("灯效参数越界".into());
@@ -348,13 +487,43 @@ fn edit_tuning(config: &mut [u8], key: Tuning, value: u16) -> Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn write_ack_matches_header_without_requiring_payload_echo() {
+        fn checksum(mut packet: [u8; 20]) -> [u8; 20] {
+            packet[19] = packet[..19].iter().fold(0u8, |a, b| a.wrapping_add(*b));
+            packet
+        }
+        let mut request = [0; 20];
+        request[..5].copy_from_slice(&[0x13, 4, 10, 1, 14]);
+        request[5..19].fill(0x5a);
+        let request = checksum(request);
+        assert!(acknowledges(&request, &request));
+        let mut header_only = [0; 20];
+        header_only[..4].copy_from_slice(&request[..4]);
+        let header_only = checksum(header_only);
+        assert!(acknowledges(&header_only, &request));
+        for (offset, value) in [(0, 0x12), (1, 0x44), (2, 35), (3, 0)] {
+            let mut stale = header_only;
+            stale[offset] = value;
+            assert!(!acknowledges(&checksum(stale), &request));
+        }
+        let mut corrupt = header_only;
+        corrupt[19] ^= 1;
+        assert!(!acknowledges(&corrupt, &request));
+    }
+    #[test]
     fn declared_keyboard_choices_match_codec_bounds() {
-        let mut config = vec![0; 128];
-        config[10] = 2;
         for setting in crate::devices::G75_ADVANCED {
             for (value, _) in setting.choices {
+                let mut config = vec![0; 128];
+                config[10] = 2;
                 assert!(
-                    edit_tuning(&mut config, setting.key, *value).is_ok(),
+                    if setting.key == Tuning::LightColor {
+                        let mut colors = vec![0; 490];
+                        colors[..21].copy_from_slice(&COLOR_HEADER);
+                        edit_color(&config, &mut colors, *value).is_ok()
+                    } else {
+                        edit_tuning(&mut config, setting.key, *value).is_ok()
+                    },
                     "{:?} {}",
                     setting.key,
                     value
@@ -377,6 +546,240 @@ mod tests {
         assert_eq!(after[60], 9);
         after[10] = 0;
         assert!(edit_tuning(&mut after, Tuning::Brightness, 9).is_err());
+    }
+    #[test]
+    fn mac_mode_clears_only_winlock_and_rejects_locking_in_mac() {
+        let mut before = vec![0x5a; 128];
+        before[15] = 1;
+        before[27] = 0;
+        let mut after = before.clone();
+        edit_tuning(&mut after, Tuning::MacMode, 1).unwrap();
+        assert_eq!(after[27], 2);
+        assert_eq!(after[15], 0);
+        assert!(edit_tuning(&mut after, Tuning::WinLock, 1).is_err());
+        let mac_snapshot = after.clone();
+        assert!(edit_tuning(&mut after, Tuning::MacMode, 2).is_err());
+        assert_eq!(after, mac_snapshot);
+        after[15] = before[15];
+        after[27] = before[27];
+        assert_eq!(after, before);
+        edit_tuning(&mut after, Tuning::MacMode, 0).unwrap();
+        assert_eq!(after, before);
+    }
+    #[test]
+    fn multicolor_changes_only_low_nibble_of_supported_effect() {
+        for mode in [1, 2, 4, 5, 7, 8, 10, 11, 12, 13] {
+            let mut before = vec![0x5a; 128];
+            before[10] = mode;
+            before[9] = 0;
+            let offset = light_offset(mode).unwrap();
+            before[offset + 1] = 0x30;
+            let mut after = before.clone();
+            edit_tuning(&mut after, Tuning::MultiColor, 1).unwrap();
+            assert_eq!(after[offset + 1], 0x37);
+            let speed = if supports_speed(mode) {
+                edit_tuning(&mut after, Tuning::Speed, 4).unwrap();
+                0x40
+            } else {
+                let snapshot = after.clone();
+                assert!(edit_tuning(&mut after, Tuning::Speed, 4).is_err());
+                assert_eq!(after, snapshot);
+                0x30
+            };
+            assert_eq!(after[offset + 1], speed | 7);
+            edit_tuning(&mut after, Tuning::MultiColor, 0).unwrap();
+            assert_eq!(after[offset + 1], speed);
+            after[offset + 1] = before[offset + 1];
+            assert_eq!(after, before);
+        }
+        for mode in [0, 3, 15, 16, 17] {
+            let mut config = vec![0x5a; 128];
+            config[10] = mode;
+            let before = config.clone();
+            assert!(edit_tuning(&mut config, Tuning::MultiColor, 1).is_err());
+            assert_eq!(config, before);
+        }
+    }
+    #[test]
+    fn color_presets_change_only_active_rgb_and_keep_unknown_colors_read_only() {
+        let mut config = vec![0; 128];
+        config[10] = 2;
+        let mut before = vec![0x5a; 490];
+        before[..21].copy_from_slice(&COLOR_HEADER);
+        assert_eq!(color_preset(&config, &before), 8);
+        for (preset, rgb) in COLOR_PRESETS.iter().enumerate() {
+            let mut changed = before.clone();
+            edit_color(&config, &mut changed, preset as u16).unwrap();
+            assert_eq!(&changed[42..45], rgb);
+            assert_eq!(color_preset(&config, &changed), preset as u16);
+            changed[42..45].copy_from_slice(&before[42..45]);
+            assert_eq!(changed, before);
+        }
+        let mut changed = before.clone();
+        assert!(edit_color(&config, &mut changed, 8).is_err());
+        assert_eq!(changed, before);
+        config[61] = 7;
+        assert!(edit_color(&config, &mut changed, 0).is_err());
+        config[61] = 0;
+        config[10] = 3;
+        assert!(edit_color(&config, &mut changed, 0).is_err());
+        config[10] = 2;
+        changed[0] = 0;
+        let bad = changed.clone();
+        assert!(edit_color(&config, &mut changed, 0).is_err());
+        assert_eq!(changed, bad);
+    }
+    #[test]
+    fn fixed_animation_modes_do_not_offer_ineffective_tuning() {
+        for mode in [15, 17] {
+            let mut config = vec![0; 128];
+            config[10] = mode;
+            let before = config.clone();
+            assert!(!supports_brightness(mode));
+            assert!(!supports_speed(mode));
+            assert!(edit_tuning(&mut config, Tuning::Brightness, 9).is_err());
+            assert!(edit_tuning(&mut config, Tuning::Speed, 4).is_err());
+            assert_eq!(config, before);
+        }
+        let mut config = vec![0; 128];
+        config[10] = 1;
+        assert!(edit_tuning(&mut config, Tuning::Speed, 4).is_err());
+        config[10] = 16;
+        assert!(edit_tuning(&mut config, Tuning::Brightness, 9).is_ok());
+        assert!(edit_tuning(&mut config, Tuning::Speed, 4).is_ok());
+        assert!(edit_tuning(&mut config, Tuning::MultiColor, 0).is_err());
+    }
+    #[test]
+    #[ignore = "Temporarily changes G75 lighting/Mac/sleep and restores complete original blocks"]
+    fn live_g75_new_features_restore_full_blocks() {
+        fn require(actual: &[u8], expected: &[u8], operation: &str) -> Result<()> {
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!("{operation}: full block differs"))
+            }
+        }
+        let model = crate::devices::REGISTRY
+            .iter()
+            .position(|s| s.key == "mchose-g75-pro")
+            .unwrap();
+        let all = crate::hid::enumerate().unwrap();
+        let interface = all
+            .iter()
+            .find(|i| crate::backend::matches(i, model))
+            .unwrap();
+        let keyboard = Keyboard::open(&interface.path).unwrap();
+        keyboard.verify_model().unwrap();
+        let original_config = keyboard.config().unwrap();
+        let original_colors = keyboard.colors().unwrap();
+        // Every comparison inside this closure returns an error instead of
+        // panicking; both original blocks are restored before any assertion.
+        let checked = (|| -> Result<()> {
+            keyboard.apply(Action::Light(2))?;
+            keyboard.apply(Action::Tune(Tuning::MacMode, 0))?;
+            keyboard.apply(Action::Tune(Tuning::MultiColor, 0))?;
+            let base = keyboard.config()?;
+            let prior = color_preset(&base, &original_colors);
+            let other = if prior == 0 { 1 } else { 0 };
+            let mut expected_colors = original_colors.clone();
+            edit_color(&base, &mut expected_colors, other)?;
+            keyboard.apply(Action::Tune(Tuning::LightColor, other))?;
+            require(&keyboard.colors()?, &expected_colors, "preset color")?;
+            require(&keyboard.config()?, &base, "color preserved performance")?;
+            keyboard.write_block(9, 0x49, &original_colors)?;
+            println!("G75 color preset: {prior} -> {other}; full color block restored");
+            let mut expected = base.clone();
+            edit_tuning(&mut expected, Tuning::MultiColor, 1)?;
+            keyboard.apply(Action::Tune(Tuning::MultiColor, 1))?;
+            require(&keyboard.config()?, &expected, "multi-color")?;
+            keyboard.write_block(4, 0x44, &base)?;
+            println!("G75 multi-color: 0 -> 1; full config restored");
+            let mut expected = base.clone();
+            edit_tuning(&mut expected, Tuning::WinLock, 1)?;
+            keyboard.apply(Action::Tune(Tuning::WinLock, 1))?;
+            require(&keyboard.config()?, &expected, "Windows-key lock")?;
+            edit_tuning(&mut expected, Tuning::MacMode, 1)?;
+            keyboard.apply(Action::Tune(Tuning::MacMode, 1))?;
+            require(
+                &keyboard.config()?,
+                &expected,
+                "Mac enabled and Windows lock cleared",
+            )?;
+            if keyboard.apply(Action::Tune(Tuning::WinLock, 1)).is_ok() {
+                return Err("Windows-key locking was incorrectly allowed in Mac mode".into());
+            }
+            require(
+                &keyboard.config()?,
+                &expected,
+                "rejected lock preserved config",
+            )?;
+            keyboard.write_block(4, 0x44, &base)?;
+            println!("G75 Mac mode and Windows-key lock: mutual exclusion confirmed; restored");
+            let mut expected = base.clone();
+            expected[24] = 0;
+            keyboard.apply(Action::Sleep(0))?;
+            require(&keyboard.config()?, &expected, "never sleep")?;
+            keyboard.write_block(4, 0x44, &base)?;
+            println!(
+                "G75 sleep: {} -> 0; full config restored",
+                base[24] as u16 * 30
+            );
+            Ok(())
+        })();
+        let config_restore = keyboard.write_block(4, 0x44, &original_config);
+        let color_restore = keyboard.write_block(9, 0x49, &original_colors);
+        let after_config = keyboard.config();
+        let after_colors = keyboard.colors();
+        println!("G75 final restore: performance {config_restore:?}, color {color_restore:?}, test {checked:?}");
+        assert!(config_restore.is_ok(), "{config_restore:?}");
+        assert!(color_restore.is_ok(), "{color_restore:?}");
+        assert_eq!(after_config.unwrap(), original_config);
+        assert_eq!(after_colors.unwrap(), original_colors);
+        assert!(checked.is_ok(), "{checked:?}");
+        if std::env::var_os("PERIPHERAL_DESK_G75_KEEP_AWAKE").is_some_and(|v| v == "1") {
+            let mut expected = original_config.clone();
+            expected[24] = 0;
+            let keep = keyboard
+                .apply(Action::Sleep(0))
+                .and_then(|_| require(&keyboard.config()?, &expected, "temporary keep awake"));
+            if keep.is_err() {
+                let restore = keyboard.write_block(4, 0x44, &original_config);
+                assert!(
+                    restore.is_ok(),
+                    "keep-awake failed and restore failed: {restore:?}"
+                );
+            }
+            assert!(keep.is_ok(), "{keep:?}");
+            println!(
+                "G75 temporary keep-awake enabled; restore Action::Sleep({}) when testing finishes",
+                original_config[24] as u16 * 30
+            );
+        }
+    }
+    #[test]
+    #[ignore = "Requires G75 Pro; reads the color block without changing settings"]
+    fn live_g75_color_format() {
+        let model = crate::devices::REGISTRY
+            .iter()
+            .position(|s| s.key == "mchose-g75-pro")
+            .unwrap();
+        let all = crate::hid::enumerate().unwrap();
+        let interface = all
+            .iter()
+            .find(|i| crate::backend::matches(i, model))
+            .unwrap();
+        let keyboard = Keyboard::open(&interface.path).unwrap();
+        keyboard.verify_model().unwrap();
+        let bytes = keyboard.read_block(0x49).unwrap();
+        println!(
+            "G75 color block: {} bytes; prefix {:02x?}",
+            bytes.len(),
+            &bytes[..bytes.len().min(42)]
+        );
+        if let Some(path) = std::env::var_os("PERIPHERAL_DESK_COLOR_FIXTURE") {
+            std::fs::write(path, serde_json::to_vec_pretty(&bytes).unwrap()).unwrap();
+        }
+        assert!(!bytes.is_empty(), "empty color configuration");
     }
     #[test]
     fn real_g75_full_battery_fixture() {

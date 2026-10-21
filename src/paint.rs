@@ -1,18 +1,21 @@
-//! Native GDI+ surfaces with antialiased text, images and vector controls.
+//! Native GDI+ surfaces with ClearType GDI text, images and vector controls.
 use crate::hid::wide;
 use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
 };
-use windows_sys::Win32::Graphics::{Gdi::*, GdiPlus::*};
+use windows_sys::Win32::{
+    Foundation::RECT,
+    Graphics::{Gdi::*, GdiPlus::*},
+};
 
 pub const BG: u32 = 0xff0a0a0d;
 pub const PANEL: u32 = 0xff121218;
 pub const FIELD: u32 = 0xff1e1e26;
 pub const BORDER: u32 = 0xff292930;
-pub const TEXT: u32 = 0xffeeeef2;
-pub const MUTED: u32 = 0xff92929f;
-pub const DIM: u32 = 0xff5e5e6d;
+pub const TEXT: u32 = 0xfff2f2f5;
+pub const MUTED: u32 = 0xffa1a1ae;
+pub const DIM: u32 = 0xff737382;
 pub const RED: u32 = 0xffff3859;
 pub const ORANGE: u32 = 0xffff7542;
 pub const GREEN: u32 = 0xff38d58a;
@@ -36,6 +39,7 @@ impl R {
 
 pub struct Canvas {
     pub graphics: *mut GpGraphics,
+    dpi: u32,
 }
 impl Drop for Canvas {
     fn drop(&mut self) {
@@ -54,7 +58,7 @@ impl Canvas {
         let scale = dpi as f32 / 96.;
         GdipScaleWorldTransform(graphics, scale, scale, MatrixOrderAppend);
         SetBkMode(dc, TRANSPARENT as i32);
-        Self { graphics }
+        Self { graphics, dpi }
     }
     pub unsafe fn rect(&self, r: R, color: u32) {
         let mut b = null_mut();
@@ -143,64 +147,59 @@ impl Canvas {
         GdipDeletePen(p);
     }
     pub unsafe fn text(&self, text: &str, r: R, size: i32, weight: i32, color: u32, align: u32) {
-        let mut family = null_mut();
+        let mut dc = null_mut();
+        if GdipGetDC(self.graphics, &mut dc) != 0 {
+            return;
+        }
+        // GDI+ world transforms do not apply while drawing through its HDC.
+        let scale = |value: i32| (value as f64 * self.dpi as f64 / 96.).round() as i32;
         let name = wide(if text.is_ascii() {
             "Segoe UI"
         } else {
             "Microsoft YaHei UI"
         });
-        if GdipCreateFontFamilyFromName(name.as_ptr(), null_mut(), &mut family) != 0 {
-            GdipGetGenericFontFamilySansSerif(&mut family);
+        let font = CreateFontW(
+            -scale(size).max(1),
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            OUT_DEFAULT_PRECIS as u32,
+            CLIP_DEFAULT_PRECIS as u32,
+            CLEARTYPE_QUALITY as u32,
+            DEFAULT_PITCH as u32,
+            name.as_ptr(),
+        );
+        if !font.is_null() {
+            let previous_font = SelectObject(dc, font);
+            let previous_mode = SetBkMode(dc, TRANSPARENT as i32);
+            // GDI accepts COLORREF (00BBGGRR), whereas the canvas uses ARGB.
+            let rgb = ((color >> 16) & 0xff) | (color & 0xff00) | ((color & 0xff) << 16);
+            let previous_color = SetTextColor(dc, rgb);
+            let mut area = RECT {
+                left: scale(r.x),
+                top: scale(r.y),
+                right: scale(r.x + r.w),
+                bottom: scale(r.y + r.h),
+            };
+            let text = wide(text);
+            DrawTextW(
+                dc,
+                text.as_ptr(),
+                (text.len() - 1) as i32,
+                &mut area,
+                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | align,
+            );
+            SetTextColor(dc, previous_color);
+            SetBkMode(dc, previous_mode);
+            SelectObject(dc, previous_font);
+            DeleteObject(font);
         }
-        let mut font = null_mut();
-        GdipCreateFont(
-            family,
-            size as f32,
-            if weight >= 600 {
-                FontStyleBold
-            } else {
-                FontStyleRegular
-            },
-            UnitPixel,
-            &mut font,
-        );
-        let mut format = null_mut();
-        GdipCreateStringFormat(StringFormatFlagsNoWrap, 0, &mut format);
-        GdipSetStringFormatAlign(
-            format,
-            if align & DT_CENTER != 0 {
-                StringAlignmentCenter
-            } else if align & DT_RIGHT != 0 {
-                StringAlignmentFar
-            } else {
-                StringAlignmentNear
-            },
-        );
-        GdipSetStringFormatLineAlign(format, StringAlignmentCenter);
-        GdipSetStringFormatTrimming(format, StringTrimmingEllipsisCharacter);
-        GdipSetTextRenderingHint(self.graphics, TextRenderingHintAntiAliasGridFit);
-        let mut brush = null_mut();
-        GdipCreateSolidFill(color, &mut brush);
-        let area = RectF {
-            X: r.x as f32,
-            Y: r.y as f32,
-            Width: r.w as f32,
-            Height: r.h as f32,
-        };
-        let text = wide(text);
-        GdipDrawString(
-            self.graphics,
-            text.as_ptr(),
-            (text.len() - 1) as i32,
-            font,
-            &area,
-            format,
-            brush as _,
-        );
-        GdipDeleteBrush(brush as _);
-        GdipDeleteStringFormat(format);
-        GdipDeleteFont(font);
-        GdipDeleteFontFamily(family);
+        GdipReleaseDC(self.graphics, dc);
     }
     pub unsafe fn glow(&self, cx: i32, cy: i32, radius: i32) {
         for n in (1..=24).rev() {
