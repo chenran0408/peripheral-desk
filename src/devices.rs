@@ -773,7 +773,10 @@ impl DeviceManifest {
             || self.name.is_empty()
             || self.name.len() > 256
             || self.brand.len() > 128
-            || !matches!(self.kind.as_str(), "mouse" | "keyboard" | "headset")
+            || !matches!(
+                self.kind.as_str(),
+                "mouse" | "keyboard" | "headset" | "accessory"
+            )
             || self.matches.is_empty()
             || self.matches.len() > 32
             || self.matches.iter().any(|m| m.vid == 0 || m.pid == 0)
@@ -939,5 +942,15 @@ mod manifest_tests {
             .unwrap()
             .validate()
             .is_err());
+    }
+    #[test]
+    fn accessory_metadata_is_accepted_without_mouse_controls() {
+        let metadata = serde_json::json!({"key":"mchose-magdock","name":"MagDock","brand":"MCHOSE","kind":"accessory","matches":[{"vid":14391,"pid":4114}],"lighting_modes":[{"id":0,"label":"Static","color":true,"music_sync":false}]});
+        let descriptor: DeviceManifest = serde_json::from_value(metadata).unwrap();
+        descriptor.validate().unwrap();
+        let spec = descriptor.into_spec().unwrap();
+        assert_eq!(spec.kind, Kind::Accessory);
+        assert!(spec.dpi_range.is_none());
+        assert!(spec.rates.is_empty());
     }
 }
