@@ -69,3 +69,28 @@ License texts are reproduced in each package directory.
 - windows-threading-0.1.0: MIT OR Apache-2.0
 
 - zmij-1.0.23: MIT
+
+## Complete lockfile inventory
+
+[MANIFEST.json](MANIFEST.json) records every registry package in the current Cargo.lock, including optional, build and target-specific crates. This is an attribution superset; not every crate is linked into every application or device DLL. Historical license files are retained.
+
+License texts are copied unchanged from Cargo registry sources and checked against the locked registry checksum (or the cached .crate archive). Maintain them using scripts/collect-licenses.py in the main Peripheral Desk repository.
+
+Additional current lockfile entries:
+
+- adler2-2.0.1: 0BSD OR MIT OR Apache-2.0
+- arbitrary-1.5.0: MIT OR Apache-2.0
+- bumpalo-3.20.3: MIT OR Apache-2.0
+- crc32fast-1.5.3: MIT OR Apache-2.0
+- crossbeam-utils-0.8.23: MIT OR Apache-2.0
+- derive_arbitrary-1.5.0: MIT OR Apache-2.0
+- equivalent-1.0.3: Apache-2.0 OR MIT
+- flate2-1.1.10: MIT OR Apache-2.0
+- hashbrown-0.17.1: MIT OR Apache-2.0
+- indexmap-2.14.2: Apache-2.0 OR MIT
+- libc-0.2.191: MIT OR Apache-2.0
+- log-0.4.34: MIT OR Apache-2.0
+- miniz_oxide-0.9.1: MIT OR Zlib OR Apache-2.0
+- simd-adler32-0.3.10: MIT
+- zip-2.6.1: MIT
+- zopfli-0.8.4: Apache-2.0

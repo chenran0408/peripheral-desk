@@ -47,6 +47,13 @@ enum Command {
     AudioStep(Tuning, i16),
     AudioPage(u8),
     ConnectAudio,
+    ControlsEditor,
+    ResidentMacros,
+    DriverManager,
+    Configuration,
+    CoreUpdate,
+    PresetLibrary,
+    HeadsetLighting,
     ExportAudio,
     ImportAudio,
     FlatEq,
@@ -534,6 +541,20 @@ impl App {
             Page::Home => {
                 self.add(
                     hwnd,
+                    "配置备份",
+                    R::new(w - 432, 102, 116, 38),
+                    GHOST,
+                    Command::Configuration,
+                );
+                self.add(
+                    hwnd,
+                    "驱动仓库",
+                    R::new(w - 306, 102, 146, 38),
+                    GHOST,
+                    Command::DriverManager,
+                );
+                self.add(
+                    hwnd,
                     "重新读取",
                     R::new(w - 154, 102, 122, 40),
                     GHOST,
@@ -602,6 +623,29 @@ impl App {
             Page::Device(m) => {
                 self.add(
                     hwnd,
+                    "驱动管理",
+                    R::new(174, 16, 112, 34),
+                    GHOST,
+                    Command::DriverManager,
+                );
+                self.add(
+                    hwnd,
+                    "配置备份",
+                    R::new(
+                        if REGISTRY[m].kind == Kind::Headset {
+                            412
+                        } else {
+                            28
+                        },
+                        h - 62,
+                        136,
+                        38,
+                    ),
+                    GHOST,
+                    Command::Configuration,
+                );
+                self.add(
+                    hwnd,
                     "‹  我的设备",
                     R::new(28, 16, 133, 34),
                     GHOST,
@@ -620,6 +664,20 @@ impl App {
                             Command::AudioPage(i as u8),
                         );
                     }
+                    self.add(
+                        hwnd,
+                        "EQ 预设",
+                        R::new(rx + 444, 17, 96, 34),
+                        GHOST,
+                        Command::PresetLibrary,
+                    );
+                    self.add(
+                        hwnd,
+                        "灯光",
+                        R::new(294, 17, 76, 34),
+                        GHOST,
+                        Command::HeadsetLighting,
+                    );
                     self.add(
                         hwnd,
                         "连接音效组件",
@@ -656,6 +714,29 @@ impl App {
                         R::new(rx + 132, 17, 112, 34),
                         GHOST,
                         Command::Advanced(true),
+                    );
+                }
+                if REGISTRY[m].supports("software-macro-trigger")
+                    || matches!(
+                        REGISTRY[m].key,
+                        "razer-deathadder-v3-pro" | "mchose-a5-ultra" | "mchose-g75-pro"
+                    )
+                {
+                    self.add(
+                        hwnd,
+                        "软件宏",
+                        R::new(rx + 442, 17, 112, 34),
+                        GHOST,
+                        Command::ResidentMacros,
+                    );
+                }
+                if REGISTRY[m].supports("bindings") || REGISTRY[m].supports("key-colors") {
+                    self.add(
+                        hwnd,
+                        "按键与板载设置",
+                        R::new(rx + 254, 17, 178, 34),
+                        GHOST,
+                        Command::ControlsEditor,
                     );
                 }
                 if (self.advanced || REGISTRY[m].kind == Kind::Headset)
@@ -771,7 +852,7 @@ impl App {
                         Command::Step(50),
                     );
                     let _ = (min, max);
-                } else {
+                } else if REGISTRY[m].kind == Kind::Keyboard && REGISTRY[m].supports("settings") {
                     let bw = (rw - 60 - 40) / 5;
                     for (i, (value, label)) in LIGHTS.iter().enumerate() {
                         self.add(
@@ -793,8 +874,9 @@ impl App {
                 {
                     let rates = REGISTRY[m].rates_for(self.snapshot.devices[m].wired);
                     let gap = 8;
-                    let bw =
-                        ((rw - 200 - gap * (rates.len() as i32 - 1)) / rates.len() as i32).min(100);
+                    let bw = ((rw - 200 - gap * (rates.len() as i32 - 1))
+                        / rates.len().max(1) as i32)
+                        .min(100);
                     let x = rx + rw - 30 - (bw + gap) * rates.len() as i32 + gap;
                     for (i, rate) in rates.iter().enumerate() {
                         self.add(
@@ -808,7 +890,7 @@ impl App {
                     let sleeps = REGISTRY[m].sleeps;
                     let zero_extra = if sleeps.contains(&0) { 18 } else { 0 };
                     let bw = ((rw - 200 - 6 * (sleeps.len() as i32 - 1) - zero_extra)
-                        / sleeps.len() as i32)
+                        / sleeps.len().max(1) as i32)
                         .min(85);
                     let mut x = rx + rw - 30 - ((bw + 6) * sleeps.len() as i32 - 6 + zero_extra);
                     for sec in sleeps {
@@ -839,6 +921,20 @@ impl App {
                 );
             }
             Page::Preferences => {
+                self.add(
+                    hwnd,
+                    "主程序更新",
+                    R::new(330, 566, 180, 40),
+                    GHOST,
+                    Command::CoreUpdate,
+                );
+                self.add(
+                    hwnd,
+                    "配置备份与恢复",
+                    R::new(526, 566, 180, 40),
+                    GHOST,
+                    Command::Configuration,
+                );
                 self.add(
                     hwnd,
                     "‹  我的设备",
@@ -947,7 +1043,11 @@ impl App {
         if let Page::Device(m) = self.page {
             if let Some((min, max)) = REGISTRY[m].dpi_range {
                 let ratio = ((x - self.slider.x) as f32 / self.slider.w as f32).clamp(0., 1.);
-                let value = ((min as f32 + (max - min) as f32 * ratio) / 50.).round() as u16 * 50;
+                let step = REGISTRY[m].dpi_step.max(1);
+                let value = (((min as f32 + (max - min) as f32 * ratio) / step as f32).round()
+                    as u32
+                    * step as u32)
+                    .min(max as u32) as u16;
                 self.schedule(hwnd, Action::Dpi(value.clamp(min, max)));
             }
         }
@@ -957,7 +1057,10 @@ impl App {
             if let (Some((min, max)), Some(value)) = (REGISTRY[m].dpi_range, self.value(m)) {
                 self.schedule(
                     hwnd,
-                    Action::Dpi((value as i32 + delta).clamp(min as i32, max as i32) as u16),
+                    Action::Dpi(
+                        (value as i32 + delta.signum() * REGISTRY[m].dpi_step as i32)
+                            .clamp(min as i32, max as i32) as u16,
+                    ),
                 );
             }
         }
@@ -967,6 +1070,59 @@ impl App {
             Command::AudioPage(value) => {
                 self.audio_page = value;
                 self.layout(hwnd);
+            }
+            Command::Configuration | Command::CoreUpdate => {
+                if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+                    return;
+                }
+                self.modal_open = true;
+                let restarting = if command == Command::CoreUpdate {
+                    crate::update_ui::open(hwnd)
+                } else {
+                    let model = if let Page::Device(m) = self.page {
+                        Some(m)
+                    } else {
+                        None
+                    };
+                    crate::configuration_ui::open(hwnd, model);
+                    false
+                };
+                self.modal_open = false;
+                if restarting {
+                    DestroyWindow(hwnd);
+                    return;
+                }
+                self.begin(hwnd, None);
+            }
+            Command::DriverManager => {
+                if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+                    return;
+                }
+                self.modal_open = true;
+                crate::plugin_ui::open(hwnd);
+                self.modal_open = false;
+                self.images = Images::load();
+                self.layout(hwnd);
+                self.begin(hwnd, None);
+            }
+            Command::ControlsEditor
+            | Command::ResidentMacros
+            | Command::PresetLibrary
+            | Command::HeadsetLighting => {
+                if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+                    return;
+                }
+                if let Page::Device(model) = self.page {
+                    self.modal_open = true;
+                    match command {
+                        Command::ControlsEditor => crate::controls_ui::open(hwnd, model),
+                        Command::ResidentMacros => crate::resident_macro_ui::open(hwnd, model),
+                        Command::PresetLibrary => crate::preset_ui::open(hwnd, model),
+                        _ => crate::lighting_ui::open(hwnd),
+                    }
+                    self.modal_open = false;
+                    self.begin(hwnd, None);
+                }
             }
             Command::ConnectAudio => self.connect_audio(hwnd),
             Command::ExportAudio => self.audio_profile(hwnd, false),
@@ -1047,11 +1203,13 @@ impl App {
             }
             Command::Diagnose => {
                 let path = backend::data_path().with_file_name("diagnostics.json");
-                match crate::hid::enumerate()
-                    .and_then(|v| serde_json::to_vec_pretty(&v).map_err(|e| e.to_string()))
-                    .and_then(|b| std::fs::write(&path, b).map_err(|e| e.to_string()))
-                {
-                    Ok(()) => message(&format!("设备诊断已保存到：\n{}", path.display())),
+                let key = if let Page::Device(m) = self.page {
+                    Some(REGISTRY[m].key)
+                } else {
+                    None
+                };
+                match crate::configuration::export_diagnostics(key, &path) {
+                    Ok(_) => message(&format!("已导出匿名诊断信息：\n{}", path.display())),
                     Err(e) => message(&format!("导出失败：{e}")),
                 }
             }
@@ -1481,7 +1639,16 @@ impl App {
                             false
                         }
                 }
-                Command::ConnectAudio => self.pending.is_none() && self.queued.is_empty(),
+                Command::ConnectAudio
+                | Command::DriverManager
+                | Command::Configuration
+                | Command::CoreUpdate
+                | Command::ControlsEditor
+                | Command::ResidentMacros
+                | Command::PresetLibrary
+                | Command::HeadsetLighting => {
+                    self.pending.is_none() && self.queued.is_empty() && !self.modal_open
+                }
                 Command::SettingsPage(delta) => {
                     if let Page::Device(m) = self.page {
                         if delta < 0 {
@@ -1528,7 +1695,9 @@ impl App {
             c.text(
                 &self.status,
                 if matches!(self.page,Page::Device(m) if REGISTRY[m].kind==Kind::Headset) {
-                    R::new(410, self.height - 58, self.width - 730, 32)
+                    R::new(562, self.height - 58, self.width - 880, 32)
+                } else if matches!(self.page, Page::Device(_)) {
+                    R::new(180, self.height - 58, self.width - 500, 32)
                 } else if self.page == Page::Home {
                     R::new(
                         170,
@@ -1567,7 +1736,7 @@ impl App {
             if self.page == Page::Home {
                 "PERIPHERAL DESK  /  外设控制中心"
             } else {
-                "PERIPHERAL DESK"
+                ""
             },
             R::new(
                 if self.page == Page::Home { 47 } else { 206 },
@@ -1622,7 +1791,15 @@ impl App {
             MUTED,
             DT_LEFT,
         );
-        c.line(54, 386, 346, 386, BORDER, 1.);
+        c.text(
+            spec.validation,
+            R::new(54, 370, 292, 17),
+            10,
+            400,
+            DIM,
+            DT_LEFT,
+        );
+        c.line(54, 393, 346, 393, BORDER, 1.);
         if spec.kind == Kind::Headset {
             for (i, (label, key)) in [
                 ("GAMING", Tuning::GameVolume),
@@ -1720,6 +1897,54 @@ impl App {
             MUTED,
             DT_CENTER,
         );
+        if spec.read_only() {
+            c.text(
+                "只读设备状态",
+                R::new(cx, 104, rw - 60, 34),
+                23,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                spec.validation,
+                R::new(cx, 152, rw - 60, 25),
+                13,
+                400,
+                AMBER,
+                DT_LEFT,
+            );
+            c.round(R::new(cx, 205, rw - 60, 134), 16, FIELD, Some(BORDER));
+            c.text(
+                "此插件提供设备识别与电量读取。",
+                R::new(cx + 22, 225, rw - 104, 28),
+                16,
+                500,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                "DPI、改键、宏和灯效写入未开放。",
+                R::new(cx + 22, 268, rw - 104, 26),
+                13,
+                400,
+                MUTED,
+                DT_LEFT,
+            );
+            c.text(
+                if s.fresh {
+                    "当前读数已更新"
+                } else {
+                    &s.error
+                },
+                R::new(cx, 365, rw - 60, 70),
+                13,
+                400,
+                if s.fresh { GREEN } else { DIM },
+                DT_LEFT,
+            );
+            return;
+        }
         if self.advanced && !spec.advanced.is_empty() {
             self.advanced_panel(c, m);
             return;
@@ -1734,7 +1959,7 @@ impl App {
                 DT_LEFT,
             );
             c.text(
-                "点击快捷值或拖动滑块调整，滚轮可 50 步进",
+                &format!("点击快捷值或拖动滑块调整，滚轮可 {} 步进", spec.dpi_step),
                 R::new(cx, 137, rw - 60, 24),
                 12,
                 400,
@@ -2145,6 +2370,8 @@ impl App {
         c.text(
             if active {
                 "已连接"
+            } else if !crate::plugin_manager::is_installed(spec.key) {
+                "未安装"
             } else if s.present {
                 if spec.kind == Kind::Headset {
                     "未就绪"
@@ -2188,6 +2415,14 @@ impl App {
                 13,
                 400,
                 if active { MUTED } else { DIM },
+                DT_LEFT,
+            );
+            c.text(
+                spec.validation,
+                R::new(224, 145, r.w - 248, 22),
+                11,
+                400,
+                DIM,
                 DT_LEFT,
             );
             c.line(224, r.h - 110, r.w - 24, r.h - 110, BORDER, 1.);
@@ -2304,7 +2539,7 @@ impl App {
             .snapshot
             .devices
             .iter()
-            .zip(REGISTRY)
+            .zip(REGISTRY.iter())
             .map(|(s, spec)| {
                 format!(
                     "{} {}",
@@ -2596,6 +2831,9 @@ fn format_number(v: u32) -> String {
     }
 }
 fn connection(s: &backend::State) -> &'static str {
+    if !crate::plugin_manager::is_installed(&s.key) {
+        return "请从驱动仓库安装插件";
+    }
     if s.fresh {
         if s.wired {
             "USB 有线连接"
@@ -2686,9 +2924,12 @@ mod tests {
         let s = Snapshot::default();
         assert_eq!(s.devices.len(), REGISTRY.len());
         let mut keys = std::collections::HashSet::new();
-        for spec in REGISTRY {
+        for spec in REGISTRY.iter() {
             assert!(keys.insert(spec.key));
-            assert!(!spec.image_bytes.is_empty());
+            assert!(
+                spec.image_bytes.is_empty(),
+                "Device artwork must be delivered by its plugin"
+            );
         }
     }
 }

@@ -8,6 +8,7 @@ pub enum Adapter {
     MchoseMouse,
     CompxKeyboard,
     HecateAudio,
+    External,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -22,7 +23,9 @@ pub struct DeviceSpec {
     pub brand: &'static str,
     pub kind: Kind,
     pub adapter: Adapter,
+    pub validation: &'static str,
     pub dpi_range: Option<(u16, u16)>,
+    pub dpi_step: u16,
     pub rates: &'static [u16],
     pub wired_rates: &'static [u16],
     pub sleeps: &'static [u16],
@@ -30,6 +33,7 @@ pub struct DeviceSpec {
     pub image_bytes: &'static [u8],
     pub advanced: &'static [SettingSpec],
     pub matcher: fn(&Interface) -> bool,
+    pub extra_matchers: &'static [DeviceMatch],
 }
 
 pub const LIGHTS: &[(u8, &str)] = &[
@@ -50,92 +54,143 @@ pub const LIGHTS: &[(u8, &str)] = &[
     (17, "花开"),
 ];
 
-pub static REGISTRY: &[DeviceSpec] = &[
-    DeviceSpec {
-        key: "razer-deathadder-v3-pro",
-        name: "炼狱蝰蛇 V3 专业版",
-        brand: "RAZER",
-        kind: Kind::Mouse,
-        adapter: Adapter::Razer,
-        dpi_range: Some((100, 30000)),
-        rates: &[125, 500, 1000],
-        wired_rates: &[125, 500, 1000],
-        sleeps: &[60, 120, 180, 300, 600, 900],
-        advanced: RAZER_ADVANCED,
-        image_file: "deathadder.png",
-        image_bytes: include_bytes!("../assets/deathadder.png"),
-        matcher: |i| {
-            i.vid == 0x1532
-                && [0x00b6, 0x00b7].contains(&i.pid)
-                && i.path.to_lowercase().contains("mi_00")
-                && i.feature_len == 91
+pub static REGISTRY: std::sync::LazyLock<Vec<DeviceSpec>> = std::sync::LazyLock::new(|| {
+    #[allow(unused_mut)]
+    let mut devices = vec![
+        DeviceSpec {
+            key: "razer-deathadder-v3-pro",
+            name: "炼狱蝰蛇 V3 专业版",
+            brand: "RAZER",
+            kind: Kind::Mouse,
+            adapter: Adapter::Razer,
+            validation: "已实机验证 · 功能范围见兼容表",
+            extra_matchers: &[],
+            dpi_range: Some((100, 30000)),
+            dpi_step: 50,
+            rates: &[125, 500, 1000],
+            wired_rates: &[125, 500, 1000],
+            sleeps: &[60, 120, 180, 300, 600, 900],
+            advanced: RAZER_ADVANCED,
+            image_file: "deathadder.png",
+            image_bytes: &[],
+            matcher: |i| {
+                i.vid == 0x1532
+                    && [0x00b6, 0x00b7].contains(&i.pid)
+                    && i.path.to_lowercase().contains("mi_00")
+                    && i.feature_len == 91
+            },
         },
-    },
-    DeviceSpec {
-        key: "mchose-a5-ultra",
-        name: "迈从 A5 Ultra",
-        brand: "MCHOSE",
-        kind: Kind::Mouse,
-        adapter: Adapter::MchoseMouse,
-        dpi_range: Some((50, 26000)),
-        rates: &[125, 500, 1000, 2000, 4000],
-        wired_rates: &[125, 500, 1000, 2000, 4000, 8000],
-        sleeps: &[0, 60, 120, 180, 300, 600, 900, 1800, 3600],
-        advanced: A5_ADVANCED,
-        image_file: "a5.png",
-        image_bytes: include_bytes!("../assets/a5.png"),
-        matcher: |i| {
-            [0x5253, 0x0bda, 0x3837].contains(&i.vid)
-                && ["a5 ultra", "mchose a5 ultra"]
-                    .contains(&i.product.trim().to_lowercase().as_str())
-                && i.usage_page == 0xff01
-                && i.feature_len >= 65
+        DeviceSpec {
+            key: "mchose-a5-ultra",
+            name: "迈从 A5 Ultra",
+            brand: "MCHOSE",
+            kind: Kind::Mouse,
+            adapter: Adapter::MchoseMouse,
+            validation: "已实机验证 · 功能范围见兼容表",
+            extra_matchers: &[],
+            dpi_range: Some((50, 26000)),
+            dpi_step: 50,
+            rates: &[125, 500, 1000, 2000, 4000],
+            wired_rates: &[125, 500, 1000, 2000, 4000, 8000],
+            sleeps: &[0, 60, 120, 180, 300, 600, 900, 1800, 3600],
+            advanced: A5_ADVANCED,
+            image_file: "a5.png",
+            image_bytes: &[],
+            matcher: |i| {
+                [0x5253, 0x0bda, 0x3837].contains(&i.vid)
+                    && ["a5 ultra", "mchose a5 ultra"]
+                        .contains(&i.product.trim().to_lowercase().as_str())
+                    && i.usage_page == 0xff01
+                    && i.feature_len >= 65
+            },
         },
-    },
-    DeviceSpec {
-        key: "mchose-g75-pro",
-        name: "迈从 G75 Pro",
-        brand: "MCHOSE",
-        kind: Kind::Keyboard,
-        adapter: Adapter::CompxKeyboard,
-        dpi_range: None,
-        rates: &[250, 500, 1000],
-        wired_rates: &[250, 500, 1000],
-        sleeps: &[0, 60, 120, 300, 600, 900, 1200],
-        advanced: G75_ADVANCED,
-        image_file: "g75.png",
-        image_bytes: include_bytes!("../assets/g75.png"),
-        matcher: |i| {
-            ((i.vid == 0x3554 && i.pid == 0xfa09) || (i.vid == 0x41e4 && i.pid == 0x2001))
-                && i.usage_page == 0xff02
-                && i.input_len == 20
-                && i.output_len == 20
+        DeviceSpec {
+            key: "mchose-g75-pro",
+            name: "迈从 G75 Pro",
+            brand: "MCHOSE",
+            kind: Kind::Keyboard,
+            adapter: Adapter::CompxKeyboard,
+            validation: "已实机验证 · 功能范围见兼容表",
+            extra_matchers: &[],
+            dpi_range: None,
+            dpi_step: 50,
+            rates: &[250, 500, 1000],
+            wired_rates: &[250, 500, 1000],
+            sleeps: &[0, 60, 120, 300, 600, 900, 1200],
+            advanced: G75_ADVANCED,
+            image_file: "g75.png",
+            image_bytes: &[],
+            matcher: |i| {
+                ((i.vid == 0x3554 && i.pid == 0xfa09) || (i.vid == 0x41e4 && i.pid == 0x2001))
+                    && i.usage_page == 0xff02
+                    && i.input_len == 20
+                    && i.output_len == 20
+            },
         },
-    },
-    DeviceSpec {
-        key: "hecate-g2-pro",
-        name: "漫步者 G2 Pro",
-        brand: "HECATE",
-        kind: Kind::Headset,
-        adapter: Adapter::HecateAudio,
-        dpi_range: None,
-        rates: &[],
-        wired_rates: &[],
-        sleeps: &[],
-        image_file: "g2pro.png",
-        image_bytes: include_bytes!("../assets/g2pro.png"),
-        advanced: AUDIO_SETTINGS,
-        matcher: |i| {
-            i.vid == 0x35bb
-                && i.pid == 0xa100
-                && i.usage_page == 12
-                && i.feature_len == 16
-                && i.product.eq_ignore_ascii_case("HECATE G2 PRO")
+        DeviceSpec {
+            key: "hecate-g2-pro",
+            name: "漫步者 G2 Pro",
+            brand: "HECATE",
+            kind: Kind::Headset,
+            adapter: Adapter::HecateAudio,
+            validation: "已实机验证 · 功能范围见兼容表",
+            extra_matchers: &[],
+            dpi_range: None,
+            dpi_step: 50,
+            rates: &[],
+            wired_rates: &[],
+            sleeps: &[],
+            image_file: "g2pro.png",
+            image_bytes: &[],
+            advanced: AUDIO_SETTINGS,
+            matcher: |i| {
+                i.vid == 0x35bb
+                    && i.pid == 0xa100
+                    && i.usage_page == 12
+                    && i.feature_len == 16
+                    && i.product.eq_ignore_ascii_case("HECATE G2 PRO")
+            },
         },
-    },
-];
+    ];
+    #[cfg(not(feature = "driver-runtime"))]
+    for value in crate::plugin_manager::installed_descriptors() {
+        if let Ok(metadata) = serde_json::from_value::<DeviceManifest>(value) {
+            if devices.iter().any(|d| d.key == metadata.key) {
+                continue;
+            }
+            if let Ok(spec) = metadata.into_spec() {
+                devices.push(spec);
+            }
+        }
+    }
+    devices
+});
 
 impl DeviceSpec {
+    #[cfg(feature = "desktop")]
+    pub fn supports(&self, capability: &str) -> bool {
+        crate::plugin_manager::installed(self.key)
+            .ok()
+            .flatten()
+            .is_some_and(|driver| driver.manifest.capabilities.iter().any(|c| c == capability))
+    }
+    pub fn read_only(&self) -> bool {
+        self.adapter == Adapter::External
+            && self.dpi_range.is_none()
+            && self.rates.is_empty()
+            && self.wired_rates.is_empty()
+            && self.sleeps.is_empty()
+            && self.advanced.is_empty()
+    }
+
+    pub fn matches(&self, i: &Interface) -> bool {
+        if self.adapter == Adapter::External {
+            self.extra_matchers.iter().any(|m| m.matches(i))
+        } else {
+            (self.matcher)(i)
+        }
+    }
+
     pub fn rates_for(&self, wired: bool) -> &'static [u16] {
         if wired {
             self.wired_rates
@@ -291,9 +346,9 @@ impl DeviceSpec {
     ) -> crate::protocol::Result<()> {
         use crate::model::Action;
         let valid = match action {
-            Action::Dpi(v) => self
-                .dpi_range
-                .is_some_and(|(min, max)| (min..=max).contains(&v) && v % 50 == 0),
+            Action::Dpi(v) => self.dpi_range.is_some_and(|(min, max)| {
+                (min..=max).contains(&v) && v % self.dpi_step.max(1) == 0
+            }),
             Action::Rate(v) => self.rates_for(state.wired).contains(&v),
             Action::Sleep(v) => self.sleeps.contains(&v),
             Action::Light(v) => {
@@ -560,3 +615,191 @@ pub const AUDIO_SETTINGS: &[SettingSpec] = &[
         choices: &[(0, "模式 1"), (1, "模式 2"), (2, "模式 3"), (3, "模式 4")],
     },
 ];
+
+/// Downloaded metadata describes supported interfaces, not arbitrary executable UI.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DeviceMatch {
+    pub vid: u16,
+    pub pid: u16,
+    #[serde(default)]
+    pub usage_page: Option<u16>,
+    #[serde(default)]
+    pub usage: Option<u16>,
+    #[serde(default)]
+    pub feature_len: Option<u16>,
+    #[serde(default)]
+    pub input_len: Option<u16>,
+    #[serde(default)]
+    pub output_len: Option<u16>,
+    #[serde(default)]
+    pub product_equals: Option<String>,
+    #[serde(default)]
+    pub path_contains: Option<String>,
+}
+impl DeviceMatch {
+    pub fn matches(&self, i: &Interface) -> bool {
+        self.vid == i.vid
+            && self.pid == i.pid
+            && self.usage_page.is_none_or(|v| v == i.usage_page)
+            && self.usage.is_none_or(|v| v == i.usage)
+            && self.feature_len.is_none_or(|v| v == i.feature_len)
+            && self.input_len.is_none_or(|v| v == i.input_len)
+            && self.output_len.is_none_or(|v| v == i.output_len)
+            && self
+                .product_equals
+                .as_ref()
+                .is_none_or(|v| v.eq_ignore_ascii_case(i.product.trim()))
+            && self
+                .path_contains
+                .as_ref()
+                .is_none_or(|v| i.path.to_lowercase().contains(&v.to_lowercase()))
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct SettingManifest {
+    pub key: Tuning,
+    pub title: String,
+    #[serde(default)]
+    pub hint: String,
+    pub choices: Vec<(u16, String)>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct DeviceManifest {
+    pub key: String,
+    pub name: String,
+    pub brand: String,
+    pub kind: String,
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub image: String,
+    pub matches: Vec<DeviceMatch>,
+    #[serde(default)]
+    pub dpi_range: Option<(u16, u16)>,
+    #[serde(default)]
+    pub dpi_step: Option<u16>,
+    #[serde(default)]
+    pub rates: Vec<u16>,
+    #[serde(default)]
+    pub wired_rates: Vec<u16>,
+    #[serde(default)]
+    pub sleeps: Vec<u16>,
+    #[serde(default)]
+    pub advanced: Vec<SettingManifest>,
+    #[serde(default)]
+    pub validation: serde_json::Value,
+}
+impl DeviceManifest {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.dpi_step == Some(0)
+            || self.dpi_range.is_some_and(|(a, b)| {
+                let step = self.dpi_step.unwrap_or(50).max(1);
+                a == 0 || b < a || a % step != 0 || b % step != 0
+            })
+        {
+            return Err("设备DPI范围或步进无效".into());
+        }
+        if self.key.is_empty()
+            || self.name.is_empty()
+            || self.name.len() > 256
+            || self.brand.len() > 128
+            || !matches!(self.kind.as_str(), "mouse" | "keyboard" | "headset")
+            || self.matches.is_empty()
+            || self.matches.len() > 32
+            || self.matches.iter().any(|m| m.vid == 0 || m.pid == 0)
+            || self.advanced.len() > 64
+            || self
+                .advanced
+                .iter()
+                .any(|s| s.choices.is_empty() || s.choices.len() > 128 || s.title.len() > 256)
+            || self.rates.len() > 32
+            || self.sleeps.len() > 32
+        {
+            return Err("设备描述字段不支持".into());
+        }
+        Ok(())
+    }
+    pub fn into_spec(self) -> Result<DeviceSpec, String> {
+        self.validate()?;
+        fn text(s: String) -> &'static str {
+            Box::leak(s.into_boxed_str())
+        }
+        let advanced = self
+            .advanced
+            .into_iter()
+            .map(|s| SettingSpec {
+                key: s.key,
+                title: text(s.title),
+                hint: text(s.hint),
+                choices: Box::leak(
+                    s.choices
+                        .into_iter()
+                        .map(|(v, s)| (v, text(s)))
+                        .collect::<Vec<_>>()
+                        .into_boxed_slice(),
+                ),
+            })
+            .collect::<Vec<_>>();
+        Ok(DeviceSpec {
+            key: text(self.key),
+            name: text(self.name),
+            brand: text(self.brand),
+            kind: match self.kind.as_str() {
+                "keyboard" => Kind::Keyboard,
+                "headset" => Kind::Headset,
+                _ => Kind::Mouse,
+            },
+            adapter: Adapter::External,
+            validation: match self
+                .validation
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("hardware-verified") => "已实机验证 · 功能范围见兼容表",
+                Some("public-implementation-untested") => "依据公开实现适配 · 尚未实机验证",
+                _ => "仅识别设备 · 尚未确认功能",
+            },
+            dpi_range: self.dpi_range,
+            dpi_step: self.dpi_step.unwrap_or(50),
+            rates: Box::leak(self.rates.into_boxed_slice()),
+            wired_rates: Box::leak(self.wired_rates.into_boxed_slice()),
+            sleeps: Box::leak(self.sleeps.into_boxed_slice()),
+            image_file: "device.png",
+            image_bytes: &[],
+            advanced: Box::leak(advanced.into_boxed_slice()),
+            matcher: |_| false,
+            extra_matchers: Box::leak(self.matches.into_boxed_slice()),
+        })
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+    #[test]
+    fn a_read_only_plugin_does_not_inherit_writable_mouse_controls() {
+        let metadata = serde_json::json!({"key":"test-mouse","name":"Test","brand":"TEST","kind":"mouse","matches":[{"vid":1133,"pid":50495}],"validation":{"status":"public-implementation-untested"}});
+        let spec = serde_json::from_value::<DeviceManifest>(metadata.clone())
+            .unwrap()
+            .into_spec()
+            .unwrap();
+        assert!(spec.read_only());
+        assert!(spec.validation.contains("尚未实机"));
+        for action in [
+            crate::model::Action::Dpi(800),
+            crate::model::Action::Rate(1000),
+            crate::model::Action::Sleep(60),
+            crate::model::Action::Light(1),
+        ] {
+            assert!(spec
+                .validate(action, &crate::model::State::default())
+                .is_err());
+        }
+        let mut invalid = metadata;
+        invalid["dpi_step"] = serde_json::json!(0);
+        assert!(serde_json::from_value::<DeviceManifest>(invalid)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+}

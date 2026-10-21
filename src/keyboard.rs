@@ -198,6 +198,121 @@ impl Keyboard {
         }
         Err("键盘分包不完整，请唤醒键盘后刷新".into())
     }
+    pub(crate) fn read_block_layer(&self, command: u8, layer: u8) -> Result<Vec<u8>> {
+        if layer > 2 {
+            return Err("键盘配置层超出范围".into());
+        }
+        let mut request = [0; 20];
+        request[..5].copy_from_slice(&[0x13, command, 1, 0, layer << 4]);
+        self.read_control_request(request, false)
+    }
+    fn read_control_request(&self, mut request: [u8; 20], trace: bool) -> Result<Vec<u8>> {
+        for _ in 0..3 {
+            self.send(&mut request)?;
+            let deadline = Instant::now() + Duration::from_millis(1800);
+            let mut chunks = std::collections::BTreeMap::new();
+            let mut total = None;
+            while Instant::now() < deadline {
+                let Some(packet) = self.frame()? else {
+                    continue;
+                };
+                if packet[1] != request[1] {
+                    continue;
+                }
+                if trace {
+                    println!(
+                        "G75 control header {:02x?}; payload {:02x?}",
+                        &packet[..5],
+                        &packet[5..19]
+                    );
+                }
+                let length = (packet[4] & 15) as usize;
+                if packet[2] == 0 || packet[2] > 40 || packet[3] >= packet[2] || length > 14 {
+                    return Err("键盘控制配置分包字段异常".into());
+                }
+                if total.is_some_and(|count| count != packet[2]) {
+                    return Err("键盘控制配置分包总数不一致".into());
+                }
+                total = Some(packet[2]);
+                chunks.insert(packet[3], packet[5..5 + length].to_vec());
+                if chunks.len() == packet[2] as usize {
+                    return Ok(chunks.into_values().flatten().collect());
+                }
+            }
+        }
+        Err("键盘控制配置分包不完整".into())
+    }
+    pub(crate) fn write_block_layer(
+        &self,
+        command: u8,
+        query: u8,
+        layer: u8,
+        desired: &[u8],
+        original: &[u8],
+    ) -> Result<()> {
+        if layer > 2
+            || desired.len() != original.len()
+            || desired.is_empty()
+            || desired.len().div_ceil(14) > 40
+        {
+            return Err("键盘控制配置结构不匹配".into());
+        }
+        if desired == original {
+            return Ok(());
+        }
+        let write = |data: &[u8]| -> Result<()> {
+            let total = data.len().div_ceil(14);
+            for (index, block) in data.chunks(14).enumerate() {
+                let mut packet = [0; 20];
+                // The binding command uses a full 14-byte final slot, with
+                // zero padding; its YY high nibble selects the key layer.
+                let length = if query == 0x41 { 14 } else { block.len() as u8 };
+                packet[..5].copy_from_slice(&[
+                    0x13,
+                    command,
+                    total as u8,
+                    index as u8,
+                    (layer << 4) | length,
+                ]);
+                packet[5..5 + block.len()].copy_from_slice(block);
+                // Sequence-indexed block writes are idempotent. Retry only a
+                // missing ACK, retaining the exact layer/payload/padding.
+                if let Err(error) = retry_packet_ack(|| {
+                    self.send(&mut packet)?;
+                    let deadline = Instant::now() + Duration::from_millis(900);
+                    while Instant::now() < deadline {
+                        if let Some(response) = self.frame()? {
+                            if acknowledges(&response, &packet) {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                    Ok(false)
+                }) {
+                    if self
+                        .read_block_layer(query, layer)
+                        .is_ok_and(|read| read == data)
+                    {
+                        return Ok(());
+                    }
+                    return Err(format!("键盘控制配置第 {} 包未确认：{error}", index + 1));
+                }
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            if self.read_block_layer(query, layer)? != data {
+                return Err("键盘控制配置完整读回不匹配".into());
+            }
+            Ok(())
+        };
+        if let Err(error) = write(desired) {
+            return match write(original) {
+                Ok(()) => Err(format!("{error}；已恢复原配置")),
+                Err(restore) => Err(format!("{error}；恢复原配置失败：{restore}")),
+            };
+        }
+        Ok(())
+    }
     pub fn verify_model(&self) -> Result<()> {
         let signature = self.read_block(0x05)?;
         if signature.len() < 6 || signature[..6] != [3, 0, 0, 0, 1, 0x15] {
@@ -363,6 +478,14 @@ impl Keyboard {
         Ok(())
     }
 }
+fn retry_packet_ack(mut attempt: impl FnMut() -> Result<bool>) -> Result<()> {
+    for _ in 0..3 {
+        if attempt()? {
+            return Ok(());
+        }
+    }
+    Err("三次有界发送均未收到匹配确认".into())
+}
 fn validate(p: &[u8; 20]) -> Result<()> {
     if p[0] != 0x13 || p[19] != p[..19].iter().fold(0u8, |a, b| a.wrapping_add(*b)) {
         return Err("键盘报文 Report ID 或校验和错误".into());
@@ -486,6 +609,77 @@ fn edit_tuning(config: &mut [u8], key: Tuning, value: u16) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dropped_packet_ack_retries_without_overrunning_or_hiding_transport_errors() {
+        let mut sends = 0;
+        retry_packet_ack(|| {
+            sends += 1;
+            Ok(sends == 2)
+        })
+        .unwrap();
+        assert_eq!(
+            sends, 2,
+            "stop immediately when the retransmission is acknowledged"
+        );
+
+        let mut sends = 0;
+        let exhausted = retry_packet_ack(|| {
+            sends += 1;
+            Ok(false)
+        });
+        assert!(exhausted.is_err());
+        assert_eq!(sends, 3, "a missing device cannot cause unbounded writes");
+
+        let mut sends = 0;
+        let failed = retry_packet_ack(|| {
+            sends += 1;
+            Err("transport disconnected".into())
+        });
+        assert_eq!(failed.unwrap_err(), "transport disconnected");
+        assert_eq!(sends, 1, "retry ACK loss, not a failed transport");
+    }
+    #[test]
+    #[ignore = "Read-only G75 control protocol probe; no device settings are changed"]
+    fn live_g75_control_formats() {
+        let model = crate::devices::REGISTRY
+            .iter()
+            .position(|s| s.key == "mchose-g75-pro")
+            .unwrap();
+        let interfaces = crate::hid::enumerate().unwrap();
+        let interface = interfaces
+            .iter()
+            .find(|i| crate::backend::matches(i, model))
+            .unwrap();
+        let keyboard = Keyboard::open(&interface.path).unwrap();
+        keyboard.verify_model().unwrap();
+        for (command, layer) in [(0x41, 0), (0x41, 1), (0x41, 2), (0x42, 0)] {
+            let mut request = [0; 20];
+            request[..5].copy_from_slice(&[0x13, command, 1, 0, layer << 4]);
+            let result = keyboard.read_control_request(request, true);
+            match result {
+                Ok(bytes) => println!(
+                    "G75 command {command:02x} layer {layer}: len={} prefix={:02x?}",
+                    bytes.len(),
+                    &bytes[..bytes.len().min(32)]
+                ),
+                Err(error) => println!("G75 command {command:02x} layer {layer}: {error}"),
+            }
+        }
+        let mut request = [0; 20];
+        request[..7].copy_from_slice(&[0x13, 0x43, 1, 0, 0x10, 3, 2]);
+        keyboard.send(&mut request).unwrap();
+        let deadline = Instant::now() + Duration::from_millis(1800);
+        let mut packets = Vec::new();
+        while Instant::now() < deadline {
+            if let Some(packet) = keyboard.frame().unwrap() {
+                if packet[1] == 0x43 {
+                    println!("G75 complete macro response {:02x?}", packet);
+                    packets.push(packet);
+                }
+            }
+        }
+        println!("G75 macro response packets: {}", packets.len());
+    }
     #[test]
     fn write_ack_matches_header_without_requiring_payload_echo() {
         fn checksum(mut packet: [u8; 20]) -> [u8; 20] {

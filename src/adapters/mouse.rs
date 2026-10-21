@@ -28,15 +28,23 @@ impl Channel {
     }
     fn razer(&self, class: u8, command: u8, size: u8, args: &[u8]) -> Result<Vec<u8>> {
         let req = protocol::razer_request(class, command, size, args);
+        self.razer_exchange(&req)
+    }
+    pub(crate) fn razer_controls(&self, command: u8, args: &[u8]) -> Result<Vec<u8>> {
+        let mut req = protocol::razer_request(0x02, command, 0x0a, args);
+        req[2] = if command == 0x0c { 0x10 } else { 0x1f };
+        self.razer_exchange(&req)
+    }
+    fn razer_exchange(&self, req: &[u8; 91]) -> Result<Vec<u8>> {
         let mut last = "等待设备回复超时".to_string();
         // Receiver firmware can remain busy when settings are queried in a burst.
         // Reissue only read commands; never duplicate a setting write.
-        for _ in 0..if command & 0x80 != 0 { 2 } else { 1 } {
-            self.dev.send(&req)?;
+        for _ in 0..if req[8] & 0x80 != 0 { 2 } else { 1 } {
+            self.dev.send(req)?;
             for poll in 0..6 {
                 thread::sleep(Duration::from_millis(if poll == 0 { 80 } else { 35 }));
                 let reply = self.dev.receive(0, 91)?;
-                match protocol::razer_reply(&reply, &req) {
+                match protocol::razer_reply(&reply, req) {
                     Ok(body) => return Ok(body.to_vec()),
                     Err(e) => last = e,
                 }
@@ -44,7 +52,13 @@ impl Channel {
         }
         Err(last)
     }
-    fn mchose(&self, report: u8, command: u8, args: &[u8], read: bool) -> Result<Vec<u8>> {
+    pub(crate) fn mchose(
+        &self,
+        report: u8,
+        command: u8,
+        args: &[u8],
+        read: bool,
+    ) -> Result<Vec<u8>> {
         let req = protocol::mchose_request(report, command, args);
         let mut last = String::new();
         for _ in 0..if read { 3 } else { 1 } {
@@ -80,7 +94,7 @@ impl Channel {
         }
         Err(last)
     }
-    fn config(&self) -> Result<MchoseConfig> {
+    pub(crate) fn config(&self) -> Result<MchoseConfig> {
         MchoseConfig::decode(&self.mchose(0x12, 0x67, &[], true)?)
     }
     pub fn read(&self) -> Result<State> {

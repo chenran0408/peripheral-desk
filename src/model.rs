@@ -19,7 +19,7 @@ pub struct State {
     pub error: String,
     pub settings_error: String,
     pub alerted: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "read_tuning")]
     pub tuning: std::collections::BTreeMap<Tuning, u16>,
     #[serde(default)]
     pub dpi_stages: Vec<u16>,
@@ -27,7 +27,7 @@ pub struct State {
     pub active_stage: Option<u8>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Action {
     Dpi(u16),
     Rate(u16),
@@ -92,4 +92,19 @@ impl Action {
             _ => std::mem::discriminant(&self) == std::mem::discriminant(&other),
         }
     }
+}
+
+fn read_tuning<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<std::collections::BTreeMap<Tuning, u16>, D::Error> {
+    let values =
+        std::collections::BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+    Ok(values
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = serde_json::from_value::<Tuning>(serde_json::Value::String(key)).ok()?;
+            let value = serde_json::from_value::<u16>(value).ok()?;
+            Some((key, value))
+        })
+        .collect())
 }

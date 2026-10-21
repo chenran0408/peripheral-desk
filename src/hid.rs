@@ -141,18 +141,8 @@ unsafe fn enumerate_set(set: HDEVINFO, guid: &windows_sys::core::GUID) -> Result
         let path = String::from_utf16_lossy(
             &chars[..chars.iter().position(|c| *c == 0).unwrap_or(chars.len())],
         );
-        // Only inspect identifiers here. Open failures are included as zero-cap entries
-        // for target vendors rather than preventing discovery of other interfaces.
-        let lower = path.to_lowercase();
-        if ![
-            "vid_1532", "vid_5253", "vid_0bda", "vid_3837", "vid_3554", "vid_41e4", "vid_258a",
-            "vid_35bb",
-        ]
-        .iter()
-        .any(|v| lower.contains(v))
-        {
-            continue;
-        }
+        // Enumerate all HID identities; downloaded plugin matchers decide which
+        // devices belong to them. Opening with zero access sends no device command.
         let dev = match Device::open(&path) {
             Ok(d) => d,
             Err(_) => continue,

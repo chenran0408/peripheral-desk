@@ -91,9 +91,9 @@ impl Snapshot {
         s
     }
     pub fn save(&self) -> Result<()> {
-        crate::storage::atomic_write(
+        crate::storage::write_json_preserving(
             &data_path(),
-            &serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?,
+            serde_json::to_value(self).map_err(|e| e.to_string())?,
         )
     }
     pub fn alerts(&mut self) -> Vec<usize> {
@@ -117,7 +117,7 @@ impl Snapshot {
 }
 
 pub fn matches(i: &Interface, model: usize) -> bool {
-    (REGISTRY[model].matcher)(i)
+    REGISTRY[model].matches(i)
 }
 
 pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapshot, Result<()>) {
@@ -217,6 +217,9 @@ where
             });
             match result {
                 Ok(mut s) => {
+                    if !s.fresh && s.present && s.percent.is_none() {
+                        s.percent = d.percent;
+                    }
                     s.key = spec.key.into();
                     s.alerted = d.alerted;
                     read = Some(s);
@@ -237,10 +240,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "driver-runtime")]
     use crate::adapters::mouse::Channel;
+    #[cfg(feature = "driver-runtime")]
     use std::{thread, time::Duration};
     #[test]
     #[ignore = "Requires all three physical peripherals; writes the existing values and checks read-back"]
+    #[cfg(feature = "driver-runtime")]
     fn live_settings_readback() {
         let all = hid::enumerate().unwrap();
         let mut results = Vec::new();
@@ -295,6 +301,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Requires awake physical devices; writes only current setting values"]
+    #[cfg(feature = "driver-runtime")]
     fn live_extended_readback() {
         let all = hid::enumerate().unwrap();
         for (model, spec) in REGISTRY.iter().enumerate() {
@@ -327,6 +334,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Changes then restores settings on awake physical devices"]
+    #[cfg(feature = "driver-runtime")]
     fn live_feature_roundtrips_restore_original_values() {
         fn roundtrip(
             session: &dyn crate::adapters::DeviceSession,

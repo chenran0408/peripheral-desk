@@ -315,25 +315,33 @@ impl Images {
             ..zeroed()
         };
         GdiplusStartup(&mut token, &input, null_mut());
-        let root = crate::backend::data_path()
-            .parent()
-            .unwrap()
-            .join("artwork");
         let mut images = Vec::new();
-        if std::fs::create_dir_all(&root).is_ok() {
-            for spec in crate::devices::REGISTRY {
-                let mut image = null_mut();
-                {
-                    let bytes = spec.image_bytes;
-                    let p = root.join(spec.image_file);
-                    if std::fs::write(&p, bytes).is_ok() {
-                        GdipLoadImageFromFile(wide(&p.to_string_lossy()).as_ptr(), &mut image);
+        for spec in crate::devices::REGISTRY.iter() {
+            let mut image = null_mut();
+            if let Some(path) = crate::plugin_manager::artwork(spec.key) {
+                let mut source = null_mut();
+                if GdipLoadImageFromFile(wide(&path.to_string_lossy()).as_ptr(), &mut source) == 0 {
+                    let mut width = 0;
+                    let mut height = 0;
+                    GdipGetImageWidth(source, &mut width);
+                    GdipGetImageHeight(source, &mut height);
+                    let mut bitmap = null_mut();
+                    if GdipCloneBitmapAreaI(
+                        0,
+                        0,
+                        width as i32,
+                        height as i32,
+                        0x26200A, /* PixelFormat32bppARGB */
+                        source.cast(),
+                        &mut bitmap,
+                    ) == 0
+                    {
+                        image = bitmap.cast();
                     }
+                    GdipDisposeImage(source);
                 }
-                images.push(image);
             }
-        } else {
-            images.resize(crate::devices::REGISTRY.len(), null_mut());
+            images.push(image);
         }
         Self { images, token }
     }
