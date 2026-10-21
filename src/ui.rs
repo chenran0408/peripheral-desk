@@ -30,6 +30,16 @@ enum WorkUpdate {
     Device(usize, backend::State),
     Finished(WorkResult),
 }
+fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
+    let mut updates = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(update) => updates.push(update),
+            Err(mpsc::TryRecvError::Empty) => return (updates, false),
+            Err(mpsc::TryRecvError::Disconnected) => return (updates, true),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
@@ -1293,36 +1303,47 @@ impl App {
         let Some(rx) = self.pending.as_ref() else {
             return;
         };
-        let update = match rx.try_recv() {
-            Ok(update) => update,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.set_status("后台读取失败：后台线程已退出", true);
-                self.pending = None;
-                self.inflight = None;
-                self.profile_notice = None;
-                self.render(hwnd);
-                if !self.queued.is_empty() {
-                    SetTimer(hwnd, 2, 100, None);
+        let (updates, disconnected) = drain_work_updates(rx);
+        if updates.is_empty() && !disconnected {
+            return;
+        }
+        let mut finished = None;
+        let mut changed = false;
+        for update in updates {
+            match update {
+                WorkUpdate::Device(model, state) => {
+                    self.snapshot.devices[model] = state;
+                    changed = true;
                 }
-                return;
+                WorkUpdate::Finished(result) => finished = Some(result),
             }
-        };
-        if let WorkUpdate::Device(model, state) = update {
-            self.snapshot.devices[model] = state;
+        }
+        if finished.is_none() && disconnected {
+            self.pending = None;
+            self.inflight = None;
+            self.profile_notice = None;
+            self.set_status("后台读取失败：后台线程已退出", true);
+        }
+        if finished.is_none() && changed {
             self.tray(hwnd);
             self.layout(hwnd);
             if !self.flyout.is_null() {
                 InvalidateRect(self.flyout, null(), 0);
+            }
+        }
+        if finished.is_none() {
+            if disconnected {
+                self.render(hwnd);
+                if !self.queued.is_empty() {
+                    SetTimer(hwnd, 2, 100, None);
+                }
             }
             return;
         }
         let Some(_rx) = self.pending.take() else {
             return;
         };
-        let WorkUpdate::Finished((s, result)) = update else {
-            unreachable!()
-        };
+        let (s, result) = finished.unwrap();
         let writing = self.inflight.take().is_some();
         let profile_notice = self.profile_notice.take();
         let mut s = s;
@@ -3016,6 +3037,52 @@ unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn work_update_drain_coalesces_ready_devices_without_waiting() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(WorkUpdate::Device(0, backend::State::default()))
+            .unwrap();
+        tx.send(WorkUpdate::Device(1, backend::State::default()))
+            .unwrap();
+        let (updates, disconnected) = drain_work_updates(&rx);
+        assert!(!disconnected);
+        assert_eq!(updates.len(), 2);
+        assert!(matches!(updates[0], WorkUpdate::Device(0, _)));
+        assert!(matches!(updates[1], WorkUpdate::Device(1, _)));
+        let (updates, disconnected) = drain_work_updates(&rx);
+        assert!(updates.is_empty());
+        assert!(!disconnected);
+    }
+    #[test]
+    fn work_update_drain_keeps_finished_after_device_updates() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(WorkUpdate::Device(0, backend::State::default()))
+            .unwrap();
+        tx.send(WorkUpdate::Finished((Snapshot::default(), Ok(()))))
+            .unwrap();
+        let (updates, disconnected) = drain_work_updates(&rx);
+        assert!(!disconnected);
+        assert!(matches!(updates[0], WorkUpdate::Device(0, _)));
+        assert!(matches!(updates[1], WorkUpdate::Finished(_)));
+    }
+    #[test]
+    fn work_update_drain_keeps_ready_devices_on_disconnect() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(WorkUpdate::Device(0, backend::State::default()))
+            .unwrap();
+        drop(tx);
+        let (updates, disconnected) = drain_work_updates(&rx);
+        assert!(disconnected);
+        assert_eq!(updates.len(), 1);
+        assert!(matches!(updates[0], WorkUpdate::Device(0, _)));
+    }
+    #[test]
+    fn work_update_drain_returns_when_no_result_is_ready() {
+        let (_tx, rx) = mpsc::channel();
+        let (updates, disconnected) = drain_work_updates(&rx);
+        assert!(updates.is_empty());
+        assert!(!disconnected);
+    }
     #[test]
     fn pending_changes_keep_other_devices_and_settings() {
         let mut q = std::collections::VecDeque::new();
