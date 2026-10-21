@@ -15,14 +15,31 @@ pub struct Channel {
 }
 impl Channel {
     pub fn new(i: &Interface, spec: &'static crate::devices::DeviceSpec) -> Result<Self> {
+        if i.vid == 0x1532 {
+            Self::new_razer(i, spec)
+        } else {
+            Self::new_mchose(i, spec)
+        }
+    }
+    pub(crate) fn new_razer(
+        i: &Interface,
+        spec: &'static crate::devices::DeviceSpec,
+    ) -> Result<Self> {
         Ok(Self {
             spec,
             dev: Device::open(&i.path)?,
-            ready: if i.vid == 0x1532 {
-                None
-            } else {
-                Some(crate::keyboard::FeatureReady::open(&i.path)?)
-            },
+            ready: None,
+            interface: i.clone(),
+        })
+    }
+    pub(crate) fn new_mchose(
+        i: &Interface,
+        spec: &'static crate::devices::DeviceSpec,
+    ) -> Result<Self> {
+        Ok(Self {
+            spec,
+            dev: Device::open(&i.path)?,
+            ready: Some(crate::keyboard::FeatureReady::open(&i.path)?),
             interface: i.clone(),
         })
     }
@@ -97,96 +114,116 @@ impl Channel {
     pub(crate) fn config(&self) -> Result<MchoseConfig> {
         MchoseConfig::decode(&self.mchose(0x12, 0x67, &[], true)?)
     }
-    pub fn read(&self) -> Result<State> {
-        let mut s = State {
+    fn initial_state(&self) -> State {
+        State {
             present: true,
             fresh: true,
             updated: now(),
             identity: format!("{:04X}:{:04X}", self.interface.vid, self.interface.pid),
             ..State::default()
-        };
+        }
+    }
+    pub fn read(&self) -> Result<State> {
         if self.spec.adapter == Adapter::Razer {
-            s.percent = Some(protocol::razer_percent(self.razer(7, 0x80, 2, &[])?[1]));
-            s.charging = self.razer(7, 0x84, 2, &[]).ok().and_then(|v| match v[1] {
-                0 => Some(false),
-                1 => Some(true),
-                _ => None,
-            });
-            s.wired = self.interface.pid == 0xb6;
-            // Each optional setting fails independently of the battery reading.
-            match self.razer(4, 0x85, 7, &[1]) {
-                Ok(v) => s.dpi = Some(u16::from_be_bytes([v[1], v[2]])),
-                Err(e) => s.settings_error.push_str(&format!("DPI: {e}; ")),
-            }
-            match self.razer(0, 0x85, 1, &[]) {
-                Ok(v) if [1, 2, 8].contains(&v[0]) => s.rate = Some(1000 / v[0] as u16),
-                Ok(_) => s.settings_error.push_str("回报率字段未知; "),
-                Err(e) => s.settings_error.push_str(&format!("回报率: {e}; ")),
-            }
-            if let Ok(v) = self.razer(7, 0x81, 2, &[]) {
-                s.tuning
-                    .insert(Tuning::LowPower, protocol::razer_percent(v[0]) as u16);
-            }
-            if let Ok(v) = self.razer(4, 0x86, 38, &[0]) {
-                if let Ok((stages, active)) = protocol::razer_stage_table(&v) {
-                    s.dpi_stages = stages;
-                    s.active_stage = Some(active);
-                }
-            }
-            match self.razer(7, 0x83, 2, &[]) {
-                Ok(v) => s.sleep_seconds = Some(u16::from_be_bytes([v[0], v[1]])),
-                Err(e) => s.settings_error.push_str(&format!("休眠: {e}")),
-            }
+            self.read_razer()
         } else {
-            let (p, charging, wired) =
-                protocol::mchose_battery(&self.mchose(0x11, 6, &[], true)?)?;
-            s.percent = Some(p);
-            s.charging = charging;
-            s.wired = wired;
-            match self.config() {
-                Ok(c) => {
-                    s.dpi = Some(c.dpi(wired));
-                    s.rate = Some(MCHOSE_RATES[if wired { c.wired_rate } else { c.wireless_rate }]);
-                    s.sleep_seconds = Some(c.raw[19] as u16 * 60);
-                    s.dpi_stages = (0..c.stages)
-                        .map(|i| u16::from_le_bytes([c.raw[4 + i * 2], c.raw[5 + i * 2]]))
-                        .collect();
-                    s.active_stage = Some(if wired {
-                        c.wired_stage
-                    } else {
-                        c.wireless_stage
-                    } as u8);
-                    s.tuning.insert(Tuning::Debounce, c.raw[18] as u16);
-                    s.tuning.insert(Tuning::Lod, (c.raw[17] & 3) as u16);
-                    s.tuning.insert(Tuning::DpiStages, c.stages as u16);
-                    // Newer three-state performance modes are not declared for
-                    // the original A5 Ultra; reject an unexpected mode bit.
-                    if c.raw[17] & 0x40 == 0 {
-                        s.tuning
-                            .insert(Tuning::EsportsMode, u16::from(c.raw[17] & 0x80 != 0));
-                    }
-                    let rotation = c.raw[49] as i8;
-                    if (-30..=30).contains(&rotation) {
-                        s.tuning
-                            .insert(Tuning::SensorRotation, (rotation as i16 + 30) as u16);
-                    }
-                    for (key, mask) in [
-                        (Tuning::Ripple, 4),
-                        (Tuning::Angle, 8),
-                        (Tuning::Motion, 16),
-                    ] {
-                        s.tuning.insert(key, u16::from(c.raw[17] & mask != 0));
-                    }
-                }
-                Err(e) => s.settings_error = e,
+            self.read_mchose()
+        }
+    }
+    pub(crate) fn read_razer(&self) -> Result<State> {
+        let mut s = self.initial_state();
+        s.percent = Some(protocol::razer_percent(self.razer(7, 0x80, 2, &[])?[1]));
+        s.charging = self.razer(7, 0x84, 2, &[]).ok().and_then(|v| match v[1] {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        });
+        s.wired = self.interface.pid == 0xb6;
+        // Each optional setting fails independently of the battery reading.
+        match self.razer(4, 0x85, 7, &[1]) {
+            Ok(v) => s.dpi = Some(u16::from_be_bytes([v[1], v[2]])),
+            Err(e) => s.settings_error.push_str(&format!("DPI: {e}; ")),
+        }
+        match self.razer(0, 0x85, 1, &[]) {
+            Ok(v) if [1, 2, 8].contains(&v[0]) => s.rate = Some(1000 / v[0] as u16),
+            Ok(_) => s.settings_error.push_str("回报率字段未知; "),
+            Err(e) => s.settings_error.push_str(&format!("回报率: {e}; ")),
+        }
+        if let Ok(v) = self.razer(7, 0x81, 2, &[]) {
+            s.tuning
+                .insert(Tuning::LowPower, protocol::razer_percent(v[0]) as u16);
+        }
+        if let Ok(v) = self.razer(4, 0x86, 38, &[0]) {
+            if let Ok((stages, active)) = protocol::razer_stage_table(&v) {
+                s.dpi_stages = stages;
+                s.active_stage = Some(active);
             }
+        }
+        match self.razer(7, 0x83, 2, &[]) {
+            Ok(v) => s.sleep_seconds = Some(u16::from_be_bytes([v[0], v[1]])),
+            Err(e) => s.settings_error.push_str(&format!("休眠: {e}")),
+        }
+        Ok(s)
+    }
+    pub(crate) fn read_mchose(&self) -> Result<State> {
+        let mut s = self.initial_state();
+        let (p, charging, wired) = protocol::mchose_battery(&self.mchose(0x11, 6, &[], true)?)?;
+        s.percent = Some(p);
+        s.charging = charging;
+        s.wired = wired;
+        match self.config() {
+            Ok(c) => {
+                s.dpi = Some(c.dpi(wired));
+                s.rate = Some(MCHOSE_RATES[if wired { c.wired_rate } else { c.wireless_rate }]);
+                s.sleep_seconds = Some(c.raw[19] as u16 * 60);
+                s.dpi_stages = (0..c.stages)
+                    .map(|i| u16::from_le_bytes([c.raw[4 + i * 2], c.raw[5 + i * 2]]))
+                    .collect();
+                s.active_stage = Some(if wired {
+                    c.wired_stage
+                } else {
+                    c.wireless_stage
+                } as u8);
+                s.tuning.insert(Tuning::Debounce, c.raw[18] as u16);
+                s.tuning.insert(Tuning::Lod, (c.raw[17] & 3) as u16);
+                s.tuning.insert(Tuning::DpiStages, c.stages as u16);
+                // Newer three-state performance modes are not declared for
+                // the original A5 Ultra; reject an unexpected mode bit.
+                if c.raw[17] & 0x40 == 0 {
+                    s.tuning
+                        .insert(Tuning::EsportsMode, u16::from(c.raw[17] & 0x80 != 0));
+                }
+                let rotation = c.raw[49] as i8;
+                if (-30..=30).contains(&rotation) {
+                    s.tuning
+                        .insert(Tuning::SensorRotation, (rotation as i16 + 30) as u16);
+                }
+                for (key, mask) in [
+                    (Tuning::Ripple, 4),
+                    (Tuning::Angle, 8),
+                    (Tuning::Motion, 16),
+                ] {
+                    s.tuning.insert(key, u16::from(c.raw[17] & mask != 0));
+                }
+            }
+            Err(e) => s.settings_error = e,
         }
         Ok(s)
     }
     pub fn apply(&self, action: Action) -> Result<()> {
-        let current = self.read()?;
-        match (self.spec.adapter, action) {
-            (Adapter::Razer, Action::Dpi(dpi)) if (100..=30000).contains(&dpi) && dpi % 50 == 0 => {
+        match self.spec.adapter {
+            Adapter::Razer => self.apply_razer(action),
+            Adapter::MchoseMouse => self.apply_mchose(action),
+            _ => {
+                let _ = self.read()?;
+                Err("参数不在该设备的已知范围内".into())
+            }
+        }
+    }
+    pub(crate) fn apply_razer(&self, action: Action) -> Result<()> {
+        let current = self.read_razer()?;
+        match action {
+            Action::Dpi(dpi) if (100..=30000).contains(&dpi) && dpi % 50 == 0 => {
                 if let Some(stage) = current.active_stage {
                     let table = self.razer(4, 0x86, 38, &[0])?;
                     let args = protocol::razer_stage_arguments(&table, stage, Some(dpi))?;
@@ -195,11 +232,11 @@ impl Channel {
                 let [hi, lo] = dpi.to_be_bytes();
                 self.razer(4, 5, 7, &[1, hi, lo, hi, lo, 0, 0])?;
             }
-            (Adapter::Razer, Action::Tune(Tuning::LowPower, v)) if (5..=50).contains(&v) => {
+            Action::Tune(Tuning::LowPower, v) if (5..=50).contains(&v) => {
                 let raw = ((v * 255 + 50) / 100) as u8;
                 self.razer(7, 1, 2, &[raw, 0])?;
             }
-            (Adapter::Razer, Action::Stage(stage)) => {
+            Action::Stage(stage) => {
                 let table = self.razer(4, 0x86, 38, &[0])?;
                 let args = protocol::razer_stage_arguments(&table, stage, None)?;
                 self.razer(4, 6, 38, &args)?;
@@ -219,19 +256,25 @@ impl Channel {
                     ],
                 )?;
             }
-            (Adapter::Razer, Action::Rate(rate)) if [125, 500, 1000].contains(&rate) => {
+            Action::Rate(rate) if [125, 500, 1000].contains(&rate) => {
                 self.razer(0, 5, 1, &[(1000 / rate) as u8])?;
             }
-            (Adapter::Razer, Action::Sleep(seconds)) if (60..=900).contains(&seconds) => {
+            Action::Sleep(seconds) if (60..=900).contains(&seconds) => {
                 self.razer(7, 3, 2, &seconds.to_be_bytes())?;
             }
-            (Adapter::MchoseMouse, Action::Dpi(dpi))
-                if (50..=26000).contains(&dpi) && dpi % 50 == 0 =>
-            {
+            _ => return Err("参数不在该设备的已知范围内".into()),
+        }
+        thread::sleep(Duration::from_millis(180));
+        Self::check_readback(self.read_razer()?, action)
+    }
+    pub(crate) fn apply_mchose(&self, action: Action) -> Result<()> {
+        let current = self.read_mchose()?;
+        match action {
+            Action::Dpi(dpi) if (50..=26000).contains(&dpi) && dpi % 50 == 0 => {
                 let cfg = self.config()?;
                 self.mchose(0x12, 0x40, &cfg.dpi_arguments(dpi, current.wired), false)?;
             }
-            (Adapter::MchoseMouse, Action::Rate(rate))
+            Action::Rate(rate)
                 if MCHOSE_RATES.contains(&rate) && (current.wired || rate <= 4000) =>
             {
                 let cfg = self.config()?;
@@ -243,9 +286,7 @@ impl Channel {
                 };
                 self.mchose(0x11, 0x41, &[usb, wireless], false)?;
             }
-            (Adapter::MchoseMouse, Action::Sleep(seconds))
-                if seconds <= 3600 && seconds % 60 == 0 =>
-            {
+            Action::Sleep(seconds) if seconds <= 3600 && seconds % 60 == 0 => {
                 self.mchose(
                     0x11,
                     0x0a,
@@ -253,22 +294,20 @@ impl Channel {
                     false,
                 )?;
             }
-            (Adapter::MchoseMouse, Action::Stage(stage))
-                if (stage as usize) < current.dpi_stages.len() =>
-            {
+            Action::Stage(stage) if (stage as usize) < current.dpi_stages.len() => {
                 let cfg = self.config()?;
                 let mut args = cfg.dpi_arguments(cfg.dpi(current.wired), current.wired);
                 args[if current.wired { 0 } else { 1 }] = stage;
                 self.mchose(0x12, 0x40, &args, false)?;
             }
-            (Adapter::MchoseMouse, Action::Tune(Tuning::Debounce, v)) if v <= 20 => {
+            Action::Tune(Tuning::Debounce, v) if v <= 20 => {
                 self.mchose(0x11, 0x43, &[v as u8], false)?;
             }
-            (Adapter::MchoseMouse, Action::Tune(Tuning::DpiStages, count)) => {
+            Action::Tune(Tuning::DpiStages, count) => {
                 let cfg = self.config()?;
                 self.mchose(0x12, 0x40, &cfg.stage_count_arguments(count)?, false)?;
             }
-            (Adapter::MchoseMouse, Action::Tune(key, v)) => {
+            Action::Tune(key, v) => {
                 let cfg = self.config()?;
                 let args = protocol::mchose_tuning_arguments(&cfg, key, v)?;
                 self.mchose(0x11, 0x42, &args, false)?;
@@ -276,7 +315,9 @@ impl Channel {
             _ => return Err("参数不在该设备的已知范围内".into()),
         }
         thread::sleep(Duration::from_millis(180));
-        let check = self.read()?;
+        Self::check_readback(self.read_mchose()?, action)
+    }
+    fn check_readback(check: State, action: Action) -> Result<()> {
         let (actual, expected) = match action {
             Action::Dpi(v) => (check.dpi, v),
             Action::Rate(v) => (check.rate, v),
