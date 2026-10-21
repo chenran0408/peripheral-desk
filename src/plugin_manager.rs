@@ -348,6 +348,14 @@ pub fn installed_all() -> Result<Vec<InstalledDriver>> {
 pub fn is_installed(id: &str) -> bool {
     installed(id).ok().flatten().is_some()
 }
+/// Used only before a user-requested batch skip, not on the UI paint path.
+pub fn verified_installed_version(id: &str) -> Option<String> {
+    let driver = installed(id).ok().flatten()?;
+    let bytes = std::fs::read(root().join(id).join(&driver.directory).join("driver.dll")).ok()?;
+    digest(&bytes)
+        .eq_ignore_ascii_case(&driver.manifest.dll_sha256)
+        .then_some(driver.version)
+}
 pub fn artwork(id: &str) -> Option<PathBuf> {
     installed(id)
         .ok()
@@ -643,7 +651,9 @@ fn install_bytes(package: &DriverPackage, bytes: &[u8]) -> Result<InstalledDrive
         if destination.exists() {
             let old = std::fs::read(destination.join("driver.dll")).map_err(|e| e.to_string())?;
             if digest(&old) != digest(&dll) {
-                return Err("相同版本的驱动内容不一致，拒绝覆盖".into());
+                return Err(
+                    "相同版本的本地驱动内容不一致，拒绝覆盖；请先卸载（保留配置）再重新安装".into(),
+                );
             }
             std::fs::remove_dir_all(&incoming).map_err(|e| e.to_string())?;
         } else {

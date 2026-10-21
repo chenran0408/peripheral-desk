@@ -802,7 +802,12 @@ pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationRep
             .filter(|s| !s.is_empty())
             .or_else(|| state.get("settings_error").and_then(Value::as_str))
             .unwrap_or("");
-        devices.push(json!({"key":spec.key,"plugin":plugin,"interfaces":ports,"connection":{"enumerated":!ports.is_empty(),"cached_present":state.get("present").and_then(Value::as_bool),"cached_fresh":state.get("fresh").and_then(Value::as_bool),"error_category":error_category(error)}}));
+        let ui_metadata = json!({
+            "dpi_range":spec.dpi_range,"dpi_step":spec.dpi_step,
+            "rates":spec.rates,"wired_rates":spec.wired_rates,"sleeps":spec.sleeps,
+            "advanced":spec.advanced.iter().map(|setting| json!({"key":setting.key,"choices":setting.choices})).collect::<Vec<_>>()
+        });
+        devices.push(json!({"key":spec.key,"plugin":plugin,"interfaces":ports,"ui_metadata":ui_metadata,"connection":{"enumerated":!ports.is_empty(),"cached_present":state.get("present").and_then(Value::as_bool),"cached_fresh":state.get("fresh").and_then(Value::as_bool),"error_category":error_category(error)}}));
     }
     write_json(
         path,

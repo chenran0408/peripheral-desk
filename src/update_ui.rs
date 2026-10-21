@@ -1,7 +1,7 @@
 //! Independent core release channel and restart-aware native update window.
 use crate::{
     hid::wide,
-    paint::{Canvas, BG, BORDER, DIM, FIELD, GREEN, MUTED, ORANGE, PANEL, R, RED, TEXT},
+    paint::{self, Canvas, BG, BORDER, DIM, FIELD, GREEN, MUTED, ORANGE, PANEL, R, RED, TEXT},
 };
 use peripheral_desk::core_update::{self, UpdateInfo};
 use std::{
@@ -83,14 +83,10 @@ impl Updater {
     }
     unsafe fn add(&mut self, owner: HWND, id: i32, class: &str, text: &str, r: R, style: u32) {
         let child = CreateWindowExW(
-            if class == "EDIT" || class == "COMBOBOX" {
-                WS_EX_CLIENTEDGE
-            } else {
-                0
-            },
+            0,
             wide(class).as_ptr(),
             wide(text).as_ptr(),
-            WS_CHILD | WS_TABSTOP | style,
+            WS_CHILD | WS_TABSTOP | paint::native_control_style(class, style),
             self.px(r.x),
             self.px(r.y),
             self.px(r.w),
@@ -101,6 +97,9 @@ impl Updater {
             null(),
         );
         SendMessageW(child, WM_SETFONT, self.font as usize, 0);
+        if matches!(class, "EDIT" | "LISTBOX" | "COMBOBOX") {
+            paint::theme_native_control(child, class, self.dpi);
+        }
         self.children.push(Child {
             hwnd: child,
             id,
@@ -505,8 +504,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
             0
         }
         WM_ERASEBKGND => 1,
+        WM_MEASUREITEM => i32::from(paint::measure_native_choice(
+            &mut *(l as *mut MEASUREITEMSTRUCT),
+            updater.dpi,
+        )) as isize,
         WM_DRAWITEM => {
-            updater.button(&*(l as *const DRAWITEMSTRUCT));
+            let item = &*(l as *const DRAWITEMSTRUCT);
+            if paint::draw_native_choice(item, updater.dpi, updater.font) {
+                return 1;
+            }
+            updater.button(item);
             1
         }
         WM_COMMAND => {

@@ -5,8 +5,9 @@ use std::{
     ptr::{null, null_mut},
 };
 use windows_sys::Win32::{
-    Foundation::RECT,
+    Foundation::{HWND, RECT},
     Graphics::{Gdi::*, GdiPlus::*},
+    UI::{Controls::*, WindowsAndMessaging::*},
 };
 
 pub const BG: u32 = 0xff0a0a0d;
@@ -20,6 +21,115 @@ pub const RED: u32 = 0xffff3859;
 pub const ORANGE: u32 = 0xffff7542;
 pub const GREEN: u32 = 0xff38d58a;
 pub const AMBER: u32 = 0xffdcae65;
+
+/// Retain native string storage, selection and accessibility with custom colors.
+pub fn native_control_style(class: &str, style: u32) -> u32 {
+    let style = style & !WS_BORDER;
+    match class {
+        "LISTBOX" => style | LBS_OWNERDRAWFIXED as u32 | LBS_HASSTRINGS as u32,
+        "COMBOBOX" => style | CBS_OWNERDRAWFIXED as u32 | CBS_HASSTRINGS as u32,
+        _ => style,
+    }
+}
+pub unsafe fn theme_native_control(hwnd: HWND, class: &str, dpi: u32) {
+    let theme = if class == "COMBOBOX" {
+        "DarkMode_CFD"
+    } else {
+        "DarkMode_Explorer"
+    };
+    SetWindowTheme(hwnd, wide(theme).as_ptr(), null());
+    let height = (28 * dpi.max(96) / 96) as isize;
+    match class {
+        "LISTBOX" => {
+            SendMessageW(hwnd, LB_SETITEMHEIGHT, 0, height);
+        }
+        "COMBOBOX" => {
+            SendMessageW(hwnd, CB_SETITEMHEIGHT, usize::MAX, height);
+            SendMessageW(hwnd, CB_SETITEMHEIGHT, 0, height);
+        }
+        _ => {}
+    }
+}
+pub unsafe fn measure_native_choice(item: &mut MEASUREITEMSTRUCT, dpi: u32) -> bool {
+    if !matches!(item.CtlType, ODT_LISTBOX | ODT_COMBOBOX) {
+        return false;
+    }
+    item.itemHeight = 28 * dpi.max(96) / 96;
+    true
+}
+pub unsafe fn draw_native_choice(item: &DRAWITEMSTRUCT, dpi: u32, font: HFONT) -> bool {
+    if !matches!(item.CtlType, ODT_LISTBOX | ODT_COMBOBOX) {
+        return false;
+    }
+    let combo = item.CtlType == ODT_COMBOBOX;
+    let selected = item.itemState & ODS_SELECTED != 0 && item.itemState & ODS_COMBOBOXEDIT == 0;
+    let colorref = |argb: u32| ((argb >> 16) & 255) | (argb & 0xff00) | ((argb & 255) << 16);
+    let background = CreateSolidBrush(colorref(if selected { BORDER } else { FIELD }));
+    FillRect(item.hDC, &item.rcItem, background);
+    DeleteObject(background);
+    if item.itemID == u32::MAX {
+        return true;
+    }
+    let len = SendMessageW(
+        item.hwndItem,
+        if combo {
+            CB_GETLBTEXTLEN
+        } else {
+            LB_GETTEXTLEN
+        },
+        item.itemID as usize,
+        0,
+    );
+    if len < 0 {
+        return true;
+    }
+    let mut text = vec![0u16; len as usize + 1];
+    SendMessageW(
+        item.hwndItem,
+        if combo { CB_GETLBTEXT } else { LB_GETTEXT },
+        item.itemID as usize,
+        text.as_mut_ptr() as isize,
+    );
+    let inset = (10 * dpi.max(96) / 96) as i32;
+    if selected {
+        let accent = CreateSolidBrush(colorref(RED));
+        let stroke = (3 * dpi.max(96) / 96) as i32;
+        let stripe = RECT {
+            left: item.rcItem.left,
+            top: item.rcItem.top + stroke,
+            right: item.rcItem.left + stroke,
+            bottom: item.rcItem.bottom - stroke,
+        };
+        FillRect(item.hDC, &stripe, accent);
+        DeleteObject(accent);
+    }
+    let previous_font = SelectObject(item.hDC, font);
+    let previous_color = SetTextColor(
+        item.hDC,
+        colorref(if item.itemState & ODS_DISABLED != 0 {
+            DIM
+        } else {
+            TEXT
+        }),
+    );
+    let previous_mode = SetBkMode(item.hDC, TRANSPARENT as i32);
+    let mut rect = item.rcItem;
+    rect.left += inset;
+    rect.right -= inset;
+    // Native scrolling/clip regions retain the full string; never truncate UTF-16
+    // or hide parameter suffixes with a manually shortened label.
+    DrawTextW(
+        item.hDC,
+        text.as_ptr(),
+        len as i32,
+        &mut rect,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    SetBkMode(item.hDC, previous_mode);
+    SetTextColor(item.hDC, previous_color);
+    SelectObject(item.hDC, previous_font);
+    true
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct R {

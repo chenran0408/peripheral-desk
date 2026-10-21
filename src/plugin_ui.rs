@@ -5,7 +5,7 @@ use crate::{
 };
 use peripheral_desk::plugin_manager::{self, DriverPackage, InstalledDriver};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     mem::{size_of, zeroed},
     path::PathBuf,
     ptr::{null, null_mut},
@@ -20,12 +20,14 @@ use windows_sys::Win32::{
         Controls::{Dialogs::*, *},
         HiDpi::*,
         Input::KeyboardAndMouse::*,
+        Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
         WindowsAndMessaging::*,
     },
 };
 const WIDTH: i32 = 1040;
 const HEIGHT: i32 = 700;
 const FINISHED: u32 = WM_APP + 84;
+const FOCUS_CHANGED: u32 = WM_APP + 85;
 const LIST: i32 = 101;
 const REFRESH: i32 = 102;
 const INSTALL: i32 = 103;
@@ -36,6 +38,10 @@ const OFFLINE: i32 = 107;
 const CHANNEL: i32 = 108;
 const ROLLBACK: i32 = 109;
 const CHANGELOG: i32 = 110;
+const SELECT_ALL: i32 = 111;
+const SELECT_NONE: i32 = 112;
+const SELECT_DETECTED: i32 = 113;
+const PREVIEW: i32 = 114;
 
 #[derive(Default)]
 enum Installation {
@@ -103,11 +109,83 @@ impl Inventory {
 enum Operation {
     Load,
     Refresh,
-    Install(String),
+    Install(Vec<InstallTarget>),
     Remove(String),
     Offline(PathBuf),
     Channel(String),
     Rollback(String),
+}
+#[derive(Clone)]
+struct InstallTarget {
+    id: String,
+    name: String,
+    version: String,
+    bytes: u64,
+}
+struct BatchResult {
+    entries: Vec<(InstallTarget, Result<bool, String>)>,
+}
+impl BatchResult {
+    fn failed(&self) -> bool {
+        self.entries.iter().any(|(_, result)| result.is_err())
+    }
+    fn description(&self) -> String {
+        let installed = self
+            .entries
+            .iter()
+            .filter(|(_, r)| matches!(r, Ok(true)))
+            .count();
+        let skipped = self
+            .entries
+            .iter()
+            .filter(|(_, r)| matches!(r, Ok(false)))
+            .count();
+        let failed = self.entries.len() - installed - skipped;
+        let mut lines = vec![format!(
+            "安装完成：成功 {installed} 项，失败 {failed} 项，跳过已同版 {skipped} 项。新设备安装后请重启主程序。"
+        )];
+        for (target, result) in &self.entries {
+            lines.push(match result {
+                Ok(true) => format!("成功 · {} {}", target.name, target.version),
+                Ok(false) => format!("跳过 · {} {} 已安装同版本", target.name, target.version),
+                Err(error) => format!("失败 · {}：{error}", target.name),
+            });
+        }
+        lines.join("\r\n")
+    }
+}
+fn install_batch(
+    targets: Vec<InstallTarget>,
+    mut current: impl FnMut(&str) -> Option<String>,
+    mut install: impl FnMut(&str) -> Result<(), String>,
+    mut progress: impl FnMut(usize, usize, &InstallTarget),
+) -> BatchResult {
+    // Each item enters the normal verified installer independently. Never let
+    // one failed download prevent the remaining explicitly selected items.
+    let count = targets.len();
+    BatchResult {
+        entries: targets
+            .into_iter()
+            .enumerate()
+            .map(|(index, target)| {
+                progress(index + 1, count, &target);
+                let result = if current(&target.id).as_deref() == Some(&target.version) {
+                    Ok(false)
+                } else {
+                    install(&target.id).map(|()| true)
+                };
+                (target, result)
+            })
+            .collect(),
+    }
+}
+struct WorkResult {
+    inventory: Result<Inventory, String>,
+    batch: Option<BatchResult>,
+}
+enum WorkEvent {
+    Progress(String),
+    Finished(WorkResult),
 }
 struct Child {
     hwnd: HWND,
@@ -121,7 +199,8 @@ struct Manager {
     children: Vec<Child>,
     inventory: Option<Inventory>,
     selected: usize,
-    pending: Option<Receiver<Result<Inventory, String>>>,
+    checked: BTreeSet<String>,
+    pending: Option<Receiver<WorkEvent>>,
     status: String,
     success: String,
     error: bool,
@@ -180,9 +259,18 @@ fn inventory(refresh: bool) -> Result<Inventory, String> {
         };
         installed.insert(package.id.clone(), status);
     }
-    let installed_only = plugin_manager::installed_all()?
+    // One corrupt installation must not hide unrelated usable packages.
+    // Catalog entries already preserve their precise Broken(error) above.
+    let installed_only = plugin_manager::installed_descriptors()
         .into_iter()
-        .filter(|driver| !packages.iter().any(|package| package.id == driver.id))
+        .filter_map(|descriptor| {
+            descriptor
+                .get("key")
+                .and_then(|key| key.as_str())
+                .map(str::to_owned)
+        })
+        .filter(|id| !packages.iter().any(|package| package.id == *id))
+        .filter_map(|id| plugin_manager::installed(&id).ok().flatten())
         .collect::<Vec<_>>();
     for driver in &installed_only {
         installed.insert(
@@ -218,13 +306,22 @@ impl Manager {
             .and_then(|p| self.inventory.as_ref()?.installed.get(p.id))
             .unwrap_or(&MISSING)
     }
+    fn targets(&self) -> Vec<InstallTarget> {
+        self.inventory
+            .iter()
+            .flat_map(|i| &i.packages)
+            .filter(|p| self.checked.contains(&p.id))
+            .map(|p| InstallTarget {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                version: p.version.clone(),
+                bytes: p.download_bytes,
+            })
+            .collect()
+    }
     unsafe fn add(&mut self, hwnd: HWND, id: i32, class: &str, label: &str, r: R, style: u32) {
         let child = CreateWindowExW(
-            if class == "EDIT" || class == "LISTBOX" || class == "COMBOBOX" {
-                WS_EX_CLIENTEDGE
-            } else {
-                0
-            },
+            0,
             wide(class).as_ptr(),
             wide(label).as_ptr(),
             WS_CHILD | WS_TABSTOP | style,
@@ -238,6 +335,12 @@ impl Manager {
             null(),
         );
         SendMessageW(child, WM_SETFONT, self.font as usize, 0);
+        if matches!(class, "EDIT" | "LISTBOX") {
+            crate::paint::theme_native_control(child, class, self.dpi);
+        }
+        if id == LIST {
+            SetWindowSubclass(child, Some(list_proc), 1, 0);
+        }
         self.children.push(Child {
             hwnd: child,
             id,
@@ -251,28 +354,16 @@ impl Manager {
         for child in self.children.drain(..) {
             DestroyWindow(child.hwnd);
         }
-        self.add(
-            hwnd,
-            CHANNEL,
-            "COMBOBOX",
-            "",
-            R::new(548, 28, 126, 210),
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-        );
-        for label in ["稳定版", "预览版"] {
-            SendMessageW(
-                self.child(CHANNEL),
-                CB_ADDSTRING,
-                0,
-                wide(label).as_ptr() as isize,
+        for (id, label, x) in [(CHANNEL, "稳定版", 518), (PREVIEW, "预览版", 602)] {
+            self.add(
+                hwnd,
+                id,
+                "BUTTON",
+                label,
+                R::new(x, 26, 76, 38),
+                BS_OWNERDRAW as u32,
             );
         }
-        let selected = self
-            .inventory
-            .as_ref()
-            .map(|s| if s.channel == "preview" { 1 } else { 0 })
-            .unwrap_or(usize::MAX);
-        SendMessageW(self.child(CHANNEL), CB_SETCURSEL, selected, 0);
         self.add(
             hwnd,
             OFFLINE,
@@ -294,69 +385,57 @@ impl Manager {
             LIST,
             "LISTBOX",
             "",
-            R::new(40, 160, 960, 140),
+            R::new(40, 176, 960, 164),
             LBS_NOTIFY as u32
                 | LBS_NOINTEGRALHEIGHT as u32
-                | LBS_USETABSTOPS as u32
-                | WS_VSCROLL
-                | WS_HSCROLL,
+                | LBS_OWNERDRAWFIXED as u32
+                | LBS_HASSTRINGS as u32
+                | LBS_MULTIPLESEL as u32
+                | WS_VSCROLL,
         );
-        let stops = [168i32, 264, 391];
-        SendMessageW(
-            self.child(LIST),
-            LB_SETTABSTOPS,
-            stops.len(),
-            stops.as_ptr() as isize,
-        );
-        SendMessageW(self.child(LIST), LB_SETITEMHEIGHT, 0, self.px(28) as isize);
-        SendMessageW(
-            self.child(LIST),
-            LB_SETHORIZONTALEXTENT,
-            self.px(1100) as usize,
-            0,
-        );
+        SendMessageW(self.child(LIST), LB_SETITEMHEIGHT, 0, self.px(40) as isize);
         if let Some(inventory) = &self.inventory {
             for index in 0..inventory.len() {
                 let package = inventory.row(index).unwrap();
-                let state = inventory
-                    .installed
-                    .get(package.id)
-                    .map_or("未安装", Installation::label);
-                let name = if package.catalog_available {
-                    format!(
-                        "{} {}",
-                        if inventory.detected.get(package.id) == Some(&true) {
-                            "●"
-                        } else {
-                            "○"
-                        },
-                        package.name
-                    )
-                } else {
-                    format!("{}（已安装）", package.name)
-                };
-                let row = format!(
-                    "{}\t{}\t{}\t{}",
-                    name,
-                    package.version,
-                    state,
-                    if package.catalog_available {
-                        size(package.download_bytes)
-                    } else {
-                        "—".into()
-                    }
-                );
                 SendMessageW(
                     self.child(LIST),
                     LB_ADDSTRING,
                     0,
-                    wide(&row).as_ptr() as isize,
+                    wide(package.name).as_ptr() as isize,
+                );
+                SendMessageW(
+                    self.child(LIST),
+                    LB_SETSEL,
+                    usize::from(self.checked.contains(package.id)),
+                    index as isize,
                 );
             }
             if inventory.len() > 0 {
                 self.selected = self.selected.min(inventory.len() - 1);
-                SendMessageW(self.child(LIST), LB_SETCURSEL, self.selected, 0);
+                SendMessageW(self.child(LIST), LB_SETCARETINDEX, self.selected, 0);
             }
+        }
+        if self.inventory.as_ref().is_none_or(|i| i.len() == 0) {
+            SendMessageW(
+                self.child(LIST),
+                LB_ADDSTRING,
+                0,
+                wide("暂无可用驱动").as_ptr() as isize,
+            );
+        }
+        for (id, label, x, width) in [
+            (SELECT_ALL, "全选", 44, 84),
+            (SELECT_NONE, "取消选择", 138, 108),
+            (SELECT_DETECTED, "选择已识别设备", 256, 170),
+        ] {
+            self.add(
+                hwnd,
+                id,
+                "BUTTON",
+                label,
+                R::new(x, 110, width, 32),
+                BS_OWNERDRAW as u32,
+            );
         }
 
         self.add(
@@ -364,7 +443,7 @@ impl Manager {
             DESCRIPTION,
             "EDIT",
             "",
-            R::new(44, 424, 952, 76),
+            R::new(44, 454, 952, 56),
             ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
         );
         self.add(
@@ -379,7 +458,7 @@ impl Manager {
             hwnd,
             REMOVE,
             "BUTTON",
-            "卸载（保留配置）",
+            "卸载焦点项 · 保留配置",
             R::new(268, 532, 208, 38),
             BS_OWNERDRAW as u32,
         );
@@ -387,7 +466,7 @@ impl Manager {
             hwnd,
             ROLLBACK,
             "BUTTON",
-            "回退上一版",
+            "回退焦点项",
             R::new(492, 532, 176, 38),
             BS_OWNERDRAW as u32,
         );
@@ -424,18 +503,16 @@ impl Manager {
             _ => description,
         };
         self.text(DESCRIPTION, &detail);
-        let label = match (self.selected(), self.installation()) {
-            (Some(package), _) if !package.catalog_available => "当前通道无可用更新",
-            (Some(package), Installation::Present(version)) if *version == package.version => {
-                "已安装此版本"
-            }
-            (Some(_), Installation::Present(_)) => "更新所选驱动",
-            _ => "安装所选驱动",
+        let count = self.targets().len();
+        let label = if count == 0 {
+            "请勾选设备驱动".into()
+        } else {
+            format!("安装 / 更新已选 {count} 项")
         };
         if let Some(child) = self.children.iter_mut().find(|c| c.id == INSTALL) {
-            child.label = label.into();
+            child.label = label.clone();
         }
-        self.text(INSTALL, label);
+        self.text(INSTALL, &label);
         self.availability();
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
@@ -445,6 +522,10 @@ impl Manager {
         EnableWindow(self.child(LIST), ready as i32);
         EnableWindow(self.child(OFFLINE), ready as i32);
         EnableWindow(self.child(CHANNEL), ready as i32);
+        EnableWindow(self.child(PREVIEW), ready as i32);
+        for id in [SELECT_ALL, SELECT_NONE, SELECT_DETECTED] {
+            EnableWindow(self.child(id), (ready && self.inventory.is_some()) as i32);
+        }
         EnableWindow(
             self.child(CHANGELOG),
             (ready && self.selected().is_some()) as i32,
@@ -453,10 +534,9 @@ impl Manager {
             self.child(ROLLBACK),
             (ready && matches!(self.installation(), Installation::Present(_))) as i32,
         );
-        let same = matches!((self.selected(),self.installation()),(Some(package),Installation::Present(version))if *version==package.version);
         EnableWindow(
             self.child(INSTALL),
-            (ready && self.selected().is_some_and(|p| p.catalog_available) && !same) as i32,
+            (ready && !self.targets().is_empty()) as i32,
         );
         EnableWindow(
             self.child(REMOVE),
@@ -476,15 +556,18 @@ impl Manager {
             return;
         }
         self.changing_channel = matches!(operation, Operation::Channel(_));
+        if self.changing_channel {
+            self.checked.clear();
+        }
         let (progress, success) = match &operation {
             Operation::Load => (
                 "正在读取驱动目录…",
-                "目录已加载。请按需安装所选驱动，不会自动安装其它设备。",
+                "勾选所需型号后点击安装；无需按 Ctrl，可一次选择多个驱动。",
             ),
             Operation::Refresh => ("正在连接驱动仓库，刷新可用版本…", "驱动仓库已刷新。"),
             Operation::Install(_) => (
-                "正在下载并校验所选驱动，请等待完成…",
-                "所选驱动已安装。已有设备关闭窗口后刷新；新设备支持请重启主程序。",
+                "正在逐项下载并校验已选驱动，请等待完成…",
+                "批量安装结束，请查看各项结果。新增设备支持请重启主程序。",
             ),
             Operation::Remove(_) => (
                 "正在卸载所选驱动，保留用户配置…",
@@ -510,14 +593,30 @@ impl Manager {
         self.availability();
         let window = hwnd as usize;
         thread::spawn(move || {
+            let mut batch = None;
             let result = (|| match operation {
                 Operation::Load => inventory(false),
                 Operation::Refresh => inventory(true),
-                Operation::Install(id) => {
-                    let installed = plugin_manager::install(&id).map_err(|e| e.to_string())?;
-                    let mut state = inventory(false)?;
-                    state.focus = Some(installed.id);
-                    Ok(state)
+                Operation::Install(targets) => {
+                    batch = Some(install_batch(
+                        targets,
+                        plugin_manager::verified_installed_version,
+                        |id| {
+                            plugin_manager::install(id)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        },
+                        |index, count, target| {
+                            let _ = tx.send(WorkEvent::Progress(format!(
+                                "正在处理 {index}/{count}：{} {}（下载、校验与备份）…",
+                                target.name, target.version
+                            )));
+                            unsafe {
+                                PostMessageW(window as HWND, FINISHED, 0, 0);
+                            }
+                        },
+                    ));
+                    inventory(false)
                 }
                 Operation::Offline(path) => {
                     let installed =
@@ -548,7 +647,13 @@ impl Manager {
                     inventory(false)
                 }
             })();
-            if tx.send(result).is_ok() {
+            if tx
+                .send(WorkEvent::Finished(WorkResult {
+                    inventory: result,
+                    batch,
+                }))
+                .is_ok()
+            {
                 unsafe {
                     PostMessageW(window as HWND, FINISHED, 0, 0);
                 }
@@ -556,12 +661,27 @@ impl Manager {
         });
     }
     unsafe fn finish(&mut self, hwnd: HWND) {
-        let Some(receiver) = self.pending.take() else {
+        let Some(receiver) = self.pending.as_ref() else {
             return;
         };
+        let event = match receiver.try_recv() {
+            Ok(WorkEvent::Progress(progress)) => {
+                self.status(hwnd, progress, false);
+                return;
+            }
+            Ok(WorkEvent::Finished(result)) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(error) => WorkResult {
+                inventory: Err(format!("后台任务未返回结果：{error}")),
+                batch: None,
+            },
+        };
+        self.pending = None;
         let selected = self.selected().map(|p| p.id.to_string());
-        match receiver.try_recv() {
-            Ok(Ok(inventory)) => {
+        let report = event.batch.as_ref().map(BatchResult::description);
+        let failed = event.batch.as_ref().is_some_and(BatchResult::failed);
+        match event.inventory {
+            Ok(inventory) => {
                 self.selected = inventory
                     .focus
                     .clone()
@@ -572,27 +692,21 @@ impl Manager {
                     })
                     .unwrap_or(0);
                 self.inventory = Some(inventory);
-                self.status = self.success.clone();
-                self.error = false;
+                if let Some(inventory) = &self.inventory {
+                    self.checked
+                        .retain(|id| inventory.packages.iter().any(|p| p.id == *id));
+                }
+                self.status = report.unwrap_or_else(|| self.success.clone());
+                self.error = failed;
                 self.layout(hwnd);
             }
-            Ok(Err(error)) => {
-                self.status(hwnd, format!("操作未完成：{error}"), true);
-                if self.changing_channel {
-                    if self
-                        .inventory
-                        .as_ref()
-                        .is_some_and(|i| i.channel != plugin_manager::channel())
-                    {
-                        self.inventory = None;
-                    }
-                    self.layout(hwnd);
-                } else {
-                    self.availability();
-                }
-            }
             Err(error) => {
-                self.status(hwnd, format!("后台任务未返回结果：{error}"), true);
+                let message = if let Some(report) = report {
+                    format!("{report}\r\n目录读取失败（已完成的安装不会撤销）：{error}")
+                } else {
+                    format!("操作未完成：{error}")
+                };
+                self.status(hwnd, message, true);
                 if self.changing_channel {
                     if self
                         .inventory
@@ -641,21 +755,64 @@ impl Manager {
         if self.pending.is_some() || self.dialog_open {
             return;
         }
+        if matches!(id, REMOVE | ROLLBACK | CHANGELOG) {
+            let caret = SendMessageW(self.child(LIST), LB_GETCARETINDEX, 0, 0);
+            if caret >= 0 {
+                self.selected = caret as usize;
+            }
+        }
         match id {
             LIST if event == LBN_SELCHANGE => {
-                self.selected = SendMessageW(self.child(LIST), LB_GETCURSEL, 0, 0) as usize;
+                self.selected = SendMessageW(self.child(LIST), LB_GETCARETINDEX, 0, 0) as usize;
+                if let Some(inventory) = &self.inventory {
+                    self.checked.clear();
+                    for index in 0..inventory.len() {
+                        let row = inventory.row(index).unwrap();
+                        if row.catalog_available
+                            && SendMessageW(self.child(LIST), LB_GETSEL, index, 0) > 0
+                        {
+                            self.checked.insert(row.id.to_string());
+                        } else if !row.catalog_available {
+                            SendMessageW(self.child(LIST), LB_SETSEL, 0, index as isize);
+                        }
+                    }
+                }
+                self.selection(hwnd);
+            }
+            SELECT_ALL | SELECT_NONE | SELECT_DETECTED => {
+                self.checked.clear();
+                if let Some(inventory) = &self.inventory {
+                    for index in 0..inventory.len() {
+                        let row = inventory.row(index).unwrap();
+                        let checked = row.catalog_available
+                            && (id == SELECT_ALL
+                                || id == SELECT_DETECTED
+                                    && inventory.detected.get(row.id) == Some(&true));
+                        if checked {
+                            self.checked.insert(row.id.to_string());
+                        }
+                        SendMessageW(
+                            self.child(LIST),
+                            LB_SETSEL,
+                            usize::from(checked),
+                            index as isize,
+                        );
+                    }
+                }
                 self.selection(hwnd);
             }
             REFRESH => self.begin(hwnd, Operation::Refresh),
             OFFLINE => self.offline(hwnd),
-            CHANNEL if event == CBN_SELCHANGE => {
-                let index = SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0);
-                if index == 0 || index == 1 {
-                    self.begin(
-                        hwnd,
-                        Operation::Channel(if index == 1 { "preview" } else { "stable" }.into()),
-                    );
+            CHANNEL | PREVIEW => {
+                let channel = if id == PREVIEW { "preview" } else { "stable" };
+                if self
+                    .inventory
+                    .as_ref()
+                    .is_some_and(|i| i.channel == channel)
+                {
+                    return;
                 }
+                self.begin(hwnd, Operation::Channel(channel.into()));
             }
             ROLLBACK => {
                 if let Some(package) = self.selected() {
@@ -686,10 +843,9 @@ impl Manager {
                 }
             }
             INSTALL => {
-                if let Some(package) = self.selected() {
-                    if package.catalog_available {
-                        self.begin(hwnd, Operation::Install(package.id.to_string()));
-                    }
+                let targets = self.targets();
+                if !targets.is_empty() {
+                    self.begin(hwnd, Operation::Install(targets));
                 }
             }
             REMOVE => {
@@ -716,29 +872,69 @@ impl Manager {
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
             c.gradient(R::new(0, 0, WIDTH, 84), 0xff201017, BG);
             c.text("驱动管理", R::new(28, 18, 390, 32), 23, 600, TEXT, DT_LEFT);
-            c.text("更新通道", R::new(448, 30, 92, 24), 13, 400, MUTED, DT_LEFT);
+            c.text("更新通道", R::new(426, 30, 84, 24), 13, 400, MUTED, DT_LEFT);
             c.text(
-                "从独立驱动仓库按需安装，让主程序保持轻量。",
+                "按型号勾选，一次安装多个驱动。点击行即可勾选，无需 Ctrl。",
                 R::new(28, 55, 500, 24),
-                14,
+                13,
                 400,
                 MUTED,
                 DT_LEFT,
             );
-            c.round(R::new(24, 108, 992, 208), 14, PANEL, Some(BORDER));
+            c.round(R::new(24, 98, 992, 258), 18, PANEL, Some(BORDER));
+            let targets = self.targets();
+            let bytes = targets.iter().map(|t| t.bytes).sum();
+            c.text(
+                &format!(
+                    "已选 {} 项 · 包体积 {} · 已同版将跳过",
+                    targets.len(),
+                    if targets.is_empty() {
+                        "—".into()
+                    } else {
+                        size(bytes)
+                    }
+                ),
+                R::new(452, 114, 540, 24),
+                12,
+                400,
+                MUTED,
+                DT_RIGHT,
+            );
             for (x, width, label) in [
-                (42, 310, "设备接口 ● 已发现 / ○ 未连接"),
-                (336, 150, "可用版本"),
-                (506, 180, "已安装版本"),
-                (724, 250, "下载大小"),
+                (82, 310, "设备接口 · 实心圆表示已识别"),
+                (410, 150, "可用版本"),
+                (580, 180, "已安装版本"),
+                (810, 176, "包体积"),
             ] {
-                c.text(label, R::new(x, 124, width, 24), 13, 600, MUTED, DT_LEFT);
+                c.text(
+                    label,
+                    R::new(x, 148, width, 22),
+                    12,
+                    500,
+                    DIM,
+                    if label == "包体积" {
+                        DT_RIGHT
+                    } else {
+                        DT_LEFT
+                    },
+                );
             }
-            c.round(R::new(24, 334, 992, 254), 14, PANEL, Some(BORDER));
+            if self.inventory.as_ref().is_none_or(|i| i.len() == 0) {
+                c.text(
+                    "当前通道暂无可用驱动，请刷新仓库或切换通道。",
+                    R::new(52, 230, 936, 28),
+                    14,
+                    400,
+                    MUTED,
+                    DT_CENTER,
+                );
+            }
+            c.round(R::new(24, 372, 992, 216), 18, PANEL, Some(BORDER));
+            c.round(R::new(36, 448, 968, 68), 10, FIELD, Some(BORDER));
             if let Some(package) = self.selected() {
                 c.text(
                     package.name,
-                    R::new(44, 352, 760, 30),
+                    R::new(44, 384, 760, 30),
                     21,
                     600,
                     TEXT,
@@ -766,8 +962,8 @@ impl Manager {
                             "—".into()
                         }
                     ),
-                    R::new(44, 392, 952, 25),
-                    14,
+                    R::new(44, 420, 952, 24),
+                    13,
                     400,
                     if matches!(self.installation(), Installation::Present(_)) {
                         GREEN
@@ -778,8 +974,8 @@ impl Manager {
                 );
             } else {
                 c.text(
-                    "选择要安装的设备驱动",
-                    R::new(44, 352, 952, 32),
+                    "选择一行查看详情，勾选多个型号安装",
+                    R::new(44, 384, 952, 32),
                     21,
                     600,
                     TEXT,
@@ -787,7 +983,7 @@ impl Manager {
                 );
                 c.text(
                     "只展示仓库提供的信息；尚未下载的驱动显示为未安装。",
-                    R::new(44, 392, 952, 25),
+                    R::new(44, 420, 952, 24),
                     14,
                     400,
                     MUTED,
@@ -795,7 +991,7 @@ impl Manager {
                 );
             }
             c.text(
-                "已有设备：关闭窗口后刷新设备。新增设备支持：安装后重启主程序。",
+                "新增设备安装后重启主程序。卸载与回退只操作当前焦点行，保留配置。",
                 R::new(28, 590, 984, 22),
                 13,
                 400,
@@ -808,7 +1004,7 @@ impl Manager {
                 } else if self.error {
                     "操作结果 · 下方可滚动查看具体原因"
                 } else {
-                    "操作结果"
+                    "操作结果 · 可滚动查看每项详情"
                 },
                 R::new(28, 612, 984, 21),
                 12,
@@ -816,6 +1012,7 @@ impl Manager {
                 if self.error { ORANGE } else { DIM },
                 DT_LEFT,
             );
+            c.round(R::new(24, 634, 992, 52), 10, FIELD, Some(BORDER));
         }
         BitBlt(dest, 0, 0, area.right, area.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old);
@@ -828,7 +1025,7 @@ impl Manager {
             return;
         };
         // Clear every physical pixel, including antialiased rounded corners.
-        let background = if matches!(child.id, REFRESH | OFFLINE) {
+        let background = if matches!(child.id, REFRESH | OFFLINE | CHANNEL | PREVIEW) {
             BG
         } else {
             PANEL
@@ -842,10 +1039,14 @@ impl Manager {
         let width = (item.rcItem.right - item.rcItem.left) * 96 / self.dpi as i32;
         let height = (item.rcItem.bottom - item.rcItem.top) * 96 / self.dpi as i32;
         let disabled = item.itemState & ODS_DISABLED != 0;
-        let active = child.id == INSTALL;
+        let active = child.id == INSTALL
+            || self.inventory.as_ref().is_some_and(|i| {
+                child.id == CHANNEL && i.channel == "stable"
+                    || child.id == PREVIEW && i.channel == "preview"
+            });
         c.rect(
             R::new(0, 0, width, height),
-            if matches!(child.id, REFRESH | OFFLINE) {
+            if matches!(child.id, REFRESH | OFFLINE | CHANNEL | PREVIEW) {
                 BG
             } else {
                 PANEL
@@ -876,6 +1077,164 @@ impl Manager {
             DT_CENTER,
         );
     }
+    unsafe fn row(&self, item: &DRAWITEMSTRUCT) {
+        let physical_width = item.rcItem.right - item.rcItem.left;
+        let physical_height = item.rcItem.bottom - item.rcItem.top;
+        if physical_width <= 0 || physical_height <= 0 {
+            return;
+        }
+        let dc = CreateCompatibleDC(item.hDC);
+        let bitmap = CreateCompatibleBitmap(item.hDC, physical_width, physical_height);
+        let previous = SelectObject(dc, bitmap);
+        let brush = CreateSolidBrush(colorref(PANEL));
+        let bounds = RECT {
+            left: 0,
+            top: 0,
+            right: physical_width,
+            bottom: physical_height,
+        };
+        FillRect(dc, &bounds, brush);
+        DeleteObject(brush);
+        {
+            let c = Canvas::new(dc, self.dpi);
+            let width = (item.rcItem.right - item.rcItem.left) * 96 / self.dpi as i32;
+            let height = (item.rcItem.bottom - item.rcItem.top) * 96 / self.dpi as i32;
+            if let Some(row) = self
+                .inventory
+                .as_ref()
+                .and_then(|i| i.row(item.itemID as usize))
+            {
+                let checked = self.checked.contains(row.id);
+                let focus = item.itemID as usize == self.selected;
+                let disabled = item.itemState & ODS_DISABLED != 0;
+                c.round(
+                    R::new(0, 2, width - 2, height - 4),
+                    9,
+                    if checked {
+                        0xff2b1822
+                    } else if focus {
+                        FIELD
+                    } else {
+                        PANEL
+                    },
+                    Some(if checked {
+                        RED
+                    } else if focus && item.itemState & ODS_FOCUS != 0 {
+                        ORANGE
+                    } else {
+                        BORDER
+                    }),
+                );
+                c.round(
+                    R::new(8, 11, 18, 18),
+                    5,
+                    if checked { RED } else { PANEL },
+                    Some(if row.catalog_available { MUTED } else { BORDER }),
+                );
+                if checked {
+                    c.text("✓", R::new(8, 10, 18, 20), 13, 600, TEXT, DT_CENTER);
+                }
+                let detected = self
+                    .inventory
+                    .as_ref()
+                    .is_some_and(|i| i.detected.get(row.id) == Some(&true));
+                c.ellipse(R::new(40, 17, 6, 6), if detected { GREEN } else { DIM });
+                let color = if disabled { DIM } else { TEXT };
+                c.text(
+                    row.name,
+                    R::new(56, 4, 300, height - 8),
+                    13,
+                    500,
+                    color,
+                    DT_LEFT,
+                );
+                c.text(
+                    if row.catalog_available {
+                        row.version
+                    } else {
+                        "无可用更新"
+                    },
+                    R::new(370, 4, 154, height - 8),
+                    12,
+                    400,
+                    MUTED,
+                    DT_LEFT,
+                );
+                let installed = self
+                    .inventory
+                    .as_ref()
+                    .and_then(|i| i.installed.get(row.id));
+                c.text(
+                    installed.map_or("未安装", Installation::label),
+                    R::new(540, 4, 210, height - 8),
+                    12,
+                    400,
+                    if matches!(installed, Some(Installation::Broken(_))) {
+                        ORANGE
+                    } else if matches!(installed, Some(Installation::Present(_))) {
+                        GREEN
+                    } else {
+                        DIM
+                    },
+                    DT_LEFT,
+                );
+                c.text(
+                    &if row.catalog_available {
+                        size(row.download_bytes)
+                    } else {
+                        "—".into()
+                    },
+                    R::new(770, 4, width - 784, height - 8),
+                    12,
+                    400,
+                    MUTED,
+                    DT_RIGHT,
+                );
+            } else {
+                c.text(
+                    "当前通道暂无可用驱动，请刷新仓库或切换通道。",
+                    R::new(12, 4, width - 24, height - 8),
+                    13,
+                    400,
+                    MUTED,
+                    DT_LEFT,
+                );
+            }
+        }
+        BitBlt(
+            item.hDC,
+            item.rcItem.left,
+            item.rcItem.top,
+            physical_width,
+            physical_height,
+            dc,
+            0,
+            0,
+            SRCCOPY,
+        );
+        SelectObject(dc, previous);
+        DeleteObject(bitmap);
+        DeleteDC(dc);
+    }
+}
+unsafe extern "system" fn list_proc(
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
+    if msg == WM_NCDESTROY {
+        RemoveWindowSubclass(hwnd, Some(list_proc), 1);
+    }
+    let result = DefSubclassProc(hwnd, msg, w, l);
+    if msg == WM_KEYUP {
+        // Multiple-selection list boxes may move the caret without changing
+        // any checks; keep single-item actions tied to the visible focus row.
+        PostMessageW(GetParent(hwnd), FOCUS_CHANGED, 0, 0);
+    }
+    result
 }
 unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if message == WM_NCCREATE {
@@ -899,8 +1258,22 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
         }
         WM_ERASEBKGND => 1,
         WM_DRAWITEM => {
-            manager.button(&*(l as *const DRAWITEMSTRUCT));
+            let item = &*(l as *const DRAWITEMSTRUCT);
+            if item.CtlType == ODT_LISTBOX && item.CtlID == LIST as u32 {
+                manager.row(item);
+            } else {
+                manager.button(item);
+            }
             1
+        }
+        WM_MEASUREITEM => {
+            let item = &mut *(l as *mut MEASUREITEMSTRUCT);
+            if item.CtlType == ODT_LISTBOX && item.CtlID == LIST as u32 {
+                item.itemHeight = manager.px(40) as u32;
+                1
+            } else {
+                0
+            }
         }
         WM_COMMAND => {
             manager.command(hwnd, (w & 0xffff) as i32, ((w >> 16) & 0xffff) as u32);
@@ -911,10 +1284,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
             manager.finish(hwnd);
             0
         }
+        FOCUS_CHANGED => {
+            if manager.pending.is_none() && !manager.dialog_open {
+                let caret = SendMessageW(manager.child(LIST), LB_GETCARETINDEX, 0, 0);
+                if caret >= 0 {
+                    manager.selected = caret as usize;
+                    manager.selection(hwnd);
+                }
+            }
+            0
+        }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => {
             SetTextColor(w as HDC, colorref(TEXT));
-            SetBkColor(w as HDC, colorref(FIELD));
-            manager.brush as isize
+            if message == WM_CTLCOLORLISTBOX {
+                SetBkColor(w as HDC, colorref(PANEL));
+                SetDCBrushColor(w as HDC, colorref(PANEL));
+                GetStockObject(DC_BRUSH) as isize
+            } else {
+                SetBkColor(w as HDC, colorref(FIELD));
+                manager.brush as isize
+            }
         }
         WM_CLOSE => {
             if manager.pending.is_some() || manager.dialog_open {
@@ -969,6 +1358,7 @@ pub unsafe fn open(owner: HWND) {
         children: Vec::new(),
         inventory: None,
         selected: 0,
+        checked: BTreeSet::new(),
         pending: None,
         status: "正在准备驱动目录…".into(),
         success: String::new(),
@@ -1033,4 +1423,99 @@ pub unsafe fn open(owner: HWND) {
     }
     EnableWindow(owner, 1);
     SetForegroundWindow(owner);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(id: &str) -> InstallTarget {
+        InstallTarget {
+            id: id.into(),
+            name: format!("设备{id}"),
+            version: "0.4.2".into(),
+            bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn batch_continues_after_failure_skips_same_and_reports_every_item() {
+        let mut attempted = Vec::new();
+        let mut progress = Vec::new();
+        let result = install_batch(
+            vec![target("a"), target("b"), target("c")],
+            |id| (id == "b").then(|| "0.4.2".into()),
+            |id| {
+                attempted.push(id.to_string());
+                if id == "a" {
+                    Err("模拟哈希校验失败".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |index, count, item| progress.push((index, count, item.id.clone())),
+        );
+        assert_eq!(attempted, ["a", "c"]);
+        assert_eq!(
+            progress,
+            [(1, 3, "a".into()), (2, 3, "b".into()), (3, 3, "c".into())]
+        );
+        assert!(result.failed());
+        let description = result.description();
+        assert!(description.contains("成功 1 项，失败 1 项，跳过已同版 1 项"));
+        assert!(description.contains("失败 · 设备a：模拟哈希校验失败"));
+        assert!(description.contains("跳过 · 设备b"));
+        assert!(description.contains("成功 · 设备c"));
+    }
+
+    #[test]
+    fn no_implicit_selection_and_broken_record_does_not_hide_other_targets() {
+        let packages = ["a", "b"].map(|id| serde_json::from_value::<DriverPackage>(serde_json::json!({
+            "id":id, "name":format!("设备{id}"), "version":"0.4.2", "description":"fixture", "download_bytes":1024,
+            "package_url":"https://example.invalid/fixture.zip", "sha256":"fixture", "dll_sha256":"fixture", "device":{}
+        })).unwrap()).to_vec();
+        let mut manager = Manager {
+            dpi: 96,
+            font: null_mut(),
+            brush: null_mut(),
+            children: vec![],
+            inventory: Some(Inventory {
+                packages,
+                installed_only: vec![],
+                installed: BTreeMap::from([
+                    ("a".into(), Installation::Broken("损坏记录".into())),
+                    ("b".into(), Installation::Present("0.4.1".into())),
+                ]),
+                detected: BTreeMap::from([("b".into(), true)]),
+                channel: "stable".into(),
+                focus: None,
+            }),
+            selected: 0,
+            checked: BTreeSet::new(),
+            pending: None,
+            status: String::new(),
+            success: String::new(),
+            error: false,
+            dialog_open: false,
+            changing_channel: false,
+        };
+        assert!(
+            manager.targets().is_empty(),
+            "detected devices must never be auto-selected"
+        );
+        assert!(matches!(manager.installation(), Installation::Broken(_)));
+        manager
+            .checked
+            .extend(["a".into(), "b".into(), "not-in-catalog".into()]);
+        assert_eq!(
+            manager
+                .targets()
+                .iter()
+                .map(|t| t.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "b"]
+        );
+        manager.selected = 1;
+        assert!(matches!(manager.installation(), Installation::Present(_)));
+    }
 }

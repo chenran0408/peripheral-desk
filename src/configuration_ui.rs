@@ -287,8 +287,15 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             SetBkColor(w as HDC, 0x00261e1e);
             window.brush as isize
         }
+        WM_MEASUREITEM => i32::from(paint::measure_native_choice(
+            &mut *(l as *mut MEASUREITEMSTRUCT),
+            window.dpi,
+        )) as isize,
         WM_DRAWITEM => {
             let item = &*(l as *const DRAWITEMSTRUCT);
+            if paint::draw_native_choice(item, window.dpi, window.font) {
+                return 1;
+            }
             if item.CtlType != ODT_BUTTON {
                 return 0;
             }
@@ -438,7 +445,7 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
             0,
             wide(class).as_ptr(),
             wide(label).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | style,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | paint::native_control_style(class, style),
             scale(r.x),
             scale(r.y),
             scale(r.w),
@@ -449,6 +456,9 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
             null(),
         );
         SendMessageW(child, WM_SETFONT, font as usize, 1);
+        if matches!(class, "EDIT" | "LISTBOX" | "COMBOBOX") {
+            paint::theme_native_control(child, class, dpi);
+        }
         child
     };
     window.combo = child(

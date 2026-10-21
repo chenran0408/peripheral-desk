@@ -6,7 +6,7 @@ use crate::{
     },
     devices::REGISTRY,
     hid::wide,
-    paint::{Canvas, BG, BORDER, DIM, FIELD, MUTED, ORANGE, PANEL, R, RED, TEXT},
+    paint::{self, Canvas, BG, BORDER, DIM, FIELD, MUTED, ORANGE, PANEL, R, RED, TEXT},
 };
 use std::{
     collections::BTreeMap,
@@ -260,14 +260,10 @@ impl Editor {
     }
     unsafe fn add(&mut self, hwnd: HWND, id: i32, class: &str, text: &str, r: R, style: u32) {
         let h = CreateWindowExW(
-            if class == "EDIT" || class == "LISTBOX" || class == "COMBOBOX" {
-                WS_EX_CLIENTEDGE
-            } else {
-                0
-            },
+            0,
             wide(class).as_ptr(),
             wide(text).as_ptr(),
-            WS_CHILD | WS_TABSTOP | style,
+            WS_CHILD | WS_TABSTOP | paint::native_control_style(class, style),
             self.px(r.x),
             self.px(r.y),
             self.px(r.w),
@@ -278,6 +274,9 @@ impl Editor {
             null(),
         );
         SendMessageW(h, WM_SETFONT, self.font as usize, 0);
+        if matches!(class, "EDIT" | "LISTBOX" | "COMBOBOX") {
+            paint::theme_native_control(h, class, self.dpi);
+        }
         self.children.push(Child {
             hwnd: h,
             id,
@@ -1330,8 +1329,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_ERASEBKGND => 1,
+        WM_MEASUREITEM => i32::from(paint::measure_native_choice(
+            &mut *(l as *mut MEASUREITEMSTRUCT),
+            editor.dpi,
+        )) as isize,
         WM_DRAWITEM => {
-            editor.draw_button(&*(l as *const DRAWITEMSTRUCT));
+            let item = &*(l as *const DRAWITEMSTRUCT);
+            if paint::draw_native_choice(item, editor.dpi, editor.font) {
+                return 1;
+            }
+            editor.draw_button(item);
             1
         }
         WM_COMMAND => {
