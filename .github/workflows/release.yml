@@ -120,4 +120,3 @@ jobs:
           $hash = (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           $expected = (Get-Content release-files/dist/SHA256SUMS.txt -Raw).Trim()
           if ((Get-Content downloaded/SHA256SUMS.txt -Raw).Trim() -ne $expected -or "$hash  $($zip[0].Name)" -ne $expected) { throw "Public download checksum mismatch" }
-
