@@ -31,4 +31,3 @@ jobs:
       - run: cargo clippy --locked --no-default-features --features driver-runtime --lib -- -D warnings
       # Hardware tests remain ignored; this job exercises pure protocol code.
       - run: cargo test --locked --no-default-features --features driver-runtime --lib
-
