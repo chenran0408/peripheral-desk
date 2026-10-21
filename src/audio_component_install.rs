@@ -5,7 +5,6 @@
 //! bundle; callers cannot supply a path or command line.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     os::windows::process::CommandExt,
     path::{Path, PathBuf},
@@ -131,49 +130,12 @@ fn decode_oem(bytes: &[u8]) -> String {
     }
 }
 
-fn declared_component_names(device: &Value) -> Result<Vec<String>, String> {
-    let components = device
-        .get("components")
-        .and_then(Value::as_array)
-        .ok_or("G2 插件没有组件清单")?;
-    if components.is_empty() {
-        return Err("G2 插件组件清单为空".into());
-    }
-    let mut result = Vec::with_capacity(components.len());
-    for item in components {
-        let name = item
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or("组件名称缺失")?;
-        if name.is_empty()
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
-        {
-            return Err("G2 插件组件清单格式无效".into());
-        }
-        if result.iter().any(|existing| existing == name) {
-            return Err(format!("G2 插件组件名称重复：{name}"));
-        }
-        result.push(name.to_owned());
-    }
-    Ok(result)
-}
-
 fn verify_bundle() -> Result<Vec<(String, PathBuf)>, String> {
-    let installed =
-        crate::plugin_manager::installed(PLUGIN_KEY)?.ok_or("请先安装 HECATE G2 Pro 插件")?;
-    let names = declared_component_names(&installed.manifest.device)?;
-    let mut resolved = Vec::with_capacity(names.len());
-    for name in names {
-        let path = crate::plugin_manager::bundled_component(PLUGIN_KEY, &name)?
-            .ok_or_else(|| format!("插件缺少组件：{name}"))?;
-        if !path.is_file() {
-            return Err(format!("组件文件不存在：{name}"));
-        }
-        resolved.push((name, path));
+    let files = crate::plugin_manager::verified_bundled_components(PLUGIN_KEY)?;
+    for name in ["sdk", "driver-inf", "extension-inf", "apo-inf"] {
+        component_path(&files, name)?;
     }
-    Ok(resolved)
+    Ok(files)
 }
 
 fn component_path(components: &[(String, PathBuf)], name: &str) -> Result<PathBuf, String> {
@@ -368,8 +330,44 @@ fn worker() -> InstallReport {
     report
 }
 
+struct InstallerLock(windows_sys::Win32::Foundation::HANDLE);
+impl InstallerLock {
+    fn acquire() -> Result<Self, String> {
+        use windows_sys::Win32::{Foundation::*, System::Threading::*};
+        unsafe {
+            let handle = CreateMutexW(
+                std::ptr::null(),
+                0,
+                crate::hid::wide("Global\\PeripheralDesk.G2.AudioSetup").as_ptr(),
+            );
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            match WaitForSingleObject(handle, 0) {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Self(handle)),
+                _ => {
+                    CloseHandle(handle);
+                    Err("另一个音效驱动安装仍在进行，请稍后再试".into())
+                }
+            }
+        }
+    }
+}
+impl Drop for InstallerLock {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Threading::ReleaseMutex(self.0);
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
 /// Entry point for the elevated helper process. Returns the process exit code.
 pub fn worker_main() -> i32 {
+    let _guard = match InstallerLock::acquire() {
+        Ok(guard) => guard,
+        Err(_) => return 3,
+    };
     let report = worker();
     let code = if report.status == "completed" || report.status == "restart_required" {
         0
@@ -433,6 +431,9 @@ pub fn launch() -> Result<String, String> {
     };
     unsafe { windows_sys::Win32::Foundation::CloseHandle(info.hProcess) };
     let path = report_path();
+    if exit_code == 3 {
+        return Err("另一个音效驱动安装仍在进行；未启动重复安装，请稍后查看结果。".into());
+    }
     if exit_code != 0 {
         let report = std::fs::read_to_string(&path)
             .ok()
@@ -486,12 +487,19 @@ pub fn check_installed_bundle() -> Result<usize, String> {
 mod tests {
     use super::*;
     #[test]
+    fn another_installer_cannot_acquire_the_live_install_lock() {
+        let guard = InstallerLock::acquire().unwrap();
+        assert!(std::thread::spawn(|| InstallerLock::acquire().is_err())
+            .join()
+            .unwrap());
+        drop(guard);
+        assert!(InstallerLock::acquire().is_ok());
+    }
+    #[test]
     fn installer_output_keeps_chinese_and_bounds_long_messages() {
         let mut bytes = vec![0xff, 0xfe];
         bytes.extend("音效安装成功".encode_utf16().flat_map(u16::to_le_bytes));
         assert_eq!(trim_output(&bytes), "音效安装成功");
         assert!(bounded_text("测".repeat(REPORT_LIMIT)).ends_with("[output truncated]"));
-        assert!(declared_component_names(&serde_json::json!({"components":[]})).is_err());
-        assert!(declared_component_names(&serde_json::json!({"components":[{"name":"..","path":"components/sdk/osConfLib.dll","sha256":"bad"}]})).is_err());
     }
 }

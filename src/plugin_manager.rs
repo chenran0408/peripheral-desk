@@ -356,6 +356,9 @@ pub fn bundled_component(id: &str, name: &str) -> Result<Option<PathBuf>> {
     let Some(components) = driver.manifest.device.get("components") else {
         return Ok(None);
     };
+    component_file(&root().join(id).join(&driver.directory), components, name)
+}
+fn component_file(directory: &Path, components: &Value, name: &str) -> Result<Option<PathBuf>> {
     let components = components.as_array().ok_or("插件组件清单格式无效")?;
     let mut matches = components
         .iter()
@@ -386,12 +389,84 @@ pub fn bundled_component(id: &str, name: &str) -> Result<Option<PathBuf>> {
     if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("插件组件校验值无效".into());
     }
-    let path = root().join(id).join(&driver.directory).join(relative);
+    let path = directory.join(relative);
     let bytes = std::fs::read(&path).map_err(|e| format!("无法读取插件组件 {name}：{e}"))?;
     if !digest(&bytes).eq_ignore_ascii_case(expected) {
         return Err(format!("插件组件 {name} 校验失败，请重新安装插件"));
     }
     Ok(Some(path))
+}
+/// Authorize privileged installation against a retained signed catalog, rather than
+/// trusting the editable installed.json record as its own authority.
+pub fn verified_bundled_components(id: &str) -> Result<Vec<(String, PathBuf)>> {
+    let driver = installed(id)?.ok_or("请先安装设备插件")?;
+    let entries = std::fs::read_dir(root().join("catalog-cache")).map_err(|e| {
+        format!("无法读取签名目录缓存，请在驱动商店检查更新或导入签名离线目录：{e}")
+    })?;
+    let mut authorized = false;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !is_hash(stem) || entry.metadata().map_err(|e| e.to_string())?.len() > 2 * 1024 * 1024 {
+            continue;
+        }
+        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+        let signature = match std::fs::read(path.with_extension("json.sig")) {
+            Ok(signature) => signature,
+            Err(_) => continue,
+        };
+        if digest(&bytes) != stem || verify_catalog_signature(&bytes, &signature).is_err() {
+            continue;
+        }
+        let catalog: Catalog = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if catalog.schema != 1 {
+            continue;
+        }
+        if catalog.drivers.iter().any(|package| {
+            package.id == id
+                && package.version == driver.version
+                && package.device == driver.manifest.device
+                && package.dll_sha256 == driver.manifest.dll_sha256
+                && package.channel == driver.manifest.channel
+                && package.abi == driver.manifest.abi
+                && package.core_min == driver.manifest.core_min
+                && package.core_max_exclusive == driver.manifest.core_max_exclusive
+        }) {
+            authorized = true;
+            break;
+        }
+    }
+    if !authorized {
+        return Err("此组件清单与已审核的签名目录不符；未请求管理员权限，也未安装系统驱动。请重新下载插件或导入其原始签名目录。".into());
+    }
+    compatible(
+        driver.manifest.abi,
+        &driver.manifest.core_min,
+        &driver.manifest.core_max_exclusive,
+    )?;
+    let components = driver
+        .manifest
+        .device
+        .get("components")
+        .ok_or("插件没有附带组件")?;
+    let array = components.as_array().ok_or("插件组件清单格式无效")?;
+    let directory = root().join(id).join(&driver.directory);
+    let mut files = Vec::with_capacity(array.len());
+    for component in array {
+        let name = component
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("插件组件缺少名称")?;
+        let path = component_file(&directory, components, name)?.ok_or("插件组件不存在")?;
+        files.push((name.to_owned(), path));
+    }
+    Ok(files)
 }
 /// Used only before a user-requested batch skip, not on the UI paint path.
 pub fn verified_installed_version(id: &str) -> Option<String> {
