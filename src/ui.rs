@@ -26,6 +26,10 @@ const CHIP: i32 = 1;
 const GHOST: i32 = 3;
 const CARD: i32 = 4;
 type WorkResult = (Snapshot, Result<(), String>);
+enum WorkUpdate {
+    Device(usize, backend::State),
+    Finished(WorkResult),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
@@ -82,7 +86,7 @@ struct App {
     eq_drag: Option<(Tuning, R)>,
     home_page: usize,
     controls: Vec<Button>,
-    pending: Option<Receiver<WorkResult>>,
+    pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
     queued: std::collections::VecDeque<(usize, Action)>,
     inflight: Option<(usize, Action)>,
@@ -1271,71 +1275,102 @@ impl App {
         self.render(hwnd);
         let window = hwnd as usize;
         thread::spawn(move || {
-            let result = backend::refresh(&snapshot, action);
-            if tx.send(result).is_ok() {
+            let result = if let Some(action) = action {
+                backend::refresh(&snapshot, Some(action))
+            } else {
+                backend::refresh_progress(&snapshot, |model, state| {
+                    if tx.send(WorkUpdate::Device(model, state)).is_ok() {
+                        PostMessageW(window as HWND, DONE, 0, 0);
+                    }
+                })
+            };
+            if tx.send(WorkUpdate::Finished(result)).is_ok() {
                 PostMessageW(window as HWND, DONE, 0, 0);
             }
         });
     }
     unsafe fn complete(&mut self, hwnd: HWND) {
-        let Some(rx) = self.pending.take() else {
+        let Some(rx) = self.pending.as_ref() else {
             return;
+        };
+        let update = match rx.try_recv() {
+            Ok(update) => update,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.set_status("后台读取失败：后台线程已退出", true);
+                self.pending = None;
+                self.inflight = None;
+                self.profile_notice = None;
+                self.render(hwnd);
+                if !self.queued.is_empty() {
+                    SetTimer(hwnd, 2, 100, None);
+                }
+                return;
+            }
+        };
+        if let WorkUpdate::Device(model, state) = update {
+            self.snapshot.devices[model] = state;
+            self.tray(hwnd);
+            self.layout(hwnd);
+            if !self.flyout.is_null() {
+                InvalidateRect(self.flyout, null(), 0);
+            }
+            return;
+        }
+        let Some(_rx) = self.pending.take() else {
+            return;
+        };
+        let WorkUpdate::Finished((s, result)) = update else {
+            unreachable!()
         };
         let writing = self.inflight.take().is_some();
         let profile_notice = self.profile_notice.take();
-        match rx.try_recv() {
-            Ok((mut s, result)) => {
-                s.interval = self.snapshot.interval;
-                s.threshold = self.snapshot.threshold;
-                s.notices = self.snapshot.notices;
-                self.snapshot = s;
-                if self.queued.is_empty() {
-                    self.preview_dpi = None;
-                }
-                let alerts = self.snapshot.alerts();
-                let save = self.snapshot.save();
-                match (result, save) {
-                    (Err(e), _) => self.set_status(
-                        &format!(
-                            "{}：{e}",
-                            if profile_notice.is_some() {
-                                "音效配置操作失败"
-                            } else {
-                                "未能确认保存"
-                            }
-                        ),
-                        true,
-                    ),
-                    (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
-                    _ => {
-                        let count = self.snapshot.devices.iter().filter(|d| d.fresh).count();
-                        self.set_status(
-                            &if let Some(notice) = profile_notice {
-                                notice.into()
-                            } else if writing {
-                                "设置已保存，读回确认成功".into()
-                            } else if REGISTRY.is_empty() {
-                                "打开驱动仓库添加设备；新驱动安装后请重启主程序".into()
-                            } else {
-                                format!("{count} 台设备在线 · 状态已更新")
-                            },
-                            false,
-                        );
+        let mut s = s;
+        s.interval = self.snapshot.interval;
+        s.threshold = self.snapshot.threshold;
+        s.notices = self.snapshot.notices;
+        self.snapshot = s;
+        if self.queued.is_empty() {
+            self.preview_dpi = None;
+        }
+        let alerts = self.snapshot.alerts();
+        let save = self.snapshot.save();
+        match (result, save) {
+            (Err(e), _) => self.set_status(
+                &format!(
+                    "{}：{e}",
+                    if profile_notice.is_some() {
+                        "音效配置操作失败"
+                    } else {
+                        "未能确认保存"
                     }
-                }
-                self.tray(hwnd);
-                for i in alerts {
-                    self.notify(hwnd, i);
-                }
-                self.layout(hwnd);
-                if !self.flyout.is_null() {
-                    InvalidateRect(self.flyout, null(), 0);
-                }
+                ),
+                true,
+            ),
+            (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
+            _ => {
+                let count = self.snapshot.devices.iter().filter(|d| d.fresh).count();
+                self.set_status(
+                    &if let Some(notice) = profile_notice {
+                        notice.into()
+                    } else if writing {
+                        "设置已保存，读回确认成功".into()
+                    } else if REGISTRY.is_empty() {
+                        "打开驱动仓库添加设备；新驱动安装后请重启主程序".into()
+                    } else {
+                        format!("{count} 台设备在线 · 状态已更新")
+                    },
+                    false,
+                );
             }
-            Err(e) => {
-                self.set_status(&format!("后台读取失败：{e}"), true);
-                self.render(hwnd);
-            }
+        }
+        self.tray(hwnd);
+        for i in alerts {
+            self.notify(hwnd, i);
+        }
+        self.layout(hwnd);
+        if !self.flyout.is_null() {
+            InvalidateRect(self.flyout, null(), 0);
         }
         if !self.queued.is_empty() {
             SetTimer(hwnd, 2, 100, None);
@@ -1558,7 +1593,7 @@ impl App {
                 crate::profiles::export_audio(&path)
             };
             let (state, _) = backend::refresh_device(&snapshot, model);
-            if tx.send((state, result)).is_ok() {
+            if tx.send(WorkUpdate::Finished((state, result))).is_ok() {
                 PostMessageW(window as HWND, DONE, 0, 0);
             }
         });

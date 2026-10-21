@@ -133,6 +133,167 @@ pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapsho
     refresh_with(previous, action, hid::enumerate(), crate::adapters::open)
 }
 
+pub fn refresh_progress<F>(previous: &Snapshot, mut progress: F) -> (Snapshot, Result<()>)
+where
+    F: FnMut(usize, State),
+{
+    let interfaces = match hid::enumerate() {
+        Ok(interfaces) => interfaces,
+        Err(error) => {
+            return refresh_scoped(previous, None, None, Err(error), crate::adapters::open)
+        }
+    };
+    refresh_parallel(previous, interfaces, crate::adapters::open, &mut progress)
+}
+
+fn refresh_parallel<F, P>(
+    previous: &Snapshot,
+    interfaces: Vec<Interface>,
+    open: F,
+    progress: &mut P,
+) -> (Snapshot, Result<()>)
+where
+    F: Fn(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>> + Sync,
+    P: FnMut(usize, State),
+{
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        mpsc, Arc,
+    };
+
+    let mut next = previous.clone();
+    next.devices = states_for_registry(&previous.devices, &REGISTRY);
+    let interfaces = Arc::new(interfaces);
+
+    // Serialize models that expose the same VID/PID. This conservatively keeps
+    // sibling HID collections on a shared receiver from being read together.
+    let identities: Vec<std::collections::HashSet<_>> = REGISTRY
+        .iter()
+        .enumerate()
+        .map(|(model, _)| {
+            interfaces
+                .iter()
+                .filter(|interface| matches(interface, model))
+                .map(|interface| (interface.vid, interface.pid))
+                .collect()
+        })
+        .collect();
+    let mut parents: Vec<usize> = (0..REGISTRY.len()).collect();
+    for left in 0..REGISTRY.len() {
+        for right in (left + 1)..REGISTRY.len() {
+            if identities[left]
+                .iter()
+                .any(|id| identities[right].contains(id))
+            {
+                let left_root = root(&mut parents, left);
+                let right_root = root(&mut parents, right);
+                parents[right_root] = left_root;
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for model in 0..REGISTRY.len() {
+        let model_root = root(&mut parents, model);
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|group| root(&mut parents, group[0]) == model_root)
+        {
+            group.push(model);
+        } else {
+            groups.push(vec![model]);
+        }
+    }
+
+    let group_index = Arc::new(AtomicUsize::new(0));
+    let (tx, rx) = mpsc::channel();
+    let prior_devices = Arc::new(next.devices.clone());
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |count| count.get().clamp(2, 4))
+        .min(4)
+        .min(groups.len().max(1));
+    let result = std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let groups = &groups;
+            let interfaces = interfaces.clone();
+            let group_index = group_index.clone();
+            let tx = tx.clone();
+            let open = &open;
+            let prior_devices = prior_devices.clone();
+            scope.spawn(move || {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
+                    let group = group_index.fetch_add(1, Ordering::Relaxed);
+                    let Some(models) = groups.get(group) else {
+                        break;
+                    };
+                    for &model in models {
+                        let state =
+                            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                refresh_scoped(
+                                    previous,
+                                    None,
+                                    Some(model),
+                                    Ok((*interfaces).clone()),
+                                    |index, interface| open(index, interface),
+                                )
+                                .0
+                                .devices[model]
+                                    .clone()
+                            })) {
+                                Ok(state) => state,
+                                Err(_) => {
+                                    let mut state = prior_devices[model].clone();
+                                    state.fresh = false;
+                                    state.charging = None;
+                                    state.error = "设备读取线程发生异常".into();
+                                    state
+                                }
+                            };
+                        if tx.send((model, state)).is_err() {
+                            return;
+                        }
+                    }
+                }));
+            });
+        }
+        drop(tx);
+        let mut received = 0;
+        let mut completed = vec![false; REGISTRY.len()];
+        let mut result = Ok(());
+        while received < REGISTRY.len() {
+            match rx.recv() {
+                Ok((model, state)) => {
+                    next.devices[model] = state.clone();
+                    progress(model, state);
+                    completed[model] = true;
+                    received += 1;
+                }
+                Err(_) => {
+                    for (model, state) in next.devices.iter_mut().enumerate() {
+                        if completed[model] {
+                            continue;
+                        }
+                        state.fresh = false;
+                        state.charging = None;
+                        state.error = "设备读取线程已退出".into();
+                    }
+                    result = Err("设备读取线程已退出".into());
+                    break;
+                }
+            }
+        }
+        result
+    });
+    (next, result)
+}
+
+fn root(parents: &mut [usize], mut index: usize) -> usize {
+    while parents[index] != index {
+        parents[index] = parents[parents[index]];
+        index = parents[index];
+    }
+    index
+}
+
 pub fn refresh_device(previous: &Snapshot, model: usize) -> (Snapshot, Result<()>) {
     refresh_scoped(
         previous,
@@ -471,6 +632,86 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn parallel_refresh_reports_fast_device_before_slow_device_and_keeps_all_states() {
+        let mut previous = Snapshot::default();
+        previous.devices[2].percent = Some(43);
+        previous.devices[2].updated = 99;
+        let interfaces = vec![
+            Interface {
+                path: "mi_00-deathadder".into(),
+                vid: 0x1532,
+                pid: 0xb7,
+                usage_page: 1,
+                usage: 2,
+                feature_len: 91,
+                input_len: 0,
+                output_len: 0,
+                product: "DeathAdder".into(),
+            },
+            Interface {
+                path: "a5".into(),
+                vid: 0x3837,
+                pid: 0x100c,
+                usage_page: 0xff01,
+                usage: 1,
+                feature_len: 65,
+                input_len: 65,
+                output_len: 65,
+                product: "A5 ultra".into(),
+            },
+        ];
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = writes.clone();
+        let fast_reported = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wait_for_fast = fast_reported.clone();
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mark_timeout = timed_out.clone();
+        let mut progress = Vec::new();
+        let (next, result) = refresh_parallel(
+            &previous,
+            interfaces,
+            move |model, _| {
+                if model == 0 {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                    while !wait_for_fast.load(std::sync::atomic::Ordering::Acquire)
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::yield_now();
+                    }
+                    if !wait_for_fast.load(std::sync::atomic::Ordering::Acquire) {
+                        mark_timeout.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                Ok(Box::new(FakeSession {
+                    state: State {
+                        present: true,
+                        fresh: true,
+                        percent: Some(if model == 0 { 80 } else { 70 }),
+                        ..State::default()
+                    },
+                    writes: counter.clone(),
+                    fail: false,
+                }))
+            },
+            &mut |model, state| {
+                if model == 1 {
+                    fast_reported.store(true, std::sync::atomic::Ordering::Release);
+                }
+                progress.push((model, state.percent));
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!timed_out.load(std::sync::atomic::Ordering::Acquire));
+        let fast_position = progress.iter().position(|(model, _)| *model == 1).unwrap();
+        let slow_position = progress.iter().position(|(model, _)| *model == 0).unwrap();
+        assert!(fast_position < slow_position);
+        assert_eq!(next.devices[0].percent, Some(80));
+        assert_eq!(next.devices[1].percent, Some(70));
+        assert_eq!(next.devices[2].percent, Some(43));
+        assert_eq!(next.devices[2].updated, 99);
+    }
+
     #[test]
     fn setting_refresh_probes_only_target_and_keeps_other_timestamps() {
         let mut previous = Snapshot::default();
