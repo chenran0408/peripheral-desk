@@ -366,6 +366,90 @@ pub fn installed_descriptors() -> Vec<Value> {
         .map(|d| d.manifest.device)
         .collect()
 }
+fn backup_device_tree(source: &Path, destination: &Path) -> Result<()> {
+    use std::{fs, os::windows::fs::MetadataExt};
+    fn ordinary(path: &Path) -> Result<std::fs::Metadata> {
+        let metadata = fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+            return Err("设备配置备份拒绝链接或重解析目录，旧驱动和配置保持不变".into());
+        }
+        Ok(metadata)
+    }
+    fn ancestors(path: &Path) -> Result<()> {
+        for ancestor in path.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            ordinary(ancestor)?;
+        }
+        Ok(())
+    }
+    fn copy(
+        source: &Path,
+        destination: &Path,
+        source_root: &Path,
+        backup_root: &Path,
+    ) -> Result<()> {
+        let metadata = ordinary(source)?;
+        let canonical_source = fs::canonicalize(source).map_err(|e| e.to_string())?;
+        if !canonical_source.starts_with(source_root) {
+            return Err("设备配置备份源路径越界，未更新驱动".into());
+        }
+        if let Ok(metadata) = fs::symlink_metadata(destination) {
+            if metadata.file_type().is_symlink() || metadata.file_attributes() & 0x400 != 0 {
+                return Err("设备配置备份目标不允许链接或重解析点".into());
+            }
+        }
+        let parent = destination.parent().ok_or("设备配置备份目标无父目录")?;
+        ancestors(parent)?;
+        if !fs::canonicalize(parent)
+            .map_err(|e| e.to_string())?
+            .starts_with(backup_root)
+        {
+            return Err("设备配置备份目标路径越界，未更新驱动".into());
+        }
+        if metadata.is_dir() {
+            fs::create_dir_all(destination).map_err(|e| e.to_string())?;
+            for entry in fs::read_dir(source).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                copy(
+                    &entry.path(),
+                    &destination.join(entry.file_name()),
+                    source_root,
+                    backup_root,
+                )?;
+            }
+        } else if metadata.is_file() {
+            let mut input = fs::File::open(source).map_err(|e| e.to_string())?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)
+                .map_err(|e| e.to_string())?;
+            std::io::copy(&mut input, &mut output).map_err(|e| e.to_string())?;
+            output.sync_all().map_err(|e| e.to_string())?;
+        } else {
+            return Err("设备配置包含不支持备份的特殊文件，未更新驱动".into());
+        }
+        Ok(())
+    }
+    match fs::symlink_metadata(source) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+        Ok(_) => {}
+    }
+    ancestors(source)?;
+    if !ordinary(source)?.is_dir() {
+        return Err("设备配置路径不是普通目录，未更新驱动".into());
+    }
+    let parent = destination.parent().ok_or("设备配置备份目标无父目录")?;
+    ancestors(parent)?;
+    let source_root = fs::canonicalize(source).map_err(|e| e.to_string())?;
+    let backup_root = fs::canonicalize(parent).map_err(|e| e.to_string())?;
+    if backup_root.starts_with(&source_root)
+        || fs::canonicalize(destination).is_ok_and(|p| p.starts_with(&source_root))
+    {
+        return Err("设备配置备份不能位于源配置目录内".into());
+    }
+    copy(source, destination, &source_root, &backup_root)
+}
 fn backup(id: &str) -> Result<()> {
     let data = crate::backend::data_path().parent().unwrap().to_owned();
     let stamp = SystemTime::now()
@@ -383,17 +467,59 @@ fn backup(id: &str) -> Result<()> {
         }
     }
     let device = data.join("devices").join(id);
-    if device.is_dir() {
-        for e in std::fs::read_dir(device).map_err(|e| e.to_string())? {
-            let e = e.map_err(|e| e.to_string())?;
-            if e.file_type().map_err(|e| e.to_string())?.is_file() {
-                std::fs::create_dir_all(target.join("device")).map_err(|e| e.to_string())?;
-                std::fs::copy(e.path(), target.join("device").join(e.file_name()))
-                    .map_err(|e| e.to_string())?;
-            }
-        }
-    }
+    backup_device_tree(&device, &target.join("device"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+    #[test]
+    fn nested_unknown_device_files_are_backed_up_without_changing_source() {
+        let base = std::env::var_os("PD_UPDATE_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!(
+            "plugin-backup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("devices/example-device");
+        let target = root.join("backup");
+        std::fs::create_dir_all(source.join("profiles/custom/empty")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let unknown = [0u8, 255, 17, 128, 0];
+        std::fs::write(source.join("settings.json"), b"{\"future\":true}").unwrap();
+        std::fs::write(source.join("profiles/custom/unknown.bin"), unknown).unwrap();
+        backup_device_tree(&source, &target.join("device")).unwrap();
+        assert_eq!(
+            std::fs::read(target.join("device/settings.json")).unwrap(),
+            b"{\"future\":true}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("device/profiles/custom/unknown.bin")).unwrap(),
+            unknown
+        );
+        assert!(target.join("device/profiles/custom/empty").is_dir());
+        assert_eq!(
+            std::fs::read(source.join("profiles/custom/unknown.bin")).unwrap(),
+            unknown
+        );
+        assert!(source.join("settings.json").is_file());
+        assert!(backup_device_tree(&source, &source).is_err());
+        assert!(backup_device_tree(&source, &source.join("recursive-backup")).is_err());
+        // The fixture root is a newly created direct child of the named base.
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert!(canonical_root.starts_with(std::fs::canonicalize(&base).unwrap()));
+        assert_eq!(
+            canonical_root.parent(),
+            Some(std::fs::canonicalize(&base).unwrap().as_path())
+        );
+        std::fs::remove_dir_all(canonical_root).unwrap();
+    }
 }
 pub fn install(id: &str) -> Result<InstalledDriver> {
     let p = catalog()?
