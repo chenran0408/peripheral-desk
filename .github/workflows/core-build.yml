@@ -1,0 +1,34 @@
+name: Core build
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PeripheralDesk-core-windows-x64
+          path: target/release/peripheral-desk.exe
+  driver-runtime:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: cargo clippy --locked --no-default-features --features driver-runtime --lib -- -D warnings
+      # Hardware tests remain ignored; this job exercises pure protocol code.
+      - run: cargo test --locked --no-default-features --features driver-runtime --lib
+
