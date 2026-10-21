@@ -241,16 +241,88 @@ struct Config {
 fn config_path() -> PathBuf {
     crate::backend::data_path().with_file_name("hecate-sdk.json")
 }
+fn managed_library_path() -> PathBuf {
+    config_path()
+        .parent()
+        .unwrap()
+        .join("devices/hecate-g2-pro/components/osConfLib.dll")
+}
 pub fn configure(path: &Path) -> Result<()> {
-    validate_library(path)?;
-    let bytes = serde_json::to_vec_pretty(&Config {
-        path: path.to_path_buf(),
-    })
-    .map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(config_path().parent().unwrap()).map_err(|e| e.to_string())?;
-    std::fs::write(config_path(), bytes).map_err(|e| e.to_string())
+    let bytes = validated_library_bytes(path)?;
+    let managed = managed_library_path();
+    match std::fs::read(&managed) {
+        Ok(current) if current == bytes => {}
+        Ok(_) => crate::storage::atomic_write(&managed, &bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            crate::storage::atomic_write(&managed, &bytes)?
+        }
+        Err(error) => return Err(format!("无法读取设备私有音效组件：{error}")),
+    }
+    crate::storage::write_json_preserving(&config_path(), serde_json::json!({"path": managed}))
+}
+fn component_candidates(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots
+        .iter()
+        .flat_map(|root| {
+            ["HECATE G2 PRO", "HECATE", "HECATE Gaming Center"]
+                .into_iter()
+                .flat_map(move |folder| {
+                    [
+                        "CPL/Driver/x64/vista/osConfLib.dll",
+                        "CMSDK/x64/Vista/osConfLib.dll",
+                    ]
+                    .into_iter()
+                    .map(move |suffix| root.join(folder).join(suffix))
+                })
+        })
+        .collect()
+}
+pub(crate) fn ensure_configured() -> Result<()> {
+    let config = config_path();
+    match std::fs::read(&config) {
+        Ok(bytes) => {
+            let config: Config = serde_json::from_slice(&bytes)
+                .map_err(|e| format!("音效组件连接记录无效，请重新连接：{e}"))?;
+            if config.path.is_file() {
+                return if config.path == managed_library_path() {
+                    validate_library(&config.path)
+                } else {
+                    configure(&config.path)
+                };
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("无法读取音效组件连接记录：{error}")),
+    }
+    if managed_library_path().is_file() {
+        return configure(&managed_library_path());
+    }
+    #[cfg(feature = "desktop")]
+    if let Some(component) = crate::plugin_manager::bundled_component("hecate-g2-pro", "sdk")? {
+        return configure(&component);
+    }
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let directory = executable.parent().ok_or("无法确定程序目录")?;
+    let mut roots = vec![directory.to_path_buf()];
+    if let Some(parent) = directory.parent() {
+        roots.push(parent.to_path_buf());
+    }
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(path) = std::env::var_os(variable) {
+            roots.push(path.into());
+        }
+    }
+    for candidate in component_candidates(&roots) {
+        if candidate.is_file() && validate_library(&candidate).is_ok() {
+            return configure(&candidate);
+        }
+    }
+    Err("未导入 HECATE 音效组件。请点击“导入音效组件”，选择官方目录中的 x64/osConfLib.dll；组件将保存在此设备的私有目录中。".into())
 }
 fn validate_library(path: &Path) -> Result<()> {
+    validated_library_bytes(path).map(|_| ())
+}
+fn validated_library_bytes(path: &Path) -> Result<Vec<u8>> {
     if !path.is_absolute()
         || !path
             .file_name()
@@ -263,7 +335,7 @@ fn validate_library(path: &Path) -> Result<()> {
     if hash != "576c1306133a33b975d7ecf25a2b7078052b2566e3705715c247d1e1a1ef2947" {
         return Err("该音效组件版本尚未验证，请使用已验证的 C-Media 1.0.8.0 x64 组件".into());
     }
-    Ok(())
+    Ok(data)
 }
 #[cfg(feature = "driver-runtime")]
 #[derive(Serialize, Deserialize)]
@@ -290,6 +362,7 @@ pub fn apply_profile(values: &BTreeMap<Tuning, u16>) -> Result<Reply> {
     request(None, values.clone())
 }
 fn request(action: Option<(Tuning, u16)>, values: BTreeMap<Tuning, u16>) -> Result<Reply> {
+    ensure_configured()?;
     #[cfg(feature = "driver-runtime")]
     {
         runtime::request(action, values)

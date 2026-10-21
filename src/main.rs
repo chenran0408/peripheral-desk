@@ -16,6 +16,23 @@ mod update_ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args
+        .get(1)
+        .is_some_and(|arg| arg == "--check-g2-components")
+    {
+        let result = peripheral_desk::audio_component_install::check_installed_bundle();
+        println!(
+            "{}",
+            match result {
+                Ok(count) => serde_json::json!({"ok":true,"components":count}),
+                Err(error) => serde_json::json!({"ok":false,"error":error}),
+            }
+        );
+        return;
+    }
+    if args.get(1).is_some_and(|arg| arg == "--install-g2-audio") {
+        std::process::exit(peripheral_desk::audio_component_install::worker_main());
+    }
     if args.get(1).is_some_and(|a| a == "--restart-after") {
         let result = args
             .get(2)

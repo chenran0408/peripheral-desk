@@ -1,5 +1,7 @@
 //! Shared application models and feature-gated device driver runtime.
 pub mod adapters;
+#[cfg(feature = "desktop")]
+pub mod audio_component_install;
 pub mod audio_fx;
 pub mod audio_lighting;
 pub mod backend;

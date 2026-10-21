@@ -26,7 +26,7 @@ The user-supplied UI reference is not distributed in this repository.
 
 ## HECATE G2 Pro
 
-- 用户提供的官方 HECATE 1.1.44 安装包，仅用于本地兼容性研究；不在仓库或发布包中分发。
+- 用户提供的官方 HECATE 1.1.44 安装包用于兼容性研究，原始整包不随主程序分发。G2 Pro 设备插件 0.4.10 起，按维护者声明的漫步者合创开发者授权包含匹配的 x64 SDK、音频驱动、扩展与 APO；厂商组件的来源、哈希与单独版权说明见设备插件仓库 `docs/G2-PRO-COMPONENTS.md`，项目源码 AGPL 不覆盖这些厂商文件。
 - [漫步者官方驱动下载](https://www.edifier.com/cn/driver.html)。
 - [G2 Pro 官方产品页](https://cnweb.edifier.com/product/product-684.html)。
 - `assets/g2pro.png`：官方安装包中的设备缩略图，仅用于识别设备，归 EDIFIER / HECATE 所有。

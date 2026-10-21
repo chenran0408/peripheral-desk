@@ -348,6 +348,51 @@ pub fn installed_all() -> Result<Vec<InstalledDriver>> {
 pub fn is_installed(id: &str) -> bool {
     installed(id).ok().flatten().is_some()
 }
+/// Resolve a declared dependency of the active plugin, checking its bytes before use.
+pub fn bundled_component(id: &str, name: &str) -> Result<Option<PathBuf>> {
+    let Some(driver) = installed(id)? else {
+        return Ok(None);
+    };
+    let Some(components) = driver.manifest.device.get("components") else {
+        return Ok(None);
+    };
+    let components = components.as_array().ok_or("插件组件清单格式无效")?;
+    let mut matches = components
+        .iter()
+        .filter(|item| item.get("name").and_then(Value::as_str) == Some(name));
+    let Some(component) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err("插件组件名称重复".into());
+    }
+    let relative = Path::new(
+        component
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or("插件组件缺少路径")?,
+    );
+    if !relative.starts_with("components")
+        || !relative
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err("插件组件路径无效".into());
+    }
+    let expected = component
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or("插件组件缺少校验值")?;
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("插件组件校验值无效".into());
+    }
+    let path = root().join(id).join(&driver.directory).join(relative);
+    let bytes = std::fs::read(&path).map_err(|e| format!("无法读取插件组件 {name}：{e}"))?;
+    if !digest(&bytes).eq_ignore_ascii_case(expected) {
+        return Err(format!("插件组件 {name} 校验失败，请重新安装插件"));
+    }
+    Ok(Some(path))
+}
 /// Used only before a user-requested batch skip, not on the UI paint path.
 pub fn verified_installed_version(id: &str) -> Option<String> {
     let driver = installed(id).ok().flatten()?;
@@ -921,6 +966,17 @@ pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
     if let Some(map) = request.as_object_mut() {
         map.insert("config_dir".into(), json!(context));
     }
+    // Legacy G2 plugins read their SDK connection inside the isolated worker.
+    // Prepare bundled components here too, before their first state read.
+    let component_error = if key == "hecate-g2-pro"
+        && matches!(
+            request.get("op").and_then(Value::as_str),
+            Some("read-state" | "apply-setting")
+        ) {
+        crate::audio_fx::ensure_configured().err()
+    } else {
+        None
+    };
     let input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
     if input.len() > 256 * 1024 {
         return Err("驱动请求过大".into());
@@ -1004,7 +1060,12 @@ pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
             .unwrap_or("设备请求失败")
             .into());
     }
-    let value = reply.get("value").cloned().unwrap_or(Value::Null);
+    let mut value = reply.get("value").cloned().unwrap_or(Value::Null);
+    if operation == "read-state" {
+        if let (Some(error), Some(state)) = (component_error, value.as_object_mut()) {
+            state.insert("settings_error".into(), json!(error));
+        }
+    }
     if matches!(
         operation,
         "read-state"

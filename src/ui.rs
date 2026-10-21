@@ -731,7 +731,7 @@ impl App {
                     );
                     self.add(
                         hwnd,
-                        "连接音效组件",
+                        "导入音效组件",
                         R::new(28, h - 62, 148, 38),
                         GHOST,
                         Command::ConnectAudio,
@@ -1534,39 +1534,22 @@ impl App {
         }
     }
     unsafe fn connect_audio(&mut self, hwnd: HWND) {
-        use windows_sys::Win32::UI::Controls::Dialogs::*;
         if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
             return;
         }
-        let mut file = [0u16; 32768];
-        let filter = wide("C-Media 音效组件 (osConfLib.dll)\0osConfLib.dll\0\0");
-        let mut dialog: OPENFILENAMEW = zeroed();
-        dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
-        dialog.hwndOwner = hwnd;
-        dialog.lpstrFilter = filter.as_ptr();
-        dialog.lpstrFile = file.as_mut_ptr();
-        dialog.nMaxFile = file.len() as u32;
-        dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
-        let title = wide("选择官方安装目录中的 x64 / osConfLib.dll");
-        dialog.lpstrTitle = title.as_ptr();
         self.modal_open = true;
-        let accepted = GetOpenFileNameW(&mut dialog);
+        let result = pick_audio_component(hwnd);
         self.modal_open = false;
-        if accepted != 0 {
-            let end = file.iter().position(|&v| v == 0).unwrap_or(file.len());
-            let path = std::path::PathBuf::from(String::from_utf16_lossy(&file[..end]));
-            match crate::audio_fx::configure(&path) {
+        match result {
+            Ok(Some(path)) => match crate::audio_fx::configure(&path) {
                 Ok(()) => {
-                    self.set_status("音效组件已连接，正在读取…", false);
+                    self.set_status("音效组件已导入设备目录，正在读取…", false);
                     self.begin(hwnd, None);
                 }
-                Err(e) => self.set_status(&e, true),
-            }
-        } else {
-            let error = CommDlgExtendedError();
-            if error != 0 {
-                self.set_status(&format!("选择音效组件失败：{error}"), true);
-            }
+                Err(error) => self.set_status(&error, true),
+            },
+            Ok(None) => {}
+            Err(error) => self.set_status(&error, true),
         }
         self.render(hwnd);
     }
@@ -3107,6 +3090,35 @@ unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
         hWnd: hwnd,
         uID: 1,
         ..zeroed()
+    }
+}
+
+/// Shared picker for the main device page and the EQ library.
+pub(crate) unsafe fn pick_audio_component(
+    hwnd: HWND,
+) -> Result<Option<std::path::PathBuf>, String> {
+    use windows_sys::Win32::UI::Controls::Dialogs::*;
+    let mut file = [0u16; 32768];
+    let filter = wide("C-Media 音效组件 (osConfLib.dll)\0osConfLib.dll\0\0");
+    let title = wide("导入已安装的官方 x64 / osConfLib.dll（仅保存在本机）");
+    let mut dialog: OPENFILENAMEW = zeroed();
+    dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = hwnd;
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.lpstrFile = file.as_mut_ptr();
+    dialog.nMaxFile = file.len() as u32;
+    dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR;
+    dialog.lpstrTitle = title.as_ptr();
+    if GetOpenFileNameW(&mut dialog) != 0 {
+        let end = file.iter().position(|&v| v == 0).unwrap_or(file.len());
+        Ok(Some(String::from_utf16_lossy(&file[..end]).into()))
+    } else {
+        let error = CommDlgExtendedError();
+        if error == 0 {
+            Ok(None)
+        } else {
+            Err(format!("选择音效组件失败：{error}"))
+        }
     }
 }
 

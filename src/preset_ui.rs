@@ -30,6 +30,8 @@ const SAVE: usize = 104;
 const RENAME: usize = 105;
 const DELETE: usize = 106;
 const CLOSE: usize = 107;
+const CONNECT: usize = 108;
+const INSTALL: usize = 109;
 type WorkResult = Result<(EqLibrary, Option<u64>, String), String>;
 struct Dialog {
     library: EqLibrary,
@@ -101,9 +103,23 @@ impl Dialog {
             return;
         }
         let id = if id == IDOK as usize { APPLY } else { id };
-        if ![APPLY, SAVE, RENAME, DELETE].contains(&id) {
+        if ![APPLY, SAVE, RENAME, DELETE, CONNECT, INSTALL].contains(&id) {
             return;
         }
+        let component = if id == CONNECT {
+            match crate::ui::pick_audio_component(hwnd) {
+                Ok(Some(path)) => Some(path),
+                Ok(None) => return,
+                Err(error) => {
+                    self.status = error;
+                    self.error = true;
+                    RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         let selected = self.selected();
         let name = window_text(self.name);
         if [APPLY, RENAME, DELETE].contains(&id) && selected.is_none() {
@@ -142,6 +158,8 @@ impl Dialog {
             SAVE => "正在读取当前十段 EQ 并保存…",
             RENAME => "正在保存预设名称…",
             DELETE => "正在删除本地预设…",
+            CONNECT => "正在导入音效组件…",
+            INSTALL => "正在安装插件所附音效驱动，请完成 Windows 管理员提示；安装期间请勿拔出耳机…",
             _ => return,
         }
         .into();
@@ -166,6 +184,14 @@ impl Dialog {
                     DELETE => {
                         profiles::delete_eq_preset(selected.unwrap())?;
                         (None, "本地预设已删除，耳机 EQ 保持原值".into())
+                    }
+                    CONNECT => {
+                        audio_fx::configure(component.as_ref().unwrap())?;
+                        (selected, "音效组件已导入；现在可以应用或保存 EQ。".into())
+                    }
+                    INSTALL => {
+                        let notice = peripheral_desk::audio_component_install::launch()?;
+                        (selected, notice)
                     }
                     _ => return Err("未知操作".into()),
                 };
@@ -192,12 +218,6 @@ impl Dialog {
                 self.error = false;
             }
             Err(error) => {
-                MessageBoxW(
-                    hwnd,
-                    wide(&error).as_ptr(),
-                    wide("EQ 预设操作失败").as_ptr(),
-                    MB_OK | MB_ICONERROR,
-                );
                 self.status = error;
                 self.error = true;
             }
@@ -348,15 +368,15 @@ impl Dialog {
         );
         canvas.text(
             &self.status,
-            R::new(28, 532, 890, 24),
+            R::new(28, 528, 890, 44),
             13,
             400,
             if self.error { paint::RED } else { paint::GREEN },
-            DT_LEFT,
+            DT_LEFT | DT_WORDBREAK | DT_TOP,
         );
         canvas.text(
             "仅十段 EQ 和开关；其他音效与系统音量保持不变。",
-            R::new(28, 570, 890, 21),
+            R::new(28, 582, 890, 21),
             12,
             400,
             paint::DIM,
@@ -364,7 +384,7 @@ impl Dialog {
         );
         canvas.text(
             "内置曲线可按听感继续调整；最近记录不代表外部驱动修改后的实时状态。",
-            R::new(28, 593, 890, 21),
+            R::new(28, 605, 890, 21),
             11,
             400,
             paint::DIM,
@@ -626,11 +646,21 @@ pub unsafe fn open(owner: HWND, model: usize) {
     );
     SendMessageW(dialog.name, EM_SETLIMITTEXT, 32, 0);
     for (id, text, r) in [
+        (INSTALL, "安装音效驱动", R::new(566, 48, 172, 34)),
+        (CONNECT, "手动导入组件", R::new(760, 48, 172, 34)),
         (SAVE, "保存当前", R::new(434, 451, 118, 36)),
         (RENAME, "重命名", R::new(564, 451, 104, 36)),
         (DELETE, "删除", R::new(680, 451, 88, 36)),
         (APPLY, "应用预设", R::new(780, 451, 152, 36)),
     ] {
+        if id == INSTALL
+            && crate::plugin_manager::installed("hecate-g2-pro")
+                .ok()
+                .flatten()
+                .is_none_or(|driver| driver.manifest.device.get("components").is_none())
+        {
+            continue;
+        }
         dialog
             .buttons
             .push(child("BUTTON", text, id, r, BS_OWNERDRAW as u32));
