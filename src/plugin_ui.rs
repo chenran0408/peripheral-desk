@@ -42,6 +42,7 @@ const SELECT_ALL: i32 = 111;
 const SELECT_NONE: i32 = 112;
 const SELECT_DETECTED: i32 = 113;
 const PREVIEW: i32 = 114;
+const SELECT_UPDATES: i32 = 115;
 
 #[derive(Default)]
 enum Installation {
@@ -206,6 +207,7 @@ struct Manager {
     error: bool,
     dialog_open: bool,
     changing_channel: bool,
+    select_updates_after_refresh: bool,
 }
 impl Drop for Manager {
     fn drop(&mut self) {
@@ -287,6 +289,22 @@ fn inventory(refresh: bool) -> Result<Inventory, String> {
         focus: None,
     })
 }
+fn updatable_ids(inventory: &Inventory) -> BTreeSet<String> {
+    inventory
+        .packages
+        .iter()
+        .filter_map(|package| match inventory.installed.get(&package.id) {
+            Some(Installation::Present(current))
+                if peripheral_desk::core_update::is_newer_version(&package.version, current)
+                    .unwrap_or(false) =>
+            {
+                Some(package.id.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 impl Manager {
     fn px(&self, value: i32) -> i32 {
         (value as i64 * self.dpi as i64 / 96) as i32
@@ -376,7 +394,7 @@ impl Manager {
             hwnd,
             REFRESH,
             "BUTTON",
-            "刷新驱动仓库",
+            "检查更新",
             R::new(836, 26, 176, 38),
             BS_OWNERDRAW as u32,
         );
@@ -427,6 +445,7 @@ impl Manager {
             (SELECT_ALL, "全选", 44, 84),
             (SELECT_NONE, "取消选择", 138, 108),
             (SELECT_DETECTED, "选择已识别设备", 256, 170),
+            (SELECT_UPDATES, "选择可更新", 438, 144),
         ] {
             self.add(
                 hwnd,
@@ -523,7 +542,7 @@ impl Manager {
         EnableWindow(self.child(OFFLINE), ready as i32);
         EnableWindow(self.child(CHANNEL), ready as i32);
         EnableWindow(self.child(PREVIEW), ready as i32);
-        for id in [SELECT_ALL, SELECT_NONE, SELECT_DETECTED] {
+        for id in [SELECT_ALL, SELECT_NONE, SELECT_DETECTED, SELECT_UPDATES] {
             EnableWindow(self.child(id), (ready && self.inventory.is_some()) as i32);
         }
         EnableWindow(
@@ -564,7 +583,7 @@ impl Manager {
                 "正在读取驱动目录…",
                 "勾选所需型号后点击安装；无需按 Ctrl，可一次选择多个驱动。",
             ),
-            Operation::Refresh => ("正在连接驱动仓库，刷新可用版本…", "驱动仓库已刷新。"),
+            Operation::Refresh => ("正在检查驱动更新并刷新目录…", "驱动更新检查完成。"),
             Operation::Install(_) => (
                 "正在逐项下载并校验已选驱动，请等待完成…",
                 "批量安装结束，请查看各项结果。新增设备支持请重启主程序。",
@@ -692,6 +711,18 @@ impl Manager {
                     })
                     .unwrap_or(0);
                 self.inventory = Some(inventory);
+                if self.select_updates_after_refresh {
+                    self.checked = self
+                        .inventory
+                        .as_ref()
+                        .map(updatable_ids)
+                        .unwrap_or_default();
+                    self.select_updates_after_refresh = false;
+                    self.success = format!(
+                        "驱动更新检查完成；已选择 {} 项可更新驱动。",
+                        self.checked.len()
+                    );
+                }
                 if let Some(inventory) = &self.inventory {
                     self.checked
                         .retain(|id| inventory.packages.iter().any(|p| p.id == *id));
@@ -779,15 +810,17 @@ impl Manager {
                 }
                 self.selection(hwnd);
             }
-            SELECT_ALL | SELECT_NONE | SELECT_DETECTED => {
+            SELECT_ALL | SELECT_NONE | SELECT_DETECTED | SELECT_UPDATES => {
                 self.checked.clear();
                 if let Some(inventory) = &self.inventory {
+                    let updatable = updatable_ids(inventory);
                     for index in 0..inventory.len() {
                         let row = inventory.row(index).unwrap();
                         let checked = row.catalog_available
                             && (id == SELECT_ALL
                                 || id == SELECT_DETECTED
-                                    && inventory.detected.get(row.id) == Some(&true));
+                                    && inventory.detected.get(row.id) == Some(&true)
+                                || id == SELECT_UPDATES && updatable.contains(row.id));
                         if checked {
                             self.checked.insert(row.id.to_string());
                         }
@@ -798,6 +831,10 @@ impl Manager {
                             index as isize,
                         );
                     }
+                }
+                if id == SELECT_UPDATES {
+                    self.success = format!("已选择 {} 项可更新驱动。", self.checked.len());
+                    self.status(hwnd, self.success.clone(), false);
                 }
                 self.selection(hwnd);
             }
@@ -1249,7 +1286,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
     match message {
         WM_CREATE => {
             manager.layout(hwnd);
-            manager.begin(hwnd, Operation::Load);
+            manager.begin(
+                hwnd,
+                if manager.select_updates_after_refresh {
+                    Operation::Refresh
+                } else {
+                    Operation::Load
+                },
+            );
             0
         }
         WM_PAINT => {
@@ -1323,6 +1367,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
 }
 /// The caller keeps the main application's modal flag set until this returns.
 pub unsafe fn open(owner: HWND) {
+    open_inner(owner, false);
+}
+
+/// Opens the manager, refreshes the catalog, and selects installed packages
+/// whose catalog version is strictly newer than the installed version.
+pub unsafe fn open_updates(owner: HWND) {
+    open_inner(owner, true);
+}
+
+unsafe fn open_inner(owner: HWND, check_updates: bool) {
     let dpi = GetDpiForWindow(owner).max(96);
     let instance = GetModuleHandleW(null());
     let class_name = wide("PeripheralDeskDriverManager");
@@ -1360,11 +1414,16 @@ pub unsafe fn open(owner: HWND) {
         selected: 0,
         checked: BTreeSet::new(),
         pending: None,
-        status: "正在准备驱动目录…".into(),
+        status: if check_updates {
+            "正在检查驱动更新…".into()
+        } else {
+            "正在准备驱动目录…".into()
+        },
         success: String::new(),
         error: false,
         dialog_open: false,
         changing_channel: false,
+        select_updates_after_refresh: check_updates,
     });
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     let mut frame = RECT {
@@ -1469,6 +1528,38 @@ mod tests {
     }
 
     #[test]
+    fn update_selection_includes_only_installed_strictly_older_versions() {
+        let packages = [
+            ("newer", "0.5.0"),
+            ("same", "0.4.2"),
+            ("older", "0.4.1"),
+            ("missing", "0.9.0"),
+            ("invalid", "not-a-version"),
+        ]
+        .map(|(id, version)| {
+            serde_json::from_value::<DriverPackage>(serde_json::json!({
+                "id":id, "name":format!("设备{id}"), "version":version, "description":"fixture", "download_bytes":1024,
+                "package_url":"https://example.invalid/fixture.zip", "sha256":"fixture", "dll_sha256":"fixture", "device":{}
+            })).unwrap()
+        })
+        .to_vec();
+        let inventory = Inventory {
+            packages,
+            installed_only: vec![],
+            installed: BTreeMap::from([
+                ("newer".into(), Installation::Present("0.4.2".into())),
+                ("same".into(), Installation::Present("0.4.2".into())),
+                ("older".into(), Installation::Present("0.5.0".into())),
+                ("invalid".into(), Installation::Present("0.4.2".into())),
+            ]),
+            detected: BTreeMap::new(),
+            channel: "stable".into(),
+            focus: None,
+        };
+        assert_eq!(updatable_ids(&inventory), BTreeSet::from(["newer".into()]));
+    }
+
+    #[test]
     fn no_implicit_selection_and_broken_record_does_not_hide_other_targets() {
         let packages = ["a", "b"].map(|id| serde_json::from_value::<DriverPackage>(serde_json::json!({
             "id":id, "name":format!("设备{id}"), "version":"0.4.2", "description":"fixture", "download_bytes":1024,
@@ -1498,6 +1589,7 @@ mod tests {
             error: false,
             dialog_open: false,
             changing_channel: false,
+            select_updates_after_refresh: false,
         };
         assert!(
             manager.targets().is_empty(),

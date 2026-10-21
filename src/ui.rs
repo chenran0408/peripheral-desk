@@ -562,6 +562,13 @@ impl App {
             Page::Home => {
                 self.add(
                     hwnd,
+                    "检查更新",
+                    R::new(w - 558, 102, 116, 38),
+                    GHOST,
+                    Command::CoreUpdate,
+                );
+                self.add(
+                    hwnd,
                     "配置备份",
                     R::new(w - 432, 102, 116, 38),
                     GHOST,
@@ -954,7 +961,7 @@ impl App {
             Page::Preferences => {
                 self.add(
                     hwnd,
-                    "主程序更新",
+                    "检查更新",
                     R::new(330, 566, 180, 40),
                     GHOST,
                     Command::CoreUpdate,
@@ -1123,6 +1130,8 @@ impl App {
                     DestroyWindow(hwnd);
                     return;
                 }
+                self.images = Images::load();
+                self.layout(hwnd);
                 self.begin(hwnd, None);
             }
             Command::DriverManager | Command::AddDevice => {
@@ -2709,8 +2718,12 @@ impl App {
     }
     unsafe fn menu(&mut self, hwnd: HWND) {
         let menu = CreatePopupMenu();
-        for (id, label) in [(1, "打开主页面"), (2, "重新读取电量"), (3, "退出程序")]
-        {
+        for (id, label) in [
+            (1, "打开主页面"),
+            (2, "重新读取电量"),
+            (4, "检查更新"),
+            (3, "退出程序"),
+        ] {
             AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
         }
         let mut p = zeroed();
@@ -2734,6 +2747,10 @@ impl App {
             }
             2 => self.begin(hwnd, None),
             3 => self.quit(hwnd),
+            4 => {
+                ShowWindow(hwnd, SW_RESTORE);
+                self.command(hwnd, Command::CoreUpdate);
+            }
             _ => {}
         }
         PostMessageW(hwnd, WM_NULL, 0, 0);

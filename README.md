@@ -115,3 +115,7 @@ cargo test --locked --no-default-features --features driver-runtime --lib
 ## 来源与许可
 
 项目代码使用 AGPL-3.0-only。产品图片和商标归各自权利人所有，用于识别设备，不随代码授予 AGPL 许可。协议研究、依赖许可和图片出处见 [SOURCES.md](SOURCES.md)、[NOTICE](NOTICE) 与 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES)。
+
+## 检查更新
+
+首页、工具设置或托盘右键菜单点击“检查更新”，即可查看主程序和已安装插件的新版本。主程序可下载校验后重启更新；点击“查看 / 更新插件”进入驱动商店，会自动选中当前通道可更新的已安装插件，再点击安装 / 更新即可。主程序和插件分别选择稳定版或预览版，不会自动安装其他设备。网络不可用时可稍后重试，已有设备插件继续使用。

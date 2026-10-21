@@ -3,7 +3,10 @@ use crate::{
     hid::wide,
     paint::{self, Canvas, BG, BORDER, DIM, FIELD, GREEN, MUTED, ORANGE, PANEL, R, RED, TEXT},
 };
-use peripheral_desk::core_update::{self, UpdateInfo};
+use peripheral_desk::{
+    core_update::{self, UpdateInfo},
+    plugin_manager,
+};
 use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
@@ -17,7 +20,7 @@ use windows_sys::Win32::{
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
 };
 const WIDTH: i32 = 940;
-const HEIGHT: i32 = 700;
+const HEIGHT: i32 = 840;
 const DONE: u32 = WM_APP + 86;
 const CHANNEL: i32 = 101;
 const CHECK: i32 = 102;
@@ -25,15 +28,19 @@ const INSTALL: i32 = 103;
 const ROLLBACK: i32 = 104;
 const NOTES: i32 = 105;
 const STATUS: i32 = 106;
+const PLUGINS: i32 = 107;
+const PLUGIN_STATUS: i32 = 108;
 enum Operation {
-    Inspect,
     Check(String),
     Install(UpdateInfo),
     Rollback,
 }
 enum Outcome {
-    Inspected(Option<String>),
-    Checked(UpdateInfo),
+    Checked {
+        core: Box<Result<UpdateInfo, String>>,
+        plugins: Result<String, String>,
+        previous: Result<Option<String>, String>,
+    },
     Restart,
 }
 struct Child {
@@ -71,6 +78,46 @@ fn size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
 }
+fn check_plugins() -> Result<String, String> {
+    let installed = plugin_manager::installed_all()?;
+    if installed.is_empty() {
+        return Ok("尚未安装设备插件。可前往驱动商店按需选择设备。".into());
+    }
+    let packages = plugin_manager::refresh_catalog()?;
+    let mut updates = Vec::new();
+    let mut missing = 0;
+    for driver in &installed {
+        if let Some(package) = packages.iter().find(|p| p.id == driver.id) {
+            if core_update::is_newer_version(&package.version, &driver.version)? {
+                updates.push(format!(
+                    "{}：{} → {}",
+                    package.name, driver.version, package.version
+                ));
+            }
+        } else {
+            missing += 1;
+        }
+    }
+    let mut text = if updates.is_empty() {
+        format!(
+            "已检查 {} 个已安装插件，当前通道没有新版本。",
+            installed.len()
+        )
+    } else {
+        format!(
+            "{} 个插件可更新：\r\n{}",
+            updates.len(),
+            updates.join("\r\n")
+        )
+    };
+    if missing > 0 {
+        text.push_str(&format!(
+            "\r\n其中 {missing} 个不在当前通道；可在驱动商店切换通道查看。"
+        ));
+    }
+    Ok(text)
+}
+
 impl Updater {
     fn px(&self, n: i32) -> i32 {
         (n as i64 * self.dpi as i64 / 96) as i32
@@ -145,7 +192,7 @@ impl Updater {
             hwnd,
             NOTES,
             "EDIT",
-            "选择通道并检查主程序更新。此处独立于设备驱动更新。",
+            "打开此页会同时检查主程序与已安装插件。",
             R::new(44, 300, 852, 210),
             ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
         );
@@ -170,8 +217,24 @@ impl Updater {
             STATUS,
             "EDIT",
             &self.status.clone(),
-            R::new(28, 640, 884, 42),
+            R::new(28, 780, 884, 42),
             ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
+        );
+        self.add(
+            hwnd,
+            PLUGIN_STATUS,
+            "EDIT",
+            "正在检查已安装插件…",
+            R::new(44, 634, 580, 76),
+            ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
+        );
+        self.add(
+            hwnd,
+            PLUGINS,
+            "BUTTON",
+            "查看 / 更新插件",
+            R::new(644, 634, 252, 42),
+            BS_OWNERDRAW as u32,
         );
         for child in &self.children {
             ShowWindow(child.hwnd, SW_SHOWNA);
@@ -180,7 +243,7 @@ impl Updater {
     }
     unsafe fn availability(&self) {
         let ready = self.pending.is_none();
-        for id in [CHANNEL, CHECK] {
+        for id in [CHANNEL, CHECK, PLUGINS] {
             EnableWindow(self.child(id), ready as i32);
         }
         EnableWindow(
@@ -203,8 +266,7 @@ impl Updater {
             return;
         }
         let progress = match operation {
-            Operation::Inspect => "正在检查本地上一版本备份…",
-            Operation::Check(_) => "正在检查所选通道的 GitHub 正式发布版本…",
+            Operation::Check(_) => "正在检查主程序和已安装插件的新版本…",
             Operation::Install(_) => "正在检查驱动兼容性、下载并校验更新；完成后会自动重启…",
             Operation::Rollback => "正在校验上一版本与已安装驱动；完成后会自动重启…",
         };
@@ -215,10 +277,24 @@ impl Updater {
         let window = hwnd as usize;
         thread::spawn(move || {
             let result = (|| match operation {
-                Operation::Inspect => core_update::previous_version().map(Outcome::Inspected),
                 Operation::Check(channel) => {
-                    core_update::set_channel(&channel)?;
-                    core_update::check(&channel).map(Outcome::Checked)
+                    let (core, plugins) = thread::scope(|scope| {
+                        let core = scope.spawn(|| {
+                            core_update::set_channel(&channel)?;
+                            core_update::check(&channel)
+                        });
+                        let plugins = check_plugins();
+                        (
+                            core.join()
+                                .unwrap_or_else(|_| Err("主程序检查线程中断".into())),
+                            plugins,
+                        )
+                    });
+                    Ok(Outcome::Checked {
+                        core: Box::new(core),
+                        plugins,
+                        previous: core_update::previous_version(),
+                    })
                 }
                 Operation::Install(info) => {
                     let prepared = core_update::prepare(&info)?;
@@ -243,35 +319,58 @@ impl Updater {
             return;
         };
         match receiver.try_recv() {
-            Ok(Ok(Outcome::Inspected(previous))) => {
-                self.previous = previous;
-                let text = self
-                    .previous
-                    .as_ref()
-                    .map(|v| format!("检测到可回退版本 {v}。点击检查更新查看当前发布。"))
-                    .unwrap_or_else(|| "没有可回退的更早版本；安装新版本后会自动保留备份。".into());
-                self.status(hwnd, text, false);
-            }
-            Ok(Ok(Outcome::Checked(info))) => {
-                SetWindowTextW(
-                    self.child(NOTES),
-                    wide(if info.notes.is_empty() {
-                        "发布方暂未提供更新内容。"
-                    } else {
-                        &info.notes
-                    })
-                    .as_ptr(),
-                );
-                let text = if info.available {
-                    "发现新版本。点击“下载更新并重启”开始更新，准备失败时原程序继续运行。".into()
-                } else {
-                    format!(
-                        "当前已是最新可用版本（仓库 {}），不会自动降级或重装。",
-                        info.version
-                    )
-                };
-                self.info = Some(info);
-                self.status(hwnd, text, false);
+            Ok(Ok(Outcome::Checked {
+                core,
+                plugins,
+                previous,
+            })) => {
+                let previous_error = previous.as_ref().err().cloned();
+                self.previous = previous.unwrap_or(None);
+                let plugin_failed = plugins.is_err();
+                let plugin_text =
+                    plugins.unwrap_or_else(|e| format!("插件检查失败：{e}；已安装插件仍可使用。"));
+                SetWindowTextW(self.child(PLUGIN_STATUS), wide(&plugin_text).as_ptr());
+                match *core {
+                    Ok(info) => {
+                        let notes = if info.notes.is_empty() {
+                            "发布方暂未提供更新内容。"
+                        } else {
+                            &info.notes
+                        };
+                        let notes = notes.replace("\r\n", "\n").replace('\n', "\r\n");
+                        SetWindowTextW(self.child(NOTES), wide(&notes).as_ptr());
+                        let text = if info.available {
+                            format!("发现主程序 {}，可下载更新并重启。", info.version)
+                        } else {
+                            format!("主程序已是最新可用版本（仓库 {}）。", info.version)
+                        };
+                        self.info = Some(info);
+                        self.status(
+                            hwnd,
+                            if plugin_failed {
+                                format!("{text} 插件检查失败，可重试。")
+                            } else {
+                                text
+                            },
+                            plugin_failed,
+                        );
+                    }
+                    Err(error) => {
+                        self.info = None;
+                        SetWindowTextW(
+                            self.child(NOTES),
+                            wide("未取得主程序更新信息，请检查网络后重试。").as_ptr(),
+                        );
+                        self.status(hwnd, format!("主程序检查失败：{error}"), true);
+                    }
+                }
+                if let Some(error) = previous_error {
+                    self.status(
+                        hwnd,
+                        format!("{} 上一版备份检查失败：{error}", self.status),
+                        true,
+                    );
+                }
             }
             Ok(Ok(Outcome::Restart)) => {
                 self.restart = true;
@@ -292,6 +391,15 @@ impl Updater {
             return;
         }
         match id {
+            PLUGINS => {
+                crate::plugin_ui::open_updates(hwnd);
+                let channel = if SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0) == 1 {
+                    "preview"
+                } else {
+                    "stable"
+                };
+                self.begin(hwnd, Operation::Check(channel.into()));
+            }
             CHECK => {
                 let index = SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0);
                 self.begin(
@@ -336,23 +444,23 @@ impl Updater {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
             c.gradient(R::new(0, 0, WIDTH, 84), 0xff201017, BG);
+            c.text("检查更新", R::new(28, 18, 490, 34), 23, 600, TEXT, DT_LEFT);
             c.text(
-                "主程序更新",
-                R::new(28, 18, 490, 34),
-                23,
-                600,
-                TEXT,
-                DT_LEFT,
-            );
-            c.text(
-                "核心与设备驱动分别更新，按需保持最新。",
+                "一次检查主程序与已安装插件，按需选择更新。",
                 R::new(28, 56, 500, 24),
                 14,
                 400,
                 MUTED,
                 DT_LEFT,
             );
-            c.text("更新通道", R::new(548, 31, 88, 24), 13, 400, MUTED, DT_LEFT);
+            c.text(
+                "主程序通道",
+                R::new(548, 31, 88, 24),
+                13,
+                400,
+                MUTED,
+                DT_LEFT,
+            );
             c.round(R::new(24, 110, 892, 420), 14, PANEL, Some(BORDER));
             c.text(
                 "当前版本",
@@ -410,10 +518,19 @@ impl Updater {
                 MUTED,
                 DT_LEFT,
             );
+            c.round(R::new(24, 606, 892, 120), 14, PANEL, Some(BORDER));
+            c.text(
+                "设备插件 · 使用驱动商店所选通道",
+                R::new(44, 608, 800, 24),
+                14,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
             c.text("更新内容", R::new(44, 272, 852, 23), 14, 600, TEXT, DT_LEFT);
             c.text(
                 "仅替换主程序与文档；更新前备份旧 EXE 和配置，保留设备驱动及用户数据。",
-                R::new(28, 598, 884, 22),
+                R::new(28, 738, 884, 22),
                 13,
                 400,
                 DIM,
@@ -427,7 +544,7 @@ impl Updater {
                 } else {
                     "操作结果"
                 },
-                R::new(28, 620, 884, 18),
+                R::new(28, 760, 884, 18),
                 12,
                 400,
                 if self.error { ORANGE } else { DIM },
@@ -496,7 +613,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
     match message {
         WM_CREATE => {
             updater.layout(hwnd);
-            updater.begin(hwnd, Operation::Inspect);
+            updater.begin(hwnd, Operation::Check(core_update::channel()));
             0
         }
         WM_PAINT => {
@@ -584,7 +701,7 @@ pub unsafe fn open(owner: HWND) -> bool {
         info: None,
         previous: None,
         pending: None,
-        status: "正在准备主程序更新…".into(),
+        status: "正在准备检查更新…".into(),
         error: false,
         restart: false,
     });
@@ -604,7 +721,7 @@ pub unsafe fn open(owner: HWND) -> bool {
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class_name.as_ptr(),
-        wide("Peripheral Desk · 主程序更新").as_ptr(),
+        wide("Peripheral Desk · 检查更新").as_ptr(),
         style,
         x,
         y,

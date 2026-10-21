@@ -125,6 +125,11 @@ impl Version {
         self.pre.len().cmp(&other.pre.len())
     }
 }
+/// Semantic version ordering shared by the core and device update interfaces.
+pub fn is_newer_version(candidate: &str, current: &str) -> Result<bool> {
+    Ok(Version::parse(candidate)?.compare(&Version::parse(current)?) == Ordering::Greater)
+}
+
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
