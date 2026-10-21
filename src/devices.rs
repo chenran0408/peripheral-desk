@@ -55,8 +55,23 @@ pub const LIGHTS: &[(u8, &str)] = &[
 ];
 
 pub static REGISTRY: std::sync::LazyLock<Vec<DeviceSpec>> = std::sync::LazyLock::new(|| {
-    #[allow(unused_mut)]
-    let mut devices = vec![
+    // Runtime protocol roots are stable. Unit tests use this same deterministic
+    // fixture instead of inspecting the developer's installed plugins.
+    #[cfg(any(feature = "driver-runtime", test))]
+    {
+        legacy_specs()
+    }
+    #[cfg(all(not(feature = "driver-runtime"), not(test)))]
+    {
+        host_registry_from_descriptors(crate::plugin_manager::installed_descriptors(), |key| {
+            crate::plugin_manager::installed(key)
+                .map(|driver| driver.map(|driver| (driver.version, driver.manifest.device)))
+        })
+    }
+});
+
+fn legacy_specs() -> Vec<DeviceSpec> {
+    vec![
         DeviceSpec {
             key: "razer-deathadder-v3-pro",
             name: "炼狱蝰蛇 V3 专业版",
@@ -151,20 +166,74 @@ pub static REGISTRY: std::sync::LazyLock<Vec<DeviceSpec>> = std::sync::LazyLock:
                     && i.product.eq_ignore_ascii_case("HECATE G2 PRO")
             },
         },
-    ];
-    #[cfg(not(feature = "driver-runtime"))]
-    for value in crate::plugin_manager::installed_descriptors() {
-        if let Ok(metadata) = serde_json::from_value::<DeviceManifest>(value) {
-            if devices.iter().any(|d| d.key == metadata.key) {
-                continue;
-            }
-            if let Ok(spec) = metadata.into_spec() {
-                devices.push(spec);
+    ]
+}
+
+/// Only installed package descriptors create desktop cards. Catalog entries,
+/// cached state and runtime roots never add a device to this collection.
+#[cfg(any(not(feature = "driver-runtime"), test))]
+fn host_registry_from_descriptors(
+    descriptors: impl IntoIterator<Item = serde_json::Value>,
+    mut installed: impl FnMut(&str) -> Result<Option<(String, serde_json::Value)>, String>,
+) -> Vec<DeviceSpec> {
+    host_registry_from_installed(descriptors.into_iter().filter_map(|descriptor| {
+        let key = descriptor.get("key").and_then(serde_json::Value::as_str)?;
+        // One broken record, or a record changed during startup, cannot hide
+        // other valid installations. Use the successfully reread metadata.
+        let (version, metadata) = installed(key).ok().flatten()?;
+        (metadata.get("key").and_then(serde_json::Value::as_str) == Some(key))
+            .then_some((version, metadata))
+    }))
+}
+
+#[cfg(any(not(feature = "driver-runtime"), test))]
+pub(crate) fn host_registry_from_installed(
+    installed: impl IntoIterator<Item = (String, serde_json::Value)>,
+) -> Vec<DeviceSpec> {
+    let mut devices = Vec::new();
+    for (version, value) in installed {
+        let Ok(metadata) = serde_json::from_value::<DeviceManifest>(value) else {
+            continue;
+        };
+        if devices
+            .iter()
+            .any(|spec: &DeviceSpec| spec.key == metadata.key)
+        {
+            continue;
+        }
+        let Ok(mut spec) = metadata.into_spec() else {
+            continue;
+        };
+        // These released 0.4.x packages predate complete UI metadata. Restore
+        // only their missing capability descriptions, never their old matcher
+        // or another device. Future packages must supply their own metadata.
+        if matches!(version.as_str(), "0.4.0" | "0.4.1") {
+            if let Some(legacy) = legacy_specs()
+                .into_iter()
+                .find(|known| known.key == spec.key && known.kind == spec.kind)
+            {
+                if spec.dpi_range.is_none() {
+                    spec.dpi_range = legacy.dpi_range;
+                }
+                if spec.rates.is_empty() {
+                    spec.rates = legacy.rates;
+                }
+                if spec.wired_rates.is_empty() {
+                    spec.wired_rates = legacy.wired_rates;
+                }
+                if spec.sleeps.is_empty() {
+                    spec.sleeps = legacy.sleeps;
+                }
+                if spec.advanced.is_empty() {
+                    spec.advanced = legacy.advanced;
+                }
             }
         }
+        devices.push(spec);
     }
+    devices.sort_by_key(|spec| spec.key);
     devices
-});
+}
 
 impl DeviceSpec {
     #[cfg(feature = "desktop")]
@@ -776,6 +845,70 @@ impl DeviceManifest {
 #[cfg(test)]
 mod manifest_tests {
     use super::*;
+    fn a5() -> serde_json::Value {
+        serde_json::json!({"key":"mchose-a5-ultra","name":"Installed A5","brand":"MCHOSE","kind":"mouse","matches":[{"vid":14391,"pid":4108,"usage_page":65281,"feature_len":65,"product_equals":"A5 ultra"}]})
+    }
+    #[test]
+    fn a_broken_installed_record_does_not_remove_a_healthy_plugin() {
+        let mut broken = a5();
+        broken["key"] = serde_json::json!("broken-install");
+        let mut looked_up = Vec::new();
+        let devices = host_registry_from_descriptors([a5(), broken], |key| {
+            looked_up.push(key.to_owned());
+            if key == "broken-install" {
+                Err("installed.json is malformed".into())
+            } else {
+                Ok(Some(("0.4.1".into(), a5())))
+            }
+        });
+        assert_eq!(looked_up, ["mchose-a5-ultra", "broken-install"]);
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].key, "mchose-a5-ultra");
+        assert_eq!(devices[0].dpi_range, Some((50, 26000)));
+    }
+    #[test]
+    fn desktop_registry_has_only_installed_metadata_and_no_four_device_default() {
+        assert!(host_registry_from_installed([]).is_empty());
+        for version in ["0.4.0", "0.4.1"] {
+            let devices = host_registry_from_installed([(version.into(), a5())]);
+            assert_eq!(devices.len(), 1);
+            let spec = &devices[0];
+            assert_eq!(spec.key, "mchose-a5-ultra");
+            assert_eq!(spec.name, "Installed A5");
+            assert_eq!(spec.adapter, Adapter::External);
+            assert_eq!(spec.dpi_range, Some((50, 26000)));
+            assert_eq!(spec.advanced.len(), A5_ADVANCED.len());
+            assert_eq!(
+                spec.extra_matchers.len(),
+                1,
+                "installed matcher is not replaced by broad legacy matching"
+            );
+            assert!(!devices.iter().any(|d| matches!(
+                d.key,
+                "razer-deathadder-v3-pro" | "mchose-g75-pro" | "hecate-g2-pro"
+            )));
+        }
+    }
+    #[test]
+    fn future_or_different_device_metadata_never_guesses_legacy_capabilities() {
+        for version in ["0.4.2", "0.5.0", "0.4.1-preview.1"] {
+            let devices = host_registry_from_installed([(version.into(), a5())]);
+            assert_eq!(devices.len(), 1);
+            assert!(devices[0].read_only());
+            assert!(devices[0].advanced.is_empty());
+        }
+        let mut other_kind = a5();
+        other_kind["kind"] = serde_json::json!("headset");
+        let devices = host_registry_from_installed([("0.4.1".into(), other_kind)]);
+        assert!(devices[0].advanced.is_empty());
+        assert_eq!(devices[0].dpi_range, None);
+        let mut precise = a5();
+        precise["dpi_range"] = serde_json::json!([100, 1000]);
+        precise["rates"] = serde_json::json!([125]);
+        let devices = host_registry_from_installed([("0.4.1".into(), precise)]);
+        assert_eq!(devices[0].dpi_range, Some((100, 1000)));
+        assert_eq!(devices[0].rates, &[125]);
+    }
     #[test]
     fn a_read_only_plugin_does_not_inherit_writable_mouse_controls() {
         let metadata = serde_json::json!({"key":"test-mouse","name":"Test","brand":"TEST","kind":"mouse","matches":[{"vid":1133,"pid":50495}],"validation":{"status":"public-implementation-untested"}});

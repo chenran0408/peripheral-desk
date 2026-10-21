@@ -39,7 +39,7 @@ pub struct LightingState {
 #[path = "audio_lighting_runtime.rs"]
 mod runtime;
 #[cfg(feature = "driver-runtime")]
-pub use runtime::{apply, read};
+pub use runtime::{apply, read, set_enabled};
 #[cfg(not(feature = "driver-runtime"))]
 pub fn read() -> Result<LightingState> {
     serde_json::from_value(crate::plugin_manager::invoke(
@@ -53,6 +53,15 @@ pub fn apply(config: &LightingConfig) -> Result<LightingState> {
     serde_json::from_value(crate::plugin_manager::invoke(
         "hecate-g2-pro",
         serde_json::json!({"op":"lighting-apply","config":config}),
+    )?)
+    .map_err(|e| format!("驱动返回灯光格式错误：{e}"))
+}
+/// Change only the hardware switch, preserving the device's unknown palette.
+#[cfg(not(feature = "driver-runtime"))]
+pub fn set_enabled(enabled: bool) -> Result<LightingState> {
+    serde_json::from_value(crate::plugin_manager::invoke(
+        "hecate-g2-pro",
+        serde_json::json!({"op":"lighting-switch","enabled":enabled}),
     )?)
     .map_err(|e| format!("驱动返回灯光格式错误：{e}"))
 }

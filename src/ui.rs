@@ -50,6 +50,7 @@ enum Command {
     ControlsEditor,
     ResidentMacros,
     DriverManager,
+    AddDevice,
     Configuration,
     CoreUpdate,
     PresetLibrary,
@@ -173,7 +174,11 @@ pub fn run(hidden: bool, battery: bool) {
             height: 860,
             slider: R::default(),
             dragging: false,
-            status: "正在读取设备…".into(),
+            status: if REGISTRY.is_empty() {
+                "打开驱动仓库，添加所需设备驱动".into()
+            } else {
+                "正在读取设备…".into()
+            },
             status_error: false,
             images,
             icon,
@@ -562,6 +567,16 @@ impl App {
                     GHOST,
                     Command::Refresh,
                 );
+                if REGISTRY.is_empty() {
+                    let center_y = 176 + (h - 266) / 2;
+                    self.add(
+                        hwnd,
+                        "＋  添加设备驱动",
+                        R::new(w / 2 - 132, center_y + 8, 264, 48),
+                        CHIP,
+                        Command::AddDevice,
+                    );
+                }
                 let cols = if REGISTRY.len() > 3 {
                     2
                 } else {
@@ -1096,7 +1111,7 @@ impl App {
                 }
                 self.begin(hwnd, None);
             }
-            Command::DriverManager => {
+            Command::DriverManager | Command::AddDevice => {
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
                     return;
                 }
@@ -1246,6 +1261,8 @@ impl App {
         self.set_status(
             if action.is_some() {
                 "正在保存到设备并读回确认…"
+            } else if REGISTRY.is_empty() {
+                "打开驱动仓库，添加所需设备驱动；安装后请重启主程序"
             } else {
                 "正在读取设备…"
             },
@@ -1297,6 +1314,8 @@ impl App {
                                 notice.into()
                             } else if writing {
                                 "设置已保存，读回确认成功".into()
+                            } else if REGISTRY.is_empty() {
+                                "打开驱动仓库添加设备；新驱动安装后请重启主程序".into()
                             } else {
                                 format!("{count} 台设备在线 · 状态已更新")
                             },
@@ -1590,6 +1609,7 @@ impl App {
             Command::Notices => self.snapshot.notices,
             Command::Advanced(value) => self.advanced == value,
             Command::AudioPage(value) => self.audio_page == value,
+            Command::AddDevice => true,
             _ => false,
         }
     }
@@ -1643,6 +1663,7 @@ impl App {
                 }
                 Command::ConnectAudio
                 | Command::DriverManager
+                | Command::AddDevice
                 | Command::Configuration
                 | Command::CoreUpdate
                 | Command::ControlsEditor
@@ -1755,13 +1776,50 @@ impl App {
     unsafe fn home(&self, c: &Canvas) {
         c.text("我的设备", R::new(32, 83, 600, 45), 30, 600, TEXT, DT_LEFT);
         c.text(
-            "选择设备，查看电量并调整设置",
+            if REGISTRY.is_empty() {
+                "尚未加载设备驱动，先从驱动仓库添加你的设备"
+            } else {
+                "选择设备，查看电量并调整设置"
+            },
             R::new(34, 134, 700, 24),
             13,
             400,
             MUTED,
             DT_LEFT,
         );
+        if REGISTRY.is_empty() {
+            let center_y = 176 + (self.height - 266) / 2;
+            c.round(
+                R::new(32, 176, self.width - 64, self.height - 266),
+                20,
+                PANEL,
+                Some(BORDER),
+            );
+            c.text(
+                "从添加设备驱动开始",
+                R::new(60, center_y - 98, self.width - 120, 42),
+                28,
+                600,
+                TEXT,
+                DT_CENTER,
+            );
+            c.text(
+                "驱动按设备下载，只安装你需要的型号。",
+                R::new(60, center_y - 44, self.width - 120, 26),
+                15,
+                400,
+                MUTED,
+                DT_CENTER,
+            );
+            c.text(
+                "安装新设备驱动后，请退出并重新打开主程序。",
+                R::new(60, center_y + 76, self.width - 120, 26),
+                13,
+                400,
+                DIM,
+                DT_CENTER,
+            );
+        }
     }
     unsafe fn detail(&self, c: &Canvas, m: usize) {
         let s = &self.snapshot.devices[m];
@@ -2334,7 +2392,13 @@ impl App {
         c.text(
             &b.label,
             r,
-            if b.label == "×" { 25 } else { 14 },
+            if b.label == "×" {
+                25
+            } else if b.command == Command::AddDevice {
+                16
+            } else {
+                14
+            },
             if selected { 500 } else { 400 },
             if disabled {
                 DIM
@@ -2559,7 +2623,14 @@ impl App {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        copy_wide(&mut n.szTip, &tip);
+        copy_wide(
+            &mut n.szTip,
+            if REGISTRY.is_empty() {
+                "Peripheral Desk · 到主页面添加设备驱动"
+            } else {
+                &tip
+            },
+        );
         self.tray_added =
             Shell_NotifyIconW(if self.tray_added { NIM_MODIFY } else { NIM_ADD }, &n) != 0;
     }
@@ -2648,7 +2719,7 @@ impl App {
         let mut area: RECT = zeroed();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as _, 0);
         let width = self.px(350);
-        let height = self.px(112 + REGISTRY.len() as i32 * 66);
+        let height = self.px(112 + REGISTRY.len().max(1) as i32 * 66);
         let x = (point.x - width).clamp(area.left, area.right - width);
         let y = (point.y - height - 12).clamp(area.top, area.bottom - height);
         SetWindowPos(
@@ -2695,7 +2766,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
             let dc = BeginPaint(hwnd, &mut ps);
             {
                 let c = Canvas::new(dc, a.dpi);
-                let height = 112 + REGISTRY.len() as i32 * 66;
+                let height = 112 + REGISTRY.len().max(1) as i32 * 66;
                 c.rect(R::new(0, 0, 350, height), PANEL);
                 c.text("设备电量", R::new(21, 16, 240, 32), 17, 600, TEXT, DT_LEFT);
                 c.text(
@@ -2706,6 +2777,24 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                     DIM,
                     DT_LEFT,
                 );
+                if REGISTRY.is_empty() {
+                    c.text(
+                        "未安装或尚未加载设备驱动",
+                        R::new(21, 77, 308, 25),
+                        14,
+                        500,
+                        TEXT,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        "到主页面添加 · 安装后重启主程序",
+                        R::new(21, 105, 308, 22),
+                        11,
+                        400,
+                        MUTED,
+                        DT_LEFT,
+                    );
+                }
                 for (i, spec) in REGISTRY.iter().enumerate() {
                     let s = &a.snapshot.devices[i];
                     let y = 76 + i as i32 * 66;

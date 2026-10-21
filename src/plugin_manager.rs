@@ -944,7 +944,7 @@ pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
     let timeout = if key == "mchose-g75-pro" && operation == "controls-apply" {
         360
     } else if key == "hecate-g2-pro" {
-        if operation.contains("apply") {
+        if operation.contains("apply") || operation == "lighting-switch" {
             20
         } else {
             12
@@ -1002,6 +1002,7 @@ pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
             | "controls-apply"
             | "lighting-read"
             | "lighting-apply"
+            | "lighting-switch"
             | "fx-query"
     ) {
         let name = if operation.starts_with("controls") {

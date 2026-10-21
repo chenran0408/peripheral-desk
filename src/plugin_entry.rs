@@ -261,6 +261,9 @@ fn hecate_extra(operation: &str, request: &Value) -> Result<Value> {
         }
         "fx-worker" => value(crate::audio_fx::run_request(field(request, "request")?)?),
         "lighting-read" => value(crate::audio_lighting::read()?),
+        "lighting-switch" => value(crate::audio_lighting::set_enabled(field(
+            request, "enabled",
+        )?)?),
         "lighting-apply" => value(crate::audio_lighting::apply(&field(request, "config")?)?),
         _ => Err("该驱动尚未提供此操作".into()),
     }
@@ -329,7 +332,21 @@ mod tests {
                 let rejected: Value =
                     serde_json::from_str(&handler(key, r#"{"op":"fx-query"}"#)).unwrap();
                 assert_eq!(rejected["error"], "该驱动尚未提供此操作");
+                let rejected: Value = serde_json::from_str(&handler(
+                    key,
+                    r#"{"op":"lighting-switch","enabled":false}"#,
+                ))
+                .unwrap();
+                assert_eq!(rejected["error"], "该驱动尚未提供此操作");
             }
+        }
+        for input in [
+            r#"{"op":"lighting-switch"}"#,
+            r#"{"op":"lighting-switch","enabled":"false"}"#,
+        ] {
+            let rejected: Value = serde_json::from_str(&request_hecate(HECATE, input)).unwrap();
+            assert_eq!(rejected["ok"], false);
+            assert!(rejected["error"].as_str().unwrap().contains("enabled"));
         }
         let invalid = request_hecate(
             HECATE,

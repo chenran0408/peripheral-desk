@@ -32,53 +32,69 @@ const FASTER: usize = 107;
 const APPLY: usize = 108;
 const REFRESH: usize = 109;
 const CLOSE: usize = 110;
+#[derive(Clone, Copy)]
+enum Operation {
+    Read,
+    Apply,
+    Toggle(bool),
+}
 struct Dialog {
     config: LightingConfig,
     actual_enabled: Option<bool>,
     saved: bool,
+    dirty: bool,
+    quick_switch: bool,
     buttons: Vec<(usize, HWND)>,
     font: HFONT,
     brush: HBRUSH,
     dpi: u32,
     status: String,
     error: bool,
-    writing: bool,
+    operation: Operation,
     pending: Option<Receiver<Result<LightingState, String>>>,
     custom_colors: [u32; 16],
 }
 impl Dialog {
+    fn available(&self, id: usize) -> bool {
+        self.pending.is_none()
+            && match id {
+                APPLY => self.actual_enabled.is_some(),
+                // Legacy drivers edit a draft; newer drivers also recover an unknown switch.
+                TOGGLE => true,
+                SLOWER => self.config.mode != LightingMode::Static && self.config.speed > 1,
+                FASTER => self.config.mode != LightingMode::Static && self.config.speed < 10,
+                _ => true,
+            }
+    }
     unsafe fn update_buttons(&self) {
         for (id, button) in &self.buttons {
-            EnableWindow(
-                *button,
-                i32::from(
-                    self.pending.is_none() && (*id != APPLY || self.actual_enabled.is_some()),
-                ),
-            );
+            EnableWindow(*button, i32::from(self.available(*id)));
         }
     }
-    unsafe fn begin(&mut self, hwnd: HWND, writing: bool) {
+    unsafe fn begin(&mut self, hwnd: HWND, operation: Operation) {
         if self.pending.is_some() {
             return;
         }
         let config = self.config.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
-        self.writing = writing;
+        self.operation = operation;
         self.error = false;
-        self.status = if writing {
-            "正在发送灯效，并核对设备开关…"
-        } else {
-            "正在读取设备灯光开关与本工具保存配置…"
+        self.status = match operation {
+            Operation::Apply if config.enabled => "正在提交灯效参数，并读取设备返回的开关值…",
+            Operation::Apply => "正在提交关闭命令；本次不会发送模式、颜色或速度…",
+            Operation::Toggle(true) => "正在开启灯光并读回；保留模式和颜色，不发送灯效草稿…",
+            Operation::Toggle(false) => "正在关闭灯光并读回；保留模式和颜色，不发送灯效草稿…",
+            Operation::Read => "正在读取设备灯光开关与本工具保存配置…",
         }
         .into();
         self.update_buttons();
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
         thread::spawn(move || {
-            let _ = tx.send(if writing {
-                audio_lighting::apply(&config)
-            } else {
-                audio_lighting::read()
+            let _ = tx.send(match operation {
+                Operation::Apply => audio_lighting::apply(&config),
+                Operation::Toggle(enabled) => audio_lighting::set_enabled(enabled),
+                Operation::Read => audio_lighting::read(),
             });
         });
     }
@@ -90,27 +106,66 @@ impl Dialog {
             }
             _ => return,
         };
+        self.complete(result);
+        self.update_buttons();
+        RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
+    fn complete(&mut self, result: Result<LightingState, String>) {
         self.pending = None;
         match result {
             Ok(state) => {
                 self.actual_enabled = Some(state.enabled);
                 self.saved = state.saved.is_some();
-                self.config = state.saved.unwrap_or_default();
-                self.config.enabled = state.enabled;
                 self.error = false;
-                self.status = if self.writing {
-                    "灯效已发送并保存；设备开关读回确认成功。模式与颜色不具备完整设备读回。".into()
+                if let Operation::Toggle(expected) = self.operation {
+                    // Toggle never loads saved/default mode values over a draft.
+                    if !self.dirty {
+                        self.config.enabled = state.enabled;
+                    }
+                    self.error = state.enabled != expected;
+                    self.status = if self.error {
+                        "开关返回值与请求不一致，未确认切换；灯效草稿已保留。".into()
+                    } else if self.dirty {
+                        "开关已切换并读回；未提交的模式、颜色和速度草稿已保留。".into()
+                    } else {
+                        "开关已切换并读回，未修改模式、颜色或速度。".into()
+                    };
+                    if !state.notice.trim().is_empty() {
+                        self.status.push(' ');
+                        self.status.push_str(&state.notice);
+                    }
+                } else if matches!(self.operation, Operation::Apply) {
+                    // A register reply does not establish the visible effect.
+                    // Keep the user's draft if the driver did not save it exactly.
+                    self.dirty = state.enabled != self.config.enabled
+                        || state.saved.as_ref() != Some(&self.config);
+                    self.error = state.enabled != self.config.enabled;
+                    self.status = if self.error {
+                        "设备返回的开关值与草稿不一致，未确认应用；保留草稿供重试。".into()
+                    } else if self.config.enabled {
+                        "已提交参数；仅读回开关值，未确认模式、颜色和速度。请观察耳罩实际灯效。"
+                            .into()
+                    } else {
+                        "已提交关闭；设备返回关闭值，实际是否熄灭请观察耳罩。其他灯效参数未发送。"
+                            .into()
+                    };
+                    if !state.notice.trim().is_empty() {
+                        self.status.push(' ');
+                        self.status.push_str(&state.notice);
+                    }
                 } else {
-                    state.notice
-                };
+                    self.config = state.saved.unwrap_or_default();
+                    self.config.enabled = state.enabled;
+                    self.dirty = false;
+                    self.status = state.notice;
+                }
             }
             Err(e) => {
+                self.actual_enabled = None;
                 self.status = e;
                 self.error = true;
             }
         }
-        self.update_buttons();
-        RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     unsafe fn command(&mut self, hwnd: HWND, id: usize) {
         if self.pending.is_some() {
@@ -123,20 +178,51 @@ impl Dialog {
             }
             APPLY | 1 => {
                 if self.actual_enabled.is_some() {
-                    self.begin(hwnd, true);
+                    self.begin(hwnd, Operation::Apply);
                 }
                 return;
             }
             REFRESH => {
-                self.begin(hwnd, false);
+                self.begin(hwnd, Operation::Read);
                 return;
             }
-            TOGGLE => self.config.enabled = !self.config.enabled,
-            STATIC => self.config.mode = LightingMode::Static,
-            BREATHING => self.config.mode = LightingMode::Breathing,
-            RAINBOW => self.config.mode = LightingMode::Rainbow,
-            SLOWER => self.config.speed = self.config.speed.saturating_sub(1).max(1),
-            FASTER => self.config.speed = (self.config.speed + 1).min(10),
+            TOGGLE => {
+                if self.quick_switch {
+                    self.begin(hwnd, Operation::Toggle(self.actual_enabled != Some(true)));
+                } else {
+                    self.config.enabled = !self.config.enabled;
+                    self.dirty = true;
+                    self.error = false;
+                    self.status = if self.config.enabled {
+                        "开灯草稿尚未发送；点击“应用灯效”生效。更新 G2 Pro 插件可使用即时开关。"
+                    } else {
+                        "关灯草稿尚未发送；点击“应用灯效”生效。更新 G2 Pro 插件可使用即时开关。"
+                    }
+                    .into();
+                    self.update_buttons();
+                    RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
+                }
+                return;
+            }
+            STATIC | BREATHING | RAINBOW => {
+                self.config.mode = match id {
+                    BREATHING => LightingMode::Breathing,
+                    RAINBOW => LightingMode::Rainbow,
+                    _ => LightingMode::Static,
+                };
+                self.config.enabled = true;
+            }
+            SLOWER | FASTER => {
+                if self.config.mode == LightingMode::Static {
+                    return;
+                }
+                self.config.speed = if id == SLOWER {
+                    self.config.speed.saturating_sub(1).max(1)
+                } else {
+                    self.config.speed.saturating_add(1).min(10)
+                };
+                self.config.enabled = true;
+            }
             COLOR => {
                 let [r, g, b] = self.config.rgb;
                 let mut choose: CHOOSECOLORW = zeroed();
@@ -153,19 +239,40 @@ impl Dialog {
                     (choose.rgbResult >> 8) as u8,
                     (choose.rgbResult >> 16) as u8,
                 ];
+                if self.config.mode == LightingMode::Rainbow {
+                    self.config.mode = LightingMode::Static;
+                }
+                self.config.enabled = true;
             }
             _ => return,
         }
         self.error = false;
-        self.status = "设置尚未发送，点击“应用灯效”生效。".into();
+        self.dirty = true;
+        self.status = if self.config.enabled {
+            if id == COLOR {
+                "单色草稿准备开启灯光，尚未发送；点击“应用灯效”提交。"
+            } else {
+                "草稿准备开启灯光，尚未发送；点击“应用灯效”提交。"
+            }
+        } else {
+            "草稿准备关闭灯光，尚未发送；点击“应用灯效”只提交关闭命令。"
+        }
+        .into();
+        self.update_buttons();
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     fn selected(&self, id: usize) -> bool {
         match id {
-            TOGGLE => self.config.enabled,
-            STATIC => self.config.mode == LightingMode::Static,
-            BREATHING => self.config.mode == LightingMode::Breathing,
-            RAINBOW => self.config.mode == LightingMode::Rainbow,
+            TOGGLE => {
+                if self.quick_switch {
+                    self.actual_enabled == Some(true)
+                } else {
+                    self.config.enabled
+                }
+            }
+            STATIC => self.config.enabled && self.config.mode == LightingMode::Static,
+            BREATHING => self.config.enabled && self.config.mode == LightingMode::Breathing,
+            RAINBOW => self.config.enabled && self.config.mode == LightingMode::Rainbow,
             _ => false,
         }
     }
@@ -184,7 +291,11 @@ impl Dialog {
             DT_LEFT,
         );
         canvas.text(
-            "自定义耳罩光效 · 独立 HID 控制",
+            if self.quick_switch {
+                "开关点击即提交；模式、颜色和速度需点击应用"
+            } else {
+                "开关与灯效先编辑草稿，点击应用生效；更新插件可即时切换"
+            },
             R::new(28, 65, 700, 24),
             14,
             400,
@@ -260,7 +371,11 @@ impl Dialog {
             Some(paint::BORDER),
         );
         canvas.text(
-            "灯光开关",
+            if self.quick_switch {
+                "灯光开关 · 即时切换"
+            } else {
+                "灯光开关 · 草稿"
+            },
             R::new(344, 133, 250, 24),
             16,
             600,
@@ -294,9 +409,9 @@ impl Dialog {
         );
         canvas.text(
             if self.config.mode == LightingMode::Rainbow {
-                "彩虹使用多色渐变，单色选择保留供其他模式使用"
+                "选择单色将切换为常亮，并准备开启；点击应用才发送。"
             } else {
-                "常亮和呼吸模式使用所选 RGB 颜色"
+                "选模式或颜色会准备开启，点击“应用灯效”才发送。"
             },
             R::new(344, 326, 480, 24),
             11,
@@ -305,7 +420,11 @@ impl Dialog {
             DT_LEFT,
         );
         canvas.text(
-            "速度",
+            if self.config.mode == LightingMode::Static {
+                "速度（常亮不适用）"
+            } else {
+                "速度"
+            },
             R::new(344, 376, 160, 24),
             14,
             600,
@@ -317,12 +436,16 @@ impl Dialog {
             R::new(600, 376, 100, 24),
             16,
             500,
-            paint::TEXT,
+            if self.config.mode == LightingMode::Static {
+                paint::DIM
+            } else {
+                paint::TEXT
+            },
             DT_CENTER,
         );
         let actual = match self.actual_enabled {
-            Some(true) => "上次设备实读：灯光开启",
-            Some(false) => "上次设备实读：灯光关闭",
+            Some(true) => "上次设备返回：开关为开启",
+            Some(false) => "上次设备返回：开关为关闭",
             None => "尚未读到设备灯光开关",
         };
         canvas.text(
@@ -338,7 +461,17 @@ impl Dialog {
             DT_LEFT,
         );
         canvas.text(
-            if self.saved {
+            if self.actual_enabled.is_none() {
+                if self.quick_switch {
+                    "未确认开关；可重新读取（放弃草稿），或“尝试开灯”（保留草稿）。"
+                } else {
+                    "未确认开关；重新读取将放弃草稿。更新 G2 Pro 插件后可使用即时开关。"
+                }
+            } else if self.dirty && self.config.enabled && self.actual_enabled == Some(false) {
+                "设备当前关闭；灯效草稿尚未提交，点击“应用并开灯”将开启并发送草稿。"
+            } else if self.dirty {
+                "当前为未应用草稿；模式、颜色和速度不能完整读回，请观察实际灯效。"
+            } else if self.saved {
                 "模式、颜色、速度来自本工具保存配置；外部驱动更改不会自动同步。"
             } else {
                 "首次打开：模式与颜色为建议初始值，不代表设备当前配置。"
@@ -418,11 +551,23 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 }),
             );
             let text = if id == TOGGLE {
-                if dialog.config.enabled {
-                    "开启".into()
+                if !dialog.quick_switch {
+                    if dialog.config.enabled {
+                        "草稿：开启".into()
+                    } else {
+                        "草稿：关闭".into()
+                    }
                 } else {
-                    "关闭".into()
+                    match dialog.actual_enabled {
+                        Some(true) => "已开启".into(),
+                        Some(false) => "已关闭".into(),
+                        None => "尝试开灯".into(),
+                    }
                 }
+            } else if id == APPLY && dialog.config.enabled && dialog.actual_enabled == Some(false) {
+                "应用并开灯".into()
+            } else if id == REFRESH && dialog.dirty {
+                "放弃并重读".into()
             } else {
                 let n = GetWindowTextLengthW(draw.hwndItem).max(0) as usize;
                 let mut buffer = vec![0; n + 1];
@@ -505,13 +650,24 @@ pub unsafe fn open(owner: HWND) {
         config: LightingConfig::default(),
         actual_enabled: None,
         saved: false,
+        dirty: false,
+        quick_switch: crate::plugin_manager::installed("hecate-g2-pro")
+            .ok()
+            .flatten()
+            .is_some_and(|driver| {
+                driver
+                    .manifest
+                    .capabilities
+                    .iter()
+                    .any(|c| c == "lighting-switch")
+            }),
         buttons: vec![],
         font,
         brush,
         dpi,
         status: "正在准备灯光控制…".into(),
         error: false,
-        writing: false,
+        operation: Operation::Read,
         pending: None,
         custom_colors: [0; 16],
     });
@@ -579,7 +735,7 @@ pub unsafe fn open(owner: HWND) {
     }
     EnableWindow(owner, 0);
     SetTimer(hwnd, 1, 80, None);
-    dialog.begin(hwnd, false);
+    dialog.begin(hwnd, Operation::Read);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     let mut message: MSG = zeroed();
@@ -600,4 +756,102 @@ pub unsafe fn open(owner: HWND) {
     SetActiveWindow(owner);
     DeleteObject(dialog.font);
     DeleteObject(dialog.brush);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dialog() -> Dialog {
+        Dialog {
+            config: LightingConfig::default(),
+            actual_enabled: Some(false),
+            saved: false,
+            dirty: false,
+            quick_switch: true,
+            buttons: vec![],
+            font: null_mut(),
+            brush: null_mut(),
+            dpi: 96,
+            status: String::new(),
+            error: false,
+            operation: Operation::Read,
+            pending: None,
+            custom_colors: [0; 16],
+        }
+    }
+
+    #[test]
+    fn hardware_off_and_failed_read_leave_recovery_available() {
+        let mut dialog = dialog();
+        assert!(dialog.available(APPLY), "hardware off must allow Apply");
+        dialog.quick_switch = false;
+        assert!(
+            dialog.available(TOGGLE),
+            "legacy plugins retain draft toggle"
+        );
+        assert!(
+            dialog.selected(TOGGLE),
+            "legacy selection follows its on draft"
+        );
+        dialog.config.enabled = false;
+        assert!(!dialog.selected(TOGGLE));
+        assert!(dialog.available(APPLY), "legacy plugins retain Apply");
+        dialog.quick_switch = true;
+
+        let (_tx, rx) = mpsc::channel();
+        dialog.pending = Some(rx);
+        for id in [APPLY, TOGGLE, REFRESH, CLOSE] {
+            assert!(!dialog.available(id), "pending operation must serialize UI");
+        }
+        dialog.complete(Err("模拟读取失败".into()));
+        assert!(dialog.pending.is_none());
+        assert!(dialog.error);
+        assert_eq!(dialog.actual_enabled, None, "failure is not confirmed off");
+        assert!(!dialog.available(APPLY));
+        assert!(dialog.available(REFRESH));
+        assert!(
+            dialog.available(TOGGLE),
+            "new driver can attempt recovery on"
+        );
+        assert!(!dialog.selected(TOGGLE));
+    }
+
+    #[test]
+    fn immediate_toggle_preserves_unsent_draft_without_saved_config() {
+        let mut dialog = dialog();
+        let draft = LightingConfig {
+            enabled: true,
+            mode: LightingMode::Breathing,
+            rgb: [123, 45, 67],
+            speed: 7,
+        };
+        dialog.config = draft.clone();
+        dialog.dirty = true;
+        dialog.operation = Operation::Toggle(false);
+        dialog.complete(Ok(LightingState {
+            enabled: false,
+            saved: None,
+            notice: "首次读取，没有本工具保存的模式".into(),
+        }));
+        assert_eq!(dialog.config, draft);
+        assert!(dialog.dirty);
+        assert!(!dialog.error);
+        assert_eq!(dialog.actual_enabled, Some(false));
+        assert!(dialog.available(APPLY));
+        assert!(!dialog.selected(TOGGLE));
+
+        dialog.operation = Operation::Toggle(true);
+        dialog.complete(Ok(LightingState {
+            enabled: false,
+            saved: None,
+            notice: String::new(),
+        }));
+        assert!(
+            dialog.error,
+            "a mismatched switch reply cannot report success"
+        );
+        assert_eq!(dialog.actual_enabled, Some(false));
+        assert_eq!(dialog.config, draft);
+    }
 }

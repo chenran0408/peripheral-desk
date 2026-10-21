@@ -8,7 +8,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::devices::{Adapter, REGISTRY};
+#[cfg(all(test, feature = "driver-runtime"))]
+use crate::devices::Adapter;
+use crate::devices::REGISTRY;
 pub use crate::model::{Action, State};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -57,20 +59,7 @@ impl Snapshot {
             .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
         let saved = std::mem::take(&mut s.devices);
-        s.devices = REGISTRY
-            .iter()
-            .enumerate()
-            .map(|(index, spec)| {
-                let mut state = saved
-                    .iter()
-                    .find(|d| d.key == spec.key)
-                    .cloned()
-                    .or_else(|| saved.get(index).filter(|d| d.key.is_empty()).cloned())
-                    .unwrap_or_default();
-                state.key = spec.key.into();
-                state
-            })
-            .collect();
+        s.devices = states_for_registry(&saved, &REGISTRY);
         s.interval = s.interval.clamp(30, 1800);
         s.threshold = s.threshold.clamp(5, 50);
         for d in &mut s.devices {
@@ -117,7 +106,27 @@ impl Snapshot {
 }
 
 pub fn matches(i: &Interface, model: usize) -> bool {
-    REGISTRY[model].matches(i)
+    REGISTRY.get(model).is_some_and(|spec| spec.matches(i))
+}
+
+fn states_for_registry(saved: &[State], registry: &[crate::devices::DeviceSpec]) -> Vec<State> {
+    let mut states = Vec::with_capacity(registry.len());
+    for spec in registry {
+        let keyed = saved.iter().find(|state| state.key == spec.key).cloned();
+        // Positional migration is meaningful only for the fixed legacy SDK
+        // roots. A desktop user's plugin set may have any size or order.
+        #[cfg(feature = "driver-runtime")]
+        let keyed = keyed.or_else(|| {
+            saved
+                .get(states.len())
+                .filter(|state| state.key.is_empty())
+                .cloned()
+        });
+        let mut state = keyed.unwrap_or_default();
+        state.key = spec.key.into();
+        states.push(state);
+    }
+    states
 }
 
 pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapshot, Result<()>) {
@@ -155,6 +164,7 @@ where
     F: FnMut(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>>,
 {
     let mut next = previous.clone();
+    next.devices = states_for_registry(&previous.devices, &REGISTRY);
     if action.is_some_and(|(model, _)| model >= REGISTRY.len())
         || scope.is_some_and(|model| model >= REGISTRY.len())
     {
@@ -178,7 +188,7 @@ where
         }
         let mut candidates: Vec<_> = interfaces.iter().filter(|i| matches(i, model)).collect();
         candidates.sort_by_key(|i| {
-            if spec.adapter == Adapter::Razer && i.pid == 0xb6 {
+            if spec.key == "razer-deathadder-v3-pro" && i.pid == 0xb6 {
                 0
             } else {
                 1
@@ -240,6 +250,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[cfg(not(feature = "driver-runtime"))]
+    fn installed_registry_controls_cached_state_identity_without_positional_defaults() {
+        let installed = crate::devices::host_registry_from_installed([(
+            "0.4.2".into(),
+            serde_json::json!({"key":"mchose-a5-ultra","name":"A5","brand":"MCHOSE","kind":"mouse","matches":[{"vid":14391,"pid":4108}]}),
+        )]);
+        let saved = vec![
+            State {
+                percent: Some(99),
+                ..State::default()
+            },
+            State {
+                key: "mchose-a5-ultra".into(),
+                percent: Some(78),
+                ..State::default()
+            },
+        ];
+        assert!(states_for_registry(&saved, &[]).is_empty());
+        let selected = states_for_registry(&saved, &installed);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].key, "mchose-a5-ultra");
+        assert_eq!(selected[0].percent, Some(78));
+        let unkeyed_only = states_for_registry(&saved[..1], &installed);
+        assert_eq!(
+            unkeyed_only[0].percent, None,
+            "never reuse another model's old positional cache"
+        );
+    }
     #[cfg(feature = "driver-runtime")]
     use crate::adapters::mouse::Channel;
     #[cfg(feature = "driver-runtime")]
