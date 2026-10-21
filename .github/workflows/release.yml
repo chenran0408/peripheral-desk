@@ -1,0 +1,123 @@
+name: Publish main application
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag at the current reviewed main commit
+        required: true
+        default: v0.4.0
+permissions:
+  contents: read
+jobs:
+  package:
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Require a version tag on reviewed main
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:[-.][a-zA-Z0-9.-]+)?$') { throw "Invalid release tag" }
+          git fetch origin main --tags
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch reviewed main" }
+          git rev-parse --verify "$env:RELEASE_TAG^{commit}"
+          if ($LASTEXITCODE -ne 0) { throw "Version tag does not exist" }
+          git merge-base --is-ancestor $env:RELEASE_TAG origin/main
+          if ($LASTEXITCODE -ne 0) { throw "Version tag must belong to main" }
+          if ((git rev-parse "$env:RELEASE_TAG^{commit}") -ne (git rev-parse HEAD)) { throw "Build must exactly match the version tag" }
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if ($env:RELEASE_TAG -ne "v$version") { throw "Cargo version must match the release tag" }
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build the desktop core without bundled device implementations
+        shell: pwsh
+        run: cargo build --release --locked --no-default-features --features desktop
+      - name: Check the update handshake without accessing devices
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force work | Out-Null
+          $process = Start-Process -FilePath target/release/peripheral-desk.exe -ArgumentList '--self-check' -WindowStyle Hidden -RedirectStandardOutput work/self-check.json -PassThru
+          if (-not $process.WaitForExit(10000)) { $process.Kill(); $process.WaitForExit(); throw "Core self-check timed out" }
+          if ($process.ExitCode -ne 0) { throw "Core self-check failed" }
+          $check = Get-Content work/self-check.json -Raw | ConvertFrom-Json
+          if ($check.appVersion -ne $env:APP_VERSION -or $check.abi -ne 1 -or $check.updateProtocol -ne 1) { throw "Core update handshake mismatch" }
+      - name: Create the standard package and verify its contents
+        shell: pwsh
+        run: |
+          ./scripts/package.ps1
+          $archive = "dist/PeripheralDesk-$env:APP_VERSION-windows-x64.zip"
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ((Get-Content dist/SHA256SUMS.txt -Raw).Trim() -ne "$hash  $(Split-Path -Leaf $archive)") { throw "Package checksum mismatch" }
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $archive))
+          try {
+            $names = @($zip.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+            foreach ($required in @('PeripheralDesk.exe','README.md','CHANGELOG.md','NOTICE','LICENSE','SOURCES.md')) {
+              if ($required -notin $names) { throw "Missing package file: $required" }
+            }
+            foreach ($name in $names) {
+              if ($name -match '(?i)\.(dll|png|sys)$' -or $name -match '(?i)(^|/)(data|assets|src)/' -or ($name -match '(?i)\.exe$' -and $name -ne 'PeripheralDesk.exe')) { throw "Unexpected device or user payload: $name" }
+            }
+            $stream = $zip.GetEntry('PeripheralDesk.exe').Open()
+            try { $exeHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() } finally { $stream.Dispose() }
+            if ($exeHash -ne (Get-FileHash target/release/peripheral-desk.exe -Algorithm SHA256).Hash.ToLowerInvariant()) { throw "Packaged EXE differs from checked build" }
+          } finally { $zip.Dispose() }
+          $text = Get-Content CHANGELOG.md -Raw
+          $section = [regex]::Match($text, '(?ms)^##\s+' + [regex]::Escape($env:APP_VERSION) + '\s*\r?\n(.*?)(?=^##\s|\z)')
+          if (-not $section.Success) { throw "Add concise user release notes for $env:APP_VERSION to CHANGELOG.md" }
+          $section.Groups[1].Value.Trim() | Set-Content work/release-notes.md -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PeripheralDesk-reviewed-release
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            work/release-notes.md
+          if-no-files-found: error
+  publish:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    concurrency:
+      group: main-application-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PeripheralDesk-reviewed-release
+          path: release-files
+      - name: Upload a new immutable version release
+        shell: pwsh
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY
+          if ($LASTEXITCODE -eq 0) { throw "Version release already exists; publish fixes under a new reviewed tag" }
+          $zip = @(Get-ChildItem release-files/dist -Filter *.zip -File)
+          if ($zip.Count -ne 1) { throw "Expected exactly one core ZIP" }
+          $extra = @()
+          if ($env:RELEASE_TAG.Contains('-')) { $extra = @('--prerelease') }
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:RELEASE_TAG --notes-file release-files/work/release-notes.md @extra $zip[0].FullName release-files/dist/SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Upload failed; inspect the draft before retrying" }
+          gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
+          if ($LASTEXITCODE -ne 0) { throw "Publication failed" }
+      - name: Verify the public download matches the reviewed package
+        shell: pwsh
+        run: |
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir downloaded --pattern '*.zip' --pattern SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw "Public release download failed" }
+          $zip = @(Get-ChildItem downloaded -Filter *.zip -File)
+          if ($zip.Count -ne 1) { throw "Expected exactly one published core ZIP" }
+          $hash = (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          $expected = (Get-Content release-files/dist/SHA256SUMS.txt -Raw).Trim()
+          if ((Get-Content downloaded/SHA256SUMS.txt -Raw).Trim() -ne $expected -or "$hash  $($zip[0].Name)" -ne $expected) { throw "Public download checksum mismatch" }
+
