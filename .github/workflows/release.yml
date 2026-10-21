@@ -36,6 +36,21 @@ jobs:
           if ($env:RELEASE_TAG -ne "v$version") { throw "Cargo version must match the release tag" }
           "APP_VERSION=$version" >> $env:GITHUB_ENV
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Require formatting, static checks and software tests before packaging
+        shell: pwsh
+        run: |
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { throw "Formatting check failed" }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Desktop static checks failed" }
+          cargo test --locked
+          if ($LASTEXITCODE -ne 0) { throw "Desktop software tests failed" }
+          cargo clippy --locked --no-default-features --features driver-runtime --lib -- -D warnings
+          if ($LASTEXITCODE -ne 0) { throw "Driver SDK static checks failed" }
+          cargo test --locked --no-default-features --features driver-runtime --lib
+          if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
         run: cargo build --release --locked --no-default-features --features desktop
