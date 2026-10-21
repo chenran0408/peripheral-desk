@@ -471,56 +471,6 @@ fn backup(id: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod backup_tests {
-    use super::*;
-    #[test]
-    fn nested_unknown_device_files_are_backed_up_without_changing_source() {
-        let base = std::env::var_os("PD_UPDATE_TEST_ROOT")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir);
-        let root = base.join(format!(
-            "plugin-backup-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join("devices/example-device");
-        let target = root.join("backup");
-        std::fs::create_dir_all(source.join("profiles/custom/empty")).unwrap();
-        std::fs::create_dir_all(&target).unwrap();
-        let unknown = [0u8, 255, 17, 128, 0];
-        std::fs::write(source.join("settings.json"), b"{\"future\":true}").unwrap();
-        std::fs::write(source.join("profiles/custom/unknown.bin"), unknown).unwrap();
-        backup_device_tree(&source, &target.join("device")).unwrap();
-        assert_eq!(
-            std::fs::read(target.join("device/settings.json")).unwrap(),
-            b"{\"future\":true}"
-        );
-        assert_eq!(
-            std::fs::read(target.join("device/profiles/custom/unknown.bin")).unwrap(),
-            unknown
-        );
-        assert!(target.join("device/profiles/custom/empty").is_dir());
-        assert_eq!(
-            std::fs::read(source.join("profiles/custom/unknown.bin")).unwrap(),
-            unknown
-        );
-        assert!(source.join("settings.json").is_file());
-        assert!(backup_device_tree(&source, &source).is_err());
-        assert!(backup_device_tree(&source, &source.join("recursive-backup")).is_err());
-        // The fixture root is a newly created direct child of the named base.
-        let canonical_root = std::fs::canonicalize(&root).unwrap();
-        assert!(canonical_root.starts_with(std::fs::canonicalize(&base).unwrap()));
-        assert_eq!(
-            canonical_root.parent(),
-            Some(std::fs::canonicalize(&base).unwrap().as_path())
-        );
-        std::fs::remove_dir_all(canonical_root).unwrap();
-    }
-}
 pub fn install(id: &str) -> Result<InstalledDriver> {
     let p = catalog()?
         .into_iter()
@@ -1238,4 +1188,55 @@ pub fn check_core_compatibility_at(app_root: &Path, candidate: &str) -> Result<(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+    #[test]
+    fn nested_unknown_device_files_are_backed_up_without_changing_source() {
+        let base = std::env::var_os("PD_UPDATE_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let root = base.join(format!(
+            "plugin-backup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source = root.join("devices/example-device");
+        let target = root.join("backup");
+        std::fs::create_dir_all(source.join("profiles/custom/empty")).unwrap();
+        std::fs::create_dir_all(&target).unwrap();
+        let unknown = [0u8, 255, 17, 128, 0];
+        std::fs::write(source.join("settings.json"), b"{\"future\":true}").unwrap();
+        std::fs::write(source.join("profiles/custom/unknown.bin"), unknown).unwrap();
+        backup_device_tree(&source, &target.join("device")).unwrap();
+        assert_eq!(
+            std::fs::read(target.join("device/settings.json")).unwrap(),
+            b"{\"future\":true}"
+        );
+        assert_eq!(
+            std::fs::read(target.join("device/profiles/custom/unknown.bin")).unwrap(),
+            unknown
+        );
+        assert!(target.join("device/profiles/custom/empty").is_dir());
+        assert_eq!(
+            std::fs::read(source.join("profiles/custom/unknown.bin")).unwrap(),
+            unknown
+        );
+        assert!(source.join("settings.json").is_file());
+        assert!(backup_device_tree(&source, &source).is_err());
+        assert!(backup_device_tree(&source, &source.join("recursive-backup")).is_err());
+        // The fixture root is a newly created direct child of the named base.
+        let canonical_root = std::fs::canonicalize(&root).unwrap();
+        assert!(canonical_root.starts_with(std::fs::canonicalize(&base).unwrap()));
+        assert_eq!(
+            canonical_root.parent(),
+            Some(std::fs::canonicalize(&base).unwrap().as_path())
+        );
+        std::fs::remove_dir_all(canonical_root).unwrap();
+    }
 }
