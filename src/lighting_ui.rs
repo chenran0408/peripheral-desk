@@ -686,7 +686,7 @@ pub unsafe fn open(owner: HWND) {
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class.as_ptr(),
-        wide("G2 Pro 灯光 · Peripheral Desk").as_ptr(),
+        wide("G2 Pro 灯光 · 外设盒").as_ptr(),
         style,
         owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
         owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),

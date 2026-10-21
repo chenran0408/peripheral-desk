@@ -422,7 +422,7 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class.as_ptr(),
-        wide("配置与诊断 · Peripheral Desk").as_ptr(),
+        wide("配置与诊断 · 外设盒").as_ptr(),
         style | WS_CLIPCHILDREN,
         owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
         owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),

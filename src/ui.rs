@@ -123,7 +123,7 @@ pub fn message(text: &str) {
         MessageBoxW(
             null_mut(),
             wide(text).as_ptr(),
-            wide("Peripheral Desk").as_ptr(),
+            wide("外设盒").as_ptr(),
             MB_OK | MB_ICONINFORMATION,
         );
     }
@@ -207,7 +207,7 @@ pub fn run(hidden: bool, battery: bool) {
         let hwnd = CreateWindowExW(
             0,
             wide("PeripheralDeskWindow").as_ptr(),
-            wide("Peripheral Desk · 外设控制中心").as_ptr(),
+            wide("外设盒 · 外设控制中心").as_ptr(),
             WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -449,6 +449,18 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 WM_LBUTTONUP => a.show_battery(hwnd),
                 WM_RBUTTONUP => a.menu(hwnd),
                 _ => {}
+            }
+            0
+        }
+        WM_QUERYENDSESSION => i32::from(
+            !a.modal_open
+                && a.inflight.is_none()
+                && a.profile_notice.is_none()
+                && a.queued.is_empty(),
+        ) as isize,
+        WM_ENDSESSION => {
+            if w != 0 {
+                DestroyWindow(hwnd);
             }
             0
         }
@@ -1149,8 +1161,12 @@ impl App {
                     return;
                 }
                 self.modal_open = true;
-                crate::plugin_ui::open(hwnd);
+                let restarting = crate::plugin_ui::open(hwnd);
                 self.modal_open = false;
+                if restarting {
+                    DestroyWindow(hwnd);
+                    return;
+                }
                 self.images = Images::load();
                 self.layout(hwnd);
                 self.begin(hwnd, None);
@@ -1297,7 +1313,7 @@ impl App {
             if action.is_some() {
                 "正在保存到设备并读回确认…"
             } else if REGISTRY.is_empty() {
-                "打开驱动仓库，添加所需设备驱动；安装后请重启主程序"
+                "打开驱动仓库，添加所需设备驱动；安装后自动重启生效"
             } else {
                 "正在读取设备…"
             },
@@ -1398,7 +1414,7 @@ impl App {
                     } else if writing {
                         "设置已保存，读回确认成功".into()
                     } else if REGISTRY.is_empty() {
-                        "打开驱动仓库添加设备；新驱动安装后请重启主程序".into()
+                        "打开驱动仓库添加设备；新驱动安装后自动重启生效".into()
                     } else {
                         format!("{count} 台设备在线 · 状态已更新")
                     },
@@ -1835,7 +1851,7 @@ impl App {
         );
         c.text(
             if self.page == Page::Home {
-                "PERIPHERAL DESK  /  外设控制中心"
+                "外设盒  /  外设控制中心"
             } else {
                 ""
             },
@@ -2741,7 +2757,7 @@ impl App {
         copy_wide(
             &mut n.szTip,
             if REGISTRY.is_empty() {
-                "Peripheral Desk · 到主页面添加设备驱动"
+                "外设盒 · 到主页面添加设备驱动"
             } else {
                 &tip
             },
@@ -2814,7 +2830,7 @@ impl App {
             self.flyout = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 wide("PeripheralDeskBattery").as_ptr(),
-                wide("Peripheral Desk · 设备电量").as_ptr(),
+                wide("外设盒 · 设备电量").as_ptr(),
                 WS_POPUP | WS_BORDER,
                 0,
                 0,
@@ -2892,14 +2908,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                 let height = 112 + REGISTRY.len().max(1) as i32 * 66;
                 c.rect(R::new(0, 0, 350, height), PANEL);
                 c.text("设备电量", R::new(21, 16, 240, 32), 17, 600, TEXT, DT_LEFT);
-                c.text(
-                    "PERIPHERAL DESK",
-                    R::new(21, 44, 280, 20),
-                    10,
-                    400,
-                    DIM,
-                    DT_LEFT,
-                );
+                c.text("外设盒", R::new(21, 44, 280, 20), 10, 400, DIM, DT_LEFT);
                 if REGISTRY.is_empty() {
                     c.text(
                         "未安装或尚未加载设备驱动",
@@ -2910,7 +2919,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                         DT_LEFT,
                     );
                     c.text(
-                        "到主页面添加 · 安装后重启主程序",
+                        "到主页面添加 · 安装后自动重启生效",
                         R::new(21, 105, 308, 22),
                         11,
                         400,

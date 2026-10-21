@@ -16,6 +16,17 @@ mod update_ui;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--restart-after") {
+        let result = args
+            .get(2)
+            .and_then(|v| v.parse::<u32>().ok())
+            .ok_or_else(|| "缺少重启来源进程".to_string())
+            .and_then(peripheral_desk::core_update::wait_for_restart_parent);
+        if let Err(error) = result {
+            ui::message(&format!("自动重启未完成：{error}"));
+            return;
+        }
+    }
     if args.get(1).is_some_and(|a| a == "--finish-core-update") {
         let result = args
             .get(2)

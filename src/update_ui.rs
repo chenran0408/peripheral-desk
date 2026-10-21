@@ -392,7 +392,11 @@ impl Updater {
         }
         match id {
             PLUGINS => {
-                crate::plugin_ui::open_updates(hwnd);
+                if crate::plugin_ui::open_updates(hwnd) {
+                    self.restart = true;
+                    DestroyWindow(hwnd);
+                    return;
+                }
                 let channel = if SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0) == 1 {
                     "preview"
                 } else {
@@ -721,7 +725,7 @@ pub unsafe fn open(owner: HWND) -> bool {
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class_name.as_ptr(),
-        wide("Peripheral Desk · 检查更新").as_ptr(),
+        wide("外设盒 · 检查更新").as_ptr(),
         style,
         x,
         y,

@@ -987,6 +987,80 @@ fn promote_backup(root: &Path, job_dir: &Path, job: &Job) -> Result<Option<PathB
     Ok(previous)
 }
 
+/// Start a successor which waits for this process to fully exit before opening UI.
+/// Used after plugin changes, because the installed device registry is process-local.
+pub fn launch_restart() -> Result<()> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let mut child = Command::new(&exe)
+        .arg("--restart-after")
+        .arg(std::process::id().to_string())
+        .current_dir(exe.parent().ok_or("主程序目录无效")?)
+        .creation_flags(0x08000000)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("启动重启进程失败：{e}"))?;
+    let mut stdout = child.stdout.take().ok_or("重启握手通道不可用")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = thread::spawn(move || {
+        let mut ready = [0u8];
+        let result = stdout
+            .read_exact(&mut ready)
+            .map_err(|e| e.to_string())
+            .and_then(|()| {
+                if ready == *b"R" {
+                    Ok(())
+                } else {
+                    Err("重启握手不匹配".into())
+                }
+            });
+        let _ = tx.send(result);
+    });
+    let result = rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|e| format!("重启准备失败：{e}"))
+        .and_then(|ready| ready);
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    let _ = reader.join();
+    result?;
+    Ok(())
+}
+/// Called before loading device plugins or taking the single-instance mutex.
+pub fn wait_for_restart_parent(pid: u32) -> Result<()> {
+    if parent_pid()? != pid {
+        return Err("重启来源进程不匹配".into());
+    }
+    let (parent_image, _) = process_identity(pid)?;
+    let exe = canonical(&std::env::current_exe().map_err(|e| e.to_string())?)?;
+    if !same(&parent_image, &exe) {
+        return Err("重启来源不是同一主程序".into());
+    }
+    unsafe {
+        let parent = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if parent.is_null() {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        use std::io::Write;
+        if let Err(error) = std::io::stdout()
+            .write_all(b"R")
+            .and_then(|()| std::io::stdout().flush())
+        {
+            CloseHandle(parent);
+            return Err(format!("重启握手失败：{error}"));
+        }
+        let wait = WaitForSingleObject(parent, 420000);
+        CloseHandle(parent);
+        if wait != WAIT_OBJECT_0 {
+            return Err("原程序未能及时退出，请手动重新打开".into());
+        }
+    }
+    Ok(())
+}
+
 fn restart(root: &Path, target: &str) -> Result<()> {
     Command::new(root.join(target))
         .current_dir(root)
@@ -1346,5 +1420,90 @@ mod package_contract_tests {
         let documents = extract(&info, &bytes, &root.join("staging")).unwrap();
         assert_eq!(documents.len(), files.len() - 1);
         assert_eq!(fs::read(root.join("data/unknown.bin")).unwrap(), b"keep");
+    }
+}
+
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    #[test]
+    fn successor_waits_for_parent_exit() {
+        let root = std::env::var_os("PD_UPDATE_TEST_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("restart-{}", stamp().unwrap()));
+        fs::create_dir_all(&root).unwrap();
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "core_update::restart_tests::parent_probe",
+                "--nocapture",
+            ])
+            .env("PD_RESTART_TEST_DIR", &root)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = parent.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            if Instant::now() > deadline {
+                let _ = parent.kill();
+                panic!("Restart probe timed out");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !root.join("completed").is_file() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(fs::read(root.join("completed")).unwrap(), b"parent-exited");
+    }
+    #[test]
+    #[ignore = "subprocess fixture invoked by successor_waits_for_parent_exit"]
+    // The fixture must exit before its successor; waiting here would deadlock.
+    #[allow(clippy::zombie_processes)]
+    fn parent_probe() {
+        let root = PathBuf::from(std::env::var_os("PD_RESTART_TEST_DIR").unwrap());
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "core_update::restart_tests::child_probe",
+                "--nocapture",
+            ])
+            .env("PD_RESTART_PARENT_PID", std::process::id().to_string())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let mut output = child.stdout.take().unwrap();
+        let mut byte = [0u8];
+        loop {
+            output.read_exact(&mut byte).unwrap();
+            if byte == *b"R" {
+                break;
+            }
+        }
+        assert!(
+            !root.join("completed").exists(),
+            "Successor must not initialize before old process exits"
+        );
+    }
+    #[test]
+    #[ignore = "subprocess fixture invoked by parent_probe"]
+    fn child_probe() {
+        let root = PathBuf::from(std::env::var_os("PD_RESTART_TEST_DIR").unwrap());
+        let pid = std::env::var("PD_RESTART_PARENT_PID")
+            .unwrap()
+            .parse()
+            .unwrap();
+        wait_for_restart_parent(pid).unwrap();
+        fs::write(root.join("completed"), b"parent-exited").unwrap();
+        std::process::exit(0);
     }
 }

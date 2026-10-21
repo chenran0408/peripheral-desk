@@ -43,6 +43,7 @@ const SELECT_NONE: i32 = 112;
 const SELECT_DETECTED: i32 = 113;
 const PREVIEW: i32 = 114;
 const SELECT_UPDATES: i32 = 115;
+const RESTART: i32 = 116;
 
 #[derive(Default)]
 enum Installation {
@@ -143,7 +144,7 @@ impl BatchResult {
             .count();
         let failed = self.entries.len() - installed - skipped;
         let mut lines = vec![format!(
-            "安装完成：成功 {installed} 项，失败 {failed} 项，跳过已同版 {skipped} 项。新设备安装后请重启主程序。"
+            "安装完成：成功 {installed} 项，失败 {failed} 项，跳过已同版 {skipped} 项。全部成功后将自动重启生效。"
         )];
         for (target, result) in &self.entries {
             lines.push(match result {
@@ -181,10 +182,12 @@ fn install_batch(
     }
 }
 struct WorkResult {
+    changed: bool,
     inventory: Result<Inventory, String>,
     batch: Option<BatchResult>,
 }
 enum WorkEvent {
+    RestartReady(Result<(), String>),
     Progress(String),
     Finished(WorkResult),
 }
@@ -208,6 +211,8 @@ struct Manager {
     dialog_open: bool,
     changing_channel: bool,
     select_updates_after_refresh: bool,
+    changed: bool,
+    restarting: bool,
 }
 impl Drop for Manager {
     fn drop(&mut self) {
@@ -499,6 +504,14 @@ impl Manager {
         );
         self.add(
             hwnd,
+            RESTART,
+            "BUTTON",
+            "重启生效",
+            R::new(876, 532, 120, 38),
+            BS_OWNERDRAW as u32,
+        );
+        self.add(
+            hwnd,
             STATUS,
             "EDIT",
             &self.status.clone(),
@@ -537,6 +550,7 @@ impl Manager {
     }
     unsafe fn availability(&self) {
         let ready = self.pending.is_none() && !self.dialog_open;
+        EnableWindow(self.child(RESTART), (ready && self.changed) as i32);
         EnableWindow(self.child(REFRESH), ready as i32);
         EnableWindow(self.child(LIST), ready as i32);
         EnableWindow(self.child(OFFLINE), ready as i32);
@@ -586,15 +600,15 @@ impl Manager {
             Operation::Refresh => ("正在检查驱动更新并刷新目录…", "驱动更新检查完成。"),
             Operation::Install(_) => (
                 "正在逐项下载并校验已选驱动，请等待完成…",
-                "批量安装结束，请查看各项结果。新增设备支持请重启主程序。",
+                "批量安装结束，请查看各项结果。全部成功后将自动重启生效。",
             ),
             Operation::Remove(_) => (
                 "正在卸载所选驱动，保留用户配置…",
-                "所选驱动已卸载，配置已保留。关闭窗口后刷新设备；重启可完全释放已加载的驱动。",
+                "所选驱动已卸载，配置已保留。完成后将自动重启生效。",
             ),
             Operation::Offline(_) => (
                 "正在校验离线驱动包并安装…",
-                "离线驱动已安装。已有设备关闭窗口后刷新；新增设备支持请重启主程序。",
+                "离线驱动已安装。已有设备关闭窗口后刷新；全部成功后将自动重启生效。",
             ),
             Operation::Channel(_) => (
                 "正在切换通道并刷新驱动仓库…",
@@ -602,7 +616,7 @@ impl Manager {
             ),
             Operation::Rollback(_) => (
                 "正在恢复所选驱动的上一版本…",
-                "驱动已回退。关闭窗口后刷新设备；已加载的驱动可能需要重启主程序。",
+                "驱动已回退。完成后将自动重启生效。",
             ),
         };
         self.success = success.into();
@@ -613,6 +627,7 @@ impl Manager {
         let window = hwnd as usize;
         thread::spawn(move || {
             let mut batch = None;
+            let mut changed = false;
             let result = (|| match operation {
                 Operation::Load => inventory(false),
                 Operation::Refresh => inventory(true),
@@ -635,17 +650,22 @@ impl Manager {
                             }
                         },
                     ));
+                    changed = batch
+                        .as_ref()
+                        .is_some_and(|b| b.entries.iter().any(|(_, r)| matches!(r, Ok(true))));
                     inventory(false)
                 }
                 Operation::Offline(path) => {
                     let installed =
                         plugin_manager::install_offline(&path).map_err(|e| e.to_string())?;
+                    changed = true;
                     let mut state = inventory(false)?;
                     state.focus = Some(installed.id);
                     Ok(state)
                 }
                 Operation::Rollback(id) => {
                     let installed = plugin_manager::rollback(&id).map_err(|e| e.to_string())?;
+                    changed = true;
                     let mut state = inventory(false)?;
                     state.focus = Some(installed.id);
                     Ok(state)
@@ -663,6 +683,7 @@ impl Manager {
                 }
                 Operation::Remove(id) => {
                     plugin_manager::uninstall(&id).map_err(|e| e.to_string())?;
+                    changed = true;
                     inventory(false)
                 }
             })();
@@ -670,6 +691,7 @@ impl Manager {
                 .send(WorkEvent::Finished(WorkResult {
                     inventory: result,
                     batch,
+                    changed,
                 }))
                 .is_ok()
             {
@@ -684,6 +706,24 @@ impl Manager {
             return;
         };
         let event = match receiver.try_recv() {
+            Ok(WorkEvent::RestartReady(result)) => {
+                self.pending = None;
+                match result {
+                    Ok(()) => {
+                        self.restarting = true;
+                        DestroyWindow(hwnd);
+                    }
+                    Err(error) => {
+                        self.status(
+                            hwnd,
+                            format!("插件已保存；{error}。可点击“重启生效”重试。"),
+                            true,
+                        );
+                        self.availability();
+                    }
+                }
+                return;
+            }
             Ok(WorkEvent::Progress(progress)) => {
                 self.status(hwnd, progress, false);
                 return;
@@ -693,9 +733,14 @@ impl Manager {
             Err(error) => WorkResult {
                 inventory: Err(format!("后台任务未返回结果：{error}")),
                 batch: None,
+                changed: false,
             },
         };
         self.pending = None;
+        self.changed |= event.changed;
+        let auto_restart = event.changed
+            && event.inventory.is_ok()
+            && !event.batch.as_ref().is_some_and(BatchResult::failed);
         let selected = self.selected().map(|p| p.id.to_string());
         let report = event.batch.as_ref().map(BatchResult::description);
         let failed = event.batch.as_ref().is_some_and(BatchResult::failed);
@@ -752,13 +797,31 @@ impl Manager {
                 }
             }
         }
+        if auto_restart {
+            self.restart(hwnd);
+        }
+    }
+    unsafe fn restart(&mut self, hwnd: HWND) {
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        self.status(hwnd, "正在准备重启，设备配置已保存…", false);
+        self.availability();
+        let window = hwnd as usize;
+        thread::spawn(move || {
+            let result = peripheral_desk::core_update::launch_restart();
+            if tx.send(WorkEvent::RestartReady(result)).is_ok() {
+                unsafe {
+                    PostMessageW(window as HWND, FINISHED, 0, 0);
+                }
+            }
+        });
     }
     unsafe fn offline(&mut self, hwnd: HWND) {
         if self.pending.is_some() || self.dialog_open {
             return;
         }
         let mut file = [0u16; 32768];
-        let filter = wide("Peripheral Desk 驱动包 (*.zip)\0*.zip\0\0");
+        let filter = wide("外设盒 驱动包 (*.zip)\0*.zip\0\0");
         let title = wide("选择离线驱动包（必须匹配已缓存的受信驱动目录）");
         let mut dialog: OPENFILENAMEW = zeroed();
         dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
@@ -838,6 +901,7 @@ impl Manager {
                 }
                 self.selection(hwnd);
             }
+            RESTART if self.changed => self.restart(hwnd),
             REFRESH => self.begin(hwnd, Operation::Refresh),
             OFFLINE => self.offline(hwnd),
             CHANNEL | PREVIEW => {
@@ -1028,7 +1092,7 @@ impl Manager {
                 );
             }
             c.text(
-                "新增设备安装后重启主程序。卸载与回退只操作当前焦点行，保留配置。",
+                "安装、更新、卸载或回退成功后自动重启；部分失败时先保留结果，可点击“重启生效”。",
                 R::new(28, 590, 984, 22),
                 13,
                 400,
@@ -1366,17 +1430,17 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
     }
 }
 /// The caller keeps the main application's modal flag set until this returns.
-pub unsafe fn open(owner: HWND) {
-    open_inner(owner, false);
+pub unsafe fn open(owner: HWND) -> bool {
+    open_inner(owner, false)
 }
 
 /// Opens the manager, refreshes the catalog, and selects installed packages
 /// whose catalog version is strictly newer than the installed version.
-pub unsafe fn open_updates(owner: HWND) {
-    open_inner(owner, true);
+pub unsafe fn open_updates(owner: HWND) -> bool {
+    open_inner(owner, true)
 }
 
-unsafe fn open_inner(owner: HWND, check_updates: bool) {
+unsafe fn open_inner(owner: HWND, check_updates: bool) -> bool {
     let dpi = GetDpiForWindow(owner).max(96);
     let instance = GetModuleHandleW(null());
     let class_name = wide("PeripheralDeskDriverManager");
@@ -1424,6 +1488,8 @@ unsafe fn open_inner(owner: HWND, check_updates: bool) {
         dialog_open: false,
         changing_channel: false,
         select_updates_after_refresh: check_updates,
+        changed: false,
+        restarting: false,
     });
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     let mut frame = RECT {
@@ -1441,7 +1507,7 @@ unsafe fn open_inner(owner: HWND, check_updates: bool) {
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class_name.as_ptr(),
-        wide("Peripheral Desk · 驱动管理").as_ptr(),
+        wide("外设盒 · 驱动管理").as_ptr(),
         style,
         x,
         y,
@@ -1482,6 +1548,7 @@ unsafe fn open_inner(owner: HWND, check_updates: bool) {
     }
     EnableWindow(owner, 1);
     SetForegroundWindow(owner);
+    manager.restarting
 }
 
 #[cfg(test)]
@@ -1590,6 +1657,8 @@ mod tests {
             dialog_open: false,
             changing_channel: false,
             select_updates_after_refresh: false,
+            changed: false,
+            restarting: false,
         };
         assert!(
             manager.targets().is_empty(),

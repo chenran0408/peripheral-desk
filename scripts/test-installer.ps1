@@ -22,6 +22,32 @@ $bytes = [Text.Encoding]::UTF8.GetBytes('{"unknown":{"preserve":true}}')
 [IO.File]::WriteAllBytes($fixture,$bytes)
 Run-Installer $setup $argsForSetup
 if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture)) -ne [Convert]::ToBase64String($bytes)) { throw 'Reinstall changed user configuration.' }
+# A silent caller can explicitly request launch; interactive installation always launches.
+Run-Installer $setup ($argsForSetup + '/RESTARTAPP=1')
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+$launched = $null
+while ([DateTime]::UtcNow -lt $deadline) {
+    $launched = Get-Process -Name PeripheralDesk -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | Select-Object -First 1
+    if ($launched -and $launched.MainWindowHandle -ne 0) { break }
+    Start-Sleep -Milliseconds 100
+}
+if (-not $launched) { throw 'Installer did not automatically launch the installed app.' }
+# Updating a running instance should close it normally and relaunch the replacement.
+$previousId = $launched.Id
+Run-Installer $setup $argsForSetup
+$deadline = [DateTime]::UtcNow.AddSeconds(15)
+$replacement = $null
+while ([DateTime]::UtcNow -lt $deadline) {
+    $replacement = Get-Process -Name PeripheralDesk -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe -and $_.Id -ne $previousId } | Select-Object -First 1
+    if ($replacement -and $replacement.MainWindowHandle -ne 0) { break }
+    Start-Sleep -Milliseconds 100
+}
+if (-not $replacement -or -not $launched.HasExited) { throw 'Updating a running app did not relaunch the replacement.' }
+$launched = $replacement
+# This is the isolated CI fixture process, identified by its exact executable path.
+$launched.Kill()
+$launched.WaitForExit()
+if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture)) -ne [Convert]::ToBase64String($bytes)) { throw 'Automatic launch changed unknown user configuration.' }
 Run-Installer (Join-Path $target 'unins000.exe') @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART')
 if (-not (Test-Path -LiteralPath $fixture)) { throw 'Uninstall removed user configuration.' }
 if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($fixture)) -ne [Convert]::ToBase64String($bytes)) { throw 'Uninstall changed user configuration.' }

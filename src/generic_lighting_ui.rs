@@ -1,8 +1,8 @@
 //! Per-device lighting editor for accessory lighting plugins.
 //!
-//! Unlike the legacy G2 editor, every displayed value here comes from a
-//! successful device readback. Plugin metadata supplies the supported modes
-//! and level bounds; the UI never guesses a device's capabilities.
+//! Plugin metadata supplies supported modes and bounds. Full-readback devices
+//! show hardware values; explicitly declared write-only effects show sent records
+//! or a labeled draft, with readable brightness tracked separately.
 use crate::{
     hid::wide,
     paint::{self, Canvas, R},
@@ -63,6 +63,7 @@ struct Capabilities {
     modes: Vec<LightingMode>,
     speed_max: u8,
     brightness_max: u8,
+    write_only: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,6 +72,10 @@ struct LightingState {
     saved: Option<LightingConfig>,
     notice: String,
     readback: bool,
+    #[serde(default)]
+    brightness_readback: bool,
+    #[serde(default)]
+    draft: Option<LightingConfig>,
 }
 
 #[derive(Clone, Copy)]
@@ -133,6 +138,10 @@ fn mode_meta(device: &Value) -> Result<Capabilities, String> {
         modes,
         speed_max: level("lighting_speed_max")?,
         brightness_max: level("lighting_brightness_max")?,
+        write_only: device
+            .get("lighting_write_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -152,7 +161,8 @@ fn can_apply(
     capabilities: &Capabilities,
 ) -> bool {
     actual_enabled.is_some()
-        && confirmed.is_some_and(|config| valid_config(config, capabilities))
+        && (capabilities.write_only
+            || confirmed.is_some_and(|config| valid_config(config, capabilities)))
         && draft.is_some_and(|config| valid_config(config, capabilities))
 }
 
@@ -181,6 +191,7 @@ fn invoke(
     key: &str,
     operation: Operation,
     config: Option<&LightingConfig>,
+    write_only: bool,
 ) -> Result<LightingState, String> {
     let request = match operation {
         Operation::Read => json!({"op":"lighting-read"}),
@@ -190,7 +201,7 @@ fn invoke(
     let value = crate::plugin_manager::invoke(key, request)?;
     let state: LightingState =
         serde_json::from_value(value).map_err(|e| format!("驱动返回的灯效状态无效：{e}"))?;
-    if !state.readback {
+    if !state.readback && !(write_only && state.brightness_readback) {
         return Err("驱动未确认灯效来自设备读回；本次状态不作为已确认结果".into());
     }
     Ok(state)
@@ -204,6 +215,15 @@ impl Dialog {
             .find(|mode| mode.id == effect)
     }
 
+    fn editable(&self) -> bool {
+        self.confirmed.is_some()
+            || (self.capabilities.write_only
+                && self.actual_enabled.is_some()
+                && self.config.is_some())
+    }
+    fn brightness_min(&self) -> u8 {
+        u8::from(self.capabilities.write_only)
+    }
     fn available(&self, id: usize) -> bool {
         if self.pending.is_some() {
             return false;
@@ -218,28 +238,30 @@ impl Dialog {
             TOGGLE => self.supports_switch || self.config.is_some(),
             REFRESH | CLOSE => true,
             COLOR => {
-                self.confirmed.is_some()
+                self.editable()
                     && self
                         .config
                         .as_ref()
                         .and_then(|c| self.mode(c.effect))
                         .is_some_and(|m| m.color)
             }
-            SPEED_DOWN => {
-                self.confirmed.is_some() && self.config.as_ref().is_some_and(|c| c.speed > 0)
-            }
+            SPEED_DOWN => self.editable() && self.config.as_ref().is_some_and(|c| c.speed > 0),
             SPEED_UP => self
                 .config
                 .as_ref()
-                .is_some_and(|c| self.confirmed.is_some() && c.speed < self.capabilities.speed_max),
+                .is_some_and(|c| self.editable() && c.speed < self.capabilities.speed_max),
             BRIGHTNESS_DOWN => {
-                self.confirmed.is_some() && self.config.as_ref().is_some_and(|c| c.brightness > 0)
+                self.editable()
+                    && self
+                        .config
+                        .as_ref()
+                        .is_some_and(|c| c.brightness > self.brightness_min())
             }
             BRIGHTNESS_UP => self.config.as_ref().is_some_and(|c| {
-                self.confirmed.is_some() && c.brightness < self.capabilities.brightness_max
+                self.editable() && c.brightness < self.capabilities.brightness_max
             }),
             id if (MODE_BASE..MODE_BASE + 256).contains(&id) => {
-                self.config.is_some() && self.confirmed.is_some()
+                self.config.is_some() && self.editable()
             }
             _ => true,
         }
@@ -260,6 +282,7 @@ impl Dialog {
             return;
         }
         let key = self.key.clone();
+        let write_only = self.capabilities.write_only;
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.operation = operation;
@@ -274,7 +297,7 @@ impl Dialog {
         self.update_buttons();
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
         thread::spawn(move || {
-            let _ = tx.send(invoke(&key, operation, config.as_ref()));
+            let _ = tx.send(invoke(&key, operation, config.as_ref(), write_only));
         });
     }
 
@@ -295,25 +318,36 @@ impl Dialog {
         self.pending = None;
         match result {
             Ok(state) => {
+                let suggested = state
+                    .draft
+                    .filter(|config| valid_config(config, &self.capabilities));
                 let saved = state
                     .saved
                     .filter(|config| valid_config(config, &self.capabilities));
+                let write_only = self.capabilities.write_only && !state.readback;
                 self.actual_enabled = Some(state.enabled);
                 self.confirmed = saved.clone();
                 self.error = false;
                 self.stale = false;
                 match self.operation {
                     Operation::Read => {
-                        self.config = saved.clone();
+                        self.config = saved.clone().or(suggested.clone());
                         self.dirty = false;
-                        self.status = if saved.is_some() {
+                        self.status = if write_only {
+                            "亮度/开关已读回；模式与颜色为发送记录或建议草稿，无法从设备读取。"
+                                .into()
+                        } else if saved.is_some() {
                             "设备灯效已读回；显示的是设备当前值。".into()
                         } else {
                             "已读回设备开关，但驱动没有返回完整且受支持的灯效配置；编辑与应用保持关闭。".into()
                         };
                     }
                     Operation::Toggle(expected) => {
-                        self.config = draft_after_toggle(&self.config, saved.clone(), self.dirty);
+                        self.config = draft_after_toggle(
+                            &self.config,
+                            saved.clone().or(suggested),
+                            self.dirty,
+                        );
                         self.error = state.enabled != expected;
                         self.status = if self.error {
                             "设备返回的开关值与请求不一致；灯效草稿已保留。".into()
@@ -331,10 +365,15 @@ impl Dialog {
                         self.dirty = !exact;
                         if exact {
                             self.config = saved.clone();
-                            self.status = "灯效写入后已从设备读回核对。".into();
+                            self.status = if write_only {
+                                "灯效已发送，亮度已读回；模式与颜色无法读回，请观察实际灯光。"
+                                    .into()
+                            } else {
+                                "灯效写入后已从设备读回核对。".into()
+                            };
                         } else {
                             self.status =
-                                "设备读回值与灯效草稿不一致；草稿已保留，尚未确认应用。".into();
+                                "驱动返回结果与灯效草稿不一致；草稿已保留，尚未确认应用。".into();
                         }
                     }
                 }
@@ -427,13 +466,19 @@ impl Dialog {
                 }
             }
             BRIGHTNESS_DOWN | BRIGHTNESS_UP => {
+                let minimum = self.brightness_min();
+                let step = if self.capabilities.brightness_max > 20 {
+                    self.capabilities.brightness_max.div_ceil(20)
+                } else {
+                    1
+                };
                 if let Some(config) = self.config.as_mut() {
                     config.brightness = if id == BRIGHTNESS_DOWN {
-                        config.brightness.saturating_sub(1)
+                        config.brightness.saturating_sub(step).max(minimum)
                     } else {
                         config
                             .brightness
-                            .saturating_add(1)
+                            .saturating_add(step)
                             .min(self.capabilities.brightness_max)
                     };
                     config.enabled = true;
@@ -444,8 +489,9 @@ impl Dialog {
                 let effect = (id - MODE_BASE) as u8;
                 let mode = self.mode(effect).cloned();
                 if let Some(mode) = mode {
+                    let baseline = self.confirmed.clone().or_else(|| self.config.clone());
                     if let (Some(config), Some(baseline)) =
-                        (self.config.as_mut(), self.confirmed.as_ref())
+                        (self.config.as_mut(), baseline.as_ref())
                     {
                         select_mode(config, baseline, &mode);
                         self.mark_draft("模式草稿已更改；点击“应用灯效”提交。");
@@ -492,7 +538,11 @@ impl Dialog {
             DT_LEFT,
         );
         canvas.text(
-            "设备当前值来自读回；更改会先保留为草稿",
+            if self.capabilities.write_only {
+                "模式与颜色不可读回 · 显示发送记录或建议草稿"
+            } else {
+                "设备当前值来自读回；更改会先保留为草稿"
+            },
             R::new(28, 62, 720, 22),
             13,
             400,
@@ -678,7 +728,9 @@ impl Dialog {
             },
             DT_LEFT,
         );
-        let config_note = if self.confirmed.is_none() {
+        let config_note = if self.capabilities.write_only {
+            "仅亮度/开关支持读回；模式与颜色不能确认原值，首次更改可能无法恢复原灯效。"
+        } else if self.confirmed.is_none() {
             "未读到有效的设备灯效配置；模式、颜色、速度和亮度不会显示为已确认。"
         } else if self.stale {
             "显示的是上次成功读回的值；刚才的操作失败，当前设备状态需重新读取确认。"
@@ -936,7 +988,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
     AdjustWindowRectEx(&mut bounds, style, 0, WS_EX_DLGMODALFRAME);
     let width = bounds.right - bounds.left;
     let height = bounds.bottom - bounds.top;
-    let title = format!("{} 灯效 · Peripheral Desk", spec.name);
+    let title = format!("{} 灯效 · 外设盒", spec.name);
     let hwnd = CreateWindowExW(
         WS_EX_DLGMODALFRAME,
         class.as_ptr(),
@@ -1047,6 +1099,7 @@ mod tests {
             ],
             speed_max: 4,
             brightness_max: 4,
+            write_only: false,
         }
     }
 
@@ -1110,5 +1163,16 @@ mod tests {
         assert_eq!(draft.effect, 5);
         assert!(draft.music_sync);
         assert_eq!(draft.rgb, baseline.rgb);
+    }
+    #[test]
+    fn write_only_lighting_requires_readable_state_and_an_explicit_draft() {
+        let mut caps = capabilities();
+        caps.write_only = true;
+        let draft = config();
+        assert!(can_apply(Some(false), None, Some(&draft), &caps));
+        assert!(!can_apply(None, None, Some(&draft), &caps));
+        assert!(!can_apply(Some(true), None, None, &caps));
+        caps.write_only = false;
+        assert!(!can_apply(Some(false), None, Some(&draft), &caps));
     }
 }
