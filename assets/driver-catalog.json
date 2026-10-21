@@ -1,1 +1,222 @@
-{"schema":1,"channel":"stable","drivers":[]}
+{
+  "schema": 1,
+  "channel": "stable",
+  "drivers": [
+    {
+      "id": "razer-deathadder-v3-pro",
+      "name": "炼狱蝰蛇 V3 专业版",
+      "version": "0.4.0",
+      "description": "电量与常用设置；本机仅确认前进侧键可改键和触发软件宏，其他标记槽只读。",
+      "device": {
+        "key": "razer-deathadder-v3-pro",
+        "name": "炼狱蝰蛇 V3 专业版",
+        "brand": "RAZER",
+        "kind": "mouse",
+        "subtitle": "",
+        "image": "device.png",
+        "matches": [
+          {
+            "vid": 5426,
+            "pid": 182,
+            "feature_len": 91,
+            "path_contains": "mi_00"
+          },
+          {
+            "vid": 5426,
+            "pid": 183,
+            "feature_len": 91,
+            "path_contains": "mi_00"
+          }
+        ],
+        "advanced": [],
+        "validation": {
+          "status": "hardware-verified",
+          "connections": [
+            "2.4 GHz standard receiver"
+          ],
+          "firmware": "unknown",
+          "verified_features": [
+            "battery",
+            "DPI/rate/sleep",
+            "native-zero-flag-slot-bindings",
+            "resident-macro-trigger-slot5"
+          ]
+        }
+      },
+      "abi": 1,
+      "dll": "driver.dll",
+      "core_min": "0.4.0",
+      "core_max_exclusive": "0.5.0",
+      "channel": "stable",
+      "capabilities": [
+        "battery",
+        "settings",
+        "bindings",
+        "software-macro-trigger"
+      ],
+      "changelog": "独立按需安装。前进侧键改键与软件宏触发已验证；未知标记保留。",
+      "dll_sha256": "b232aab1e0e47d1702d24e3cb9f66a67ae6e552ef65ade05c9f02295f7971578",
+      "download_bytes": 550906,
+      "package_url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/v0.4.0/razer-deathadder-v3-pro-0.4.0-windows-x64.zip",
+      "sha256": "f23969a51b54165f3d5c2f7f0f20f5a2701f6aebd48ee01734ff92ecd445655b"
+    },
+    {
+      "id": "mchose-a5-ultra",
+      "name": "迈从 A5 Ultra 初代",
+      "version": "0.4.0",
+      "description": "电量、传感器设置与六键改键；实验性宏只在原宏页可完整备份时开放。",
+      "device": {
+        "key": "mchose-a5-ultra",
+        "name": "迈从 A5 Ultra 初代",
+        "brand": "MCHOSE",
+        "kind": "mouse",
+        "subtitle": "",
+        "image": "device.png",
+        "matches": [
+          {
+            "vid": 14391,
+            "pid": 4108,
+            "usage_page": 65281,
+            "feature_len": 65,
+            "product_equals": "A5 ultra"
+          }
+        ],
+        "advanced": [],
+        "validation": {
+          "status": "hardware-verified",
+          "connections": [
+            "2.4 GHz standard receiver"
+          ],
+          "firmware": "unknown",
+          "verified_features": [
+            "battery",
+            "settings",
+            "six-button-bindings",
+            "resident-macro-trigger"
+          ]
+        }
+      },
+      "abi": 1,
+      "dll": "driver.dll",
+      "core_min": "0.4.0",
+      "core_max_exclusive": "0.5.0",
+      "channel": "stable",
+      "capabilities": [
+        "battery",
+        "settings",
+        "bindings",
+        "experimental-onboard-macros",
+        "software-macro-trigger"
+      ],
+      "changelog": "独立管理鼠标设置；当前实测固件的宏页无法安全备份，保持拒写。",
+      "dll_sha256": "bbb9566c0fc33c047049ad74ab1c01cbb5386805a4a3c3227b5d475695bb2d69",
+      "download_bytes": 661492,
+      "package_url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/v0.4.0/mchose-a5-ultra-0.4.0-windows-x64.zip",
+      "sha256": "9c0ecd856b7d34e16452b554bd79ef48f082a029f7bc3b90d7b24c9ee30a286d"
+    },
+    {
+      "id": "mchose-g75-pro",
+      "name": "迈从 G75 Pro",
+      "version": "0.4.0",
+      "description": "键盘设置、普通层与 Fn 层改键及灯色。",
+      "device": {
+        "key": "mchose-g75-pro",
+        "name": "迈从 G75 Pro",
+        "brand": "MCHOSE",
+        "kind": "keyboard",
+        "subtitle": "",
+        "image": "device.png",
+        "matches": [
+          {
+            "vid": 13652,
+            "pid": 64009,
+            "usage_page": 65282
+          }
+        ],
+        "advanced": [],
+        "validation": {
+          "status": "hardware-verified",
+          "connections": [
+            "2.4 GHz standard receiver"
+          ],
+          "firmware": "unknown",
+          "verified_features": [
+            "battery",
+            "settings",
+            "three-layer-bindings",
+            "per-key-RGB",
+            "resident-macro-trigger"
+          ]
+        }
+      },
+      "abi": 1,
+      "dll": "driver.dll",
+      "core_min": "0.4.0",
+      "core_max_exclusive": "0.5.0",
+      "channel": "stable",
+      "capabilities": [
+        "battery",
+        "settings",
+        "bindings",
+        "key-colors",
+        "software-macro-trigger"
+      ],
+      "changelog": "独立管理键盘设置、普通/Fn层改键和灯色。",
+      "dll_sha256": "d628af11fbff7687815261963323fc655c2b8c7fbbd59c38801f61093b17f694",
+      "download_bytes": 679244,
+      "package_url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/v0.4.0/mchose-g75-pro-0.4.0-windows-x64.zip",
+      "sha256": "881f57eabea75ebdd702415e1f8ebc626b0e0b4dd487d4dcf1c20259a1f2025e"
+    },
+    {
+      "id": "hecate-g2-pro",
+      "name": "漫步者 G2 Pro",
+      "version": "0.4.0",
+      "description": "音量、原驱动音效和耳罩灯光控制；音效需已安装官方组件。",
+      "device": {
+        "key": "hecate-g2-pro",
+        "name": "漫步者 G2 Pro",
+        "brand": "HECATE",
+        "kind": "headset",
+        "subtitle": "",
+        "image": "device.png",
+        "matches": [
+          {
+            "vid": 13755,
+            "pid": 41216,
+            "usage_page": 12,
+            "feature_len": 16,
+            "product_equals": "HECATE G2 PRO"
+          }
+        ],
+        "advanced": [],
+        "validation": {
+          "status": "hardware-verified",
+          "connections": [
+            "USB"
+          ],
+          "firmware": "unknown",
+          "verified_features": [
+            "volume",
+            "effects",
+            "lighting-switch"
+          ]
+        }
+      },
+      "abi": 1,
+      "dll": "driver.dll",
+      "core_min": "0.4.0",
+      "core_max_exclusive": "0.5.0",
+      "channel": "stable",
+      "capabilities": [
+        "volume",
+        "effects",
+        "lighting"
+      ],
+      "changelog": "独立提供音量、原有音效和灯光设置；音效仍需官方组件。",
+      "dll_sha256": "8ea2044a5a28bcac2b83a4e929f9e946d0d115a890473c78adca53f5f65da6ec",
+      "download_bytes": 711516,
+      "package_url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/v0.4.0/hecate-g2-pro-0.4.0-windows-x64.zip",
+      "sha256": "d192f398075dbb1e43354c01aef9fcc1a23fc80d004c0eadbc3575afb3abede9"
+    }
+  ]
+}

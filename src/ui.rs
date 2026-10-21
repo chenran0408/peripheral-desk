@@ -419,7 +419,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_KEYDOWN if w == VK_ESCAPE as usize => {
-            a.navigate(hwnd, Page::Home);
+            if !a.modal_open {
+                a.navigate(hwnd, Page::Home);
+            }
             0
         }
         TRAY => {

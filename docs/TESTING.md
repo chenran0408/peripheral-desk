@@ -1,5 +1,13 @@
 # 验证记录
 
+## 当前版本 0.4.0
+
+简短结论见 [0.4.0 测试范围](VALIDATION.md)。本轮确认雷蛇槽 5 与三台设备 F13 绑定的写入/读回/恢复、G75 原 `0x42`/`0x44` 全块恢复、G2 灯光开关往返。A5 长度零宏页拒写，G75 板载宏未开放；软件宏实际播放、G2 RGB/模式/速度未实机验证。
+
+后文为此前版本的历史记录，其中测试数量、Clippy 与构建结论只属于对应阶段，不是 0.4.0 的累计结果。
+
+## 0.2.x 初始阶段
+
 2026-10-21，Windows x64，本机三台实物设备。
 
 - Rust fmt、Clippy（警告视为错误）、release 构建通过。
@@ -43,8 +51,8 @@ GUI 采用真实设备状态进行人工检查。设备休眠时的新读数不�
 实机测试默认忽略，按需指定项目单独运行，避免一次执行所有测试后无法定位设备状态：
 
 ```powershell
-cargo test keyboard::tests::live_g75_color_format -- --ignored --exact --nocapture --test-threads=1
-cargo test keyboard::tests::live_g75_new_features_restore_full_blocks -- --ignored --exact --nocapture --test-threads=1
+cargo test --no-default-features --features driver-runtime --lib keyboard::tests::live_g75_color_format -- --ignored --exact --nocapture --test-threads=1
+cargo test --no-default-features --features driver-runtime --lib keyboard::tests::live_g75_new_features_restore_full_blocks -- --ignored --exact --nocapture --test-threads=1
 ```
 
 测试需保持设备连接、唤醒，并关闭其他控制中心的设备页。测试按原块恢复后再断言，但设备断连、驱动故障或进程被强制结束仍可能阻止恢复；检查日志中的恢复结果。该测试没有覆盖普通/Fn 层改键、宏或逐键灯，不能据此声称支持。
