@@ -2,7 +2,7 @@
 
 ## 第一次运行
 
-1. 从 [主程序发布页](https://github.com/chenran0408/peripheral-desk/releases) 下载 Windows x64 ZIP，解压到可写文件夹，运行 `PeripheralDesk.exe`。
+1. 从 [主程序发布页](https://github.com/chenran0408/peripheral-desk/releases) 下载 Windows x64 `setup.exe` 安装到当前用户目录，或下载 ZIP 解压运行 `PeripheralDesk.exe`。安装不需要管理员权限。
 2. 首次使用首页为空，点击“添加设备驱动”打开“驱动仓库”。识别本机设备后，选择稳定版通道，安装自己准确型号对应的插件。不需要的设备可以不安装；不会根据开发者本机设备自动安装。新装设备插件后重启主程序。
 3. 接入 USB 接收器或数据线，移动鼠标、按一下键盘，再刷新。首页亮色表示在线，暗色表示离线；缓存电量会标明“上次电量”。
 4. 选择设备进入详情页。常用设置停止调整约 1.5 秒后写入，结果会显示在页面中。
@@ -56,3 +56,7 @@ EQ 预设库可保存当前、切换、重命名、删除多套均衡器；每�
 [本版测试范围](VALIDATION.md) · [详细功能边界](FEATURES.md) · [五品牌研究](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/PROTOCOL-RESEARCH.md)
 
 界面、更新和备份问题反馈到 [主程序 Issues](https://github.com/chenran0408/peripheral-desk/issues)；具体型号、固件或设备协议问题反馈到 [插件 Issues](https://github.com/chenran0408/peripheral-desk-drivers/issues)。可附匿名诊断、准确型号、连接方式、程序/插件版本及触发步骤。
+
+## 安装版与便携版
+
+安装版默认位于 `%LOCALAPPDATA%\Programs\PeripheralDesk`，在开始菜单创建快捷方式，可选择桌面快捷方式。更新前从托盘退出程序，再运行新版安装包；配置及已下载插件会保留。卸载只移除安装程序写入的应用文件，保留用户数据。便携版迁移到安装版时先使用“配置备份”导出，安装后按需下载原有插件并导入；不会自动查找或搬移其他文件夹。

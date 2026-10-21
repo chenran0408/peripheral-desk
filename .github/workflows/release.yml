@@ -87,11 +87,17 @@ jobs:
           $section = [regex]::Match($text, '(?ms)^##\s+' + [regex]::Escape($env:APP_VERSION) + '\s*\r?\n(.*?)(?=^##\s|\z)')
           if (-not $section.Success) { throw "Add concise user release notes for $env:APP_VERSION to CHANGELOG.md" }
           $section.Groups[1].Value.Trim() | Set-Content work/release-notes.md -Encoding utf8
+      - name: Build and check the per-user Windows installer
+        shell: pwsh
+        run: |
+          ./scripts/installer.ps1
+          ./scripts/test-installer.ps1 -Version $env:APP_VERSION
       - uses: actions/upload-artifact@v4
         with:
           name: PeripheralDesk-reviewed-release
           path: |
             dist/*.zip
+            dist/*-setup.exe
             dist/SHA256SUMS.txt
             work/release-notes.md
           if-no-files-found: error
@@ -119,19 +125,26 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "Version release already exists; publish fixes under a new reviewed tag" }
           $zip = @(Get-ChildItem release-files/dist -Filter *.zip -File)
           if ($zip.Count -ne 1) { throw "Expected exactly one core ZIP" }
+          $setup = @(Get-ChildItem release-files/dist -Filter '*-setup.exe' -File)
+          if ($setup.Count -ne 1) { throw "Expected exactly one Windows installer" }
           $extra = @()
           if ($env:RELEASE_TAG.Contains('-')) { $extra = @('--prerelease') }
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:RELEASE_TAG --notes-file release-files/work/release-notes.md @extra $zip[0].FullName release-files/dist/SHA256SUMS.txt
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:RELEASE_TAG --notes-file release-files/work/release-notes.md @extra $zip[0].FullName $setup[0].FullName release-files/dist/SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Upload failed; inspect the draft before retrying" }
           gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
           if ($LASTEXITCODE -ne 0) { throw "Publication failed" }
       - name: Verify the public download matches the reviewed package
         shell: pwsh
         run: |
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir downloaded --pattern '*.zip' --pattern SHA256SUMS.txt
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir downloaded --pattern '*.zip' --pattern '*-setup.exe' --pattern SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Public release download failed" }
           $zip = @(Get-ChildItem downloaded -Filter *.zip -File)
           if ($zip.Count -ne 1) { throw "Expected exactly one published core ZIP" }
-          $hash = (Get-FileHash -LiteralPath $zip[0].FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-          $expected = (Get-Content release-files/dist/SHA256SUMS.txt -Raw).Trim()
-          if ((Get-Content downloaded/SHA256SUMS.txt -Raw).Trim() -ne $expected -or "$hash  $($zip[0].Name)" -ne $expected) { throw "Public download checksum mismatch" }
+          $expected = @(Get-Content release-files/dist/SHA256SUMS.txt | Where-Object { $_.Trim() })
+          $actual = @(Get-Content downloaded/SHA256SUMS.txt | Where-Object { $_.Trim() })
+          if (($actual -join "`n") -ne ($expected -join "`n") -or $expected.Count -ne 2) { throw "Published checksum list differs" }
+          foreach ($line in $expected) {
+            if ($line -notmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$') { throw "Invalid checksum entry" }
+            $hash = $Matches[1]; $name = $Matches[2]
+            if ((Get-FileHash -LiteralPath (Join-Path downloaded $name) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Public download checksum mismatch: $name" }
+          }

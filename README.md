@@ -6,7 +6,7 @@ Rust + Win32 原生 Windows 外设设置与电量工具。黑灰色界面、红�
 
 ## 下载与使用
 
-在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64.zip`，解压到可写文件夹，运行 `PeripheralDesk.exe`。**0.4.0 起主程序与设备插件分开发布**：打开“驱动仓库”，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 音效复用本机已安装的 HECATE / C-Media 组件，见下文。
+在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载 ZIP 便携版并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开“驱动仓库”，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 音效复用本机已安装的 HECATE / C-Media 组件，见下文。
 
 - 首页选择设备：在线亮色、离线暗色、接收器在线但无有效读数时显示待唤醒。
 - 左键托盘图标显示设备电量；右键可打开主页、刷新或退出。

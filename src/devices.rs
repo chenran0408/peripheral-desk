@@ -15,6 +15,7 @@ pub enum Kind {
     Mouse,
     Keyboard,
     Headset,
+    Accessory,
 }
 
 pub struct DeviceSpec {
@@ -816,6 +817,7 @@ impl DeviceManifest {
             kind: match self.kind.as_str() {
                 "keyboard" => Kind::Keyboard,
                 "headset" => Kind::Headset,
+                "accessory" => Kind::Accessory,
                 _ => Kind::Mouse,
             },
             adapter: Adapter::External,
@@ -825,6 +827,9 @@ impl DeviceManifest {
                 .and_then(serde_json::Value::as_str)
             {
                 Some("hardware-verified") => "已实机验证 · 功能范围见兼容表",
+                Some("upstream-hardware-verified-project-untested") => {
+                    "上游已实测 · 本项目尚未复测"
+                }
                 Some("public-implementation-untested") => "依据公开实现适配 · 尚未实机验证",
                 _ => "仅识别设备 · 尚未确认功能",
             },

@@ -69,6 +69,7 @@ enum Command {
     CoreUpdate,
     PresetLibrary,
     HeadsetLighting,
+    GenericLighting,
     ExportAudio,
     ImportAudio,
     FlatEq,
@@ -754,6 +755,15 @@ impl App {
                         Command::Advanced(true),
                     );
                 }
+                if REGISTRY[m].supports("lighting-editor") {
+                    self.add(
+                        hwnd,
+                        "灯效设置",
+                        R::new(294, 17, 96, 34),
+                        GHOST,
+                        Command::GenericLighting,
+                    );
+                }
                 if REGISTRY[m].supports("software-macro-trigger")
                     || matches!(
                         REGISTRY[m].key,
@@ -1148,7 +1158,8 @@ impl App {
             Command::ControlsEditor
             | Command::ResidentMacros
             | Command::PresetLibrary
-            | Command::HeadsetLighting => {
+            | Command::HeadsetLighting
+            | Command::GenericLighting => {
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
                     return;
                 }
@@ -1158,6 +1169,7 @@ impl App {
                         Command::ControlsEditor => crate::controls_ui::open(hwnd, model),
                         Command::ResidentMacros => crate::resident_macro_ui::open(hwnd, model),
                         Command::PresetLibrary => crate::preset_ui::open(hwnd, model),
+                        Command::GenericLighting => crate::generic_lighting_ui::open(hwnd, model),
                         _ => crate::lighting_ui::open(hwnd),
                     }
                     self.modal_open = false;
@@ -1734,7 +1746,8 @@ impl App {
                 | Command::ControlsEditor
                 | Command::ResidentMacros
                 | Command::PresetLibrary
-                | Command::HeadsetLighting => {
+                | Command::HeadsetLighting
+                | Command::GenericLighting => {
                     self.pending.is_none() && self.queued.is_empty() && !self.modal_open
                 }
                 Command::SettingsPage(delta) => {
@@ -1925,6 +1938,41 @@ impl App {
             DT_LEFT,
         );
         c.line(54, 393, 346, 393, BORDER, 1.);
+        if spec.kind == Kind::Accessory {
+            c.text(
+                "USB 供电 · 无电池",
+                R::new(54, 415, 292, 30),
+                18,
+                500,
+                MUTED,
+                DT_LEFT,
+            );
+            c.text(
+                "灯效控制",
+                R::new(424, 101, 400, 32),
+                22,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                "点击顶部“灯效设置”读取并编辑设备灯光。",
+                R::new(424, 150, 660, 30),
+                15,
+                400,
+                MUTED,
+                DT_LEFT,
+            );
+            c.text(
+                "仅开放插件声明的模式、颜色与调节范围。",
+                R::new(424, 194, 660, 30),
+                13,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+            return;
+        }
         if spec.kind == Kind::Headset {
             for (i, (label, key)) in [
                 ("GAMING", Tuning::GameVolume),
@@ -2504,7 +2552,7 @@ impl App {
             } else if !self.images.installed[m] {
                 "未安装"
             } else if s.present {
-                if spec.kind == Kind::Headset {
+                if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                     "未就绪"
                 } else {
                     "待唤醒"
@@ -2525,7 +2573,7 @@ impl App {
             let image_area = match spec.kind {
                 Kind::Keyboard => R::new(18, 72, 196, r.h - 106),
                 Kind::Mouse => R::new(36, 66, 160, r.h - 98),
-                Kind::Headset => R::new(26, 66, 180, r.h - 98),
+                Kind::Headset | Kind::Accessory => R::new(26, 66, 180, r.h - 98),
             };
             c.image(self.images.images[m], image_area, active);
             c.text(
@@ -2541,6 +2589,7 @@ impl App {
                     Kind::Mouse => "无线游戏鼠标",
                     Kind::Keyboard => "无线机械键盘",
                     Kind::Headset => "USB 双声卡耳机",
+                    Kind::Accessory => "USB 外设",
                 },
                 R::new(224, 115, r.w - 248, 24),
                 13,
@@ -2558,7 +2607,7 @@ impl App {
             );
             c.line(224, r.h - 110, r.w - 24, r.h - 110, BORDER, 1.);
             c.text(
-                if spec.kind == Kind::Headset {
+                if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                     "USB 有线供电"
                 } else if !s.fresh && s.percent.is_some() {
                     "上次电量"
@@ -2572,7 +2621,7 @@ impl App {
                 DT_LEFT,
             );
             c.text(
-                &if spec.kind == Kind::Headset {
+                &if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                     "USB".into()
                 } else {
                     s.percent
@@ -2612,6 +2661,7 @@ impl App {
                 Kind::Mouse => "无线游戏鼠标",
                 Kind::Keyboard => "无线机械键盘",
                 Kind::Headset => "USB 双声卡耳机",
+                Kind::Accessory => "USB 外设",
             },
             R::new(24, 349, r.w - 48, 24),
             12,
@@ -2621,7 +2671,7 @@ impl App {
         );
         c.line(24, r.h - 116, r.w - 24, r.h - 116, BORDER, 1.);
         c.text(
-            if spec.kind == Kind::Headset {
+            if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                 "供电方式"
             } else if !s.fresh && s.percent.is_some() {
                 "上次电量"
@@ -2635,7 +2685,7 @@ impl App {
             DT_LEFT,
         );
         c.text(
-            &if spec.kind == Kind::Headset {
+            &if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                 "USB".into()
             } else {
                 s.percent
@@ -2675,7 +2725,7 @@ impl App {
                 format!(
                     "{} {}",
                     spec.name,
-                    if s.fresh && spec.kind == Kind::Headset {
+                    if s.fresh && matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                         "USB 供电".into()
                     } else if s.fresh {
                         s.percent
@@ -2889,7 +2939,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                         DT_LEFT,
                     );
                     c.text(
-                        &if s.fresh && spec.kind == Kind::Headset {
+                        &if s.fresh && matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                             "USB".into()
                         } else {
                             s.percent
@@ -3007,9 +3057,9 @@ fn connection(s: &backend::State, installed: bool) -> &'static str {
     } else if s.present {
         if REGISTRY
             .iter()
-            .any(|spec| spec.key == s.key && spec.kind == Kind::Headset)
+            .any(|spec| spec.key == s.key && matches!(spec.kind, Kind::Headset | Kind::Accessory))
         {
-            "USB 已连接 · 音频不可用"
+            "USB 已连接 · 状态未就绪"
         } else {
             "接收器在线 · 待唤醒"
         }
