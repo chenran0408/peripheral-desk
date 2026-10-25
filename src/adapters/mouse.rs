@@ -79,6 +79,9 @@ impl Channel {
         let req = protocol::mchose_request(report, command, args);
         let mut last = String::new();
         for _ in 0..if read { 3 } else { 1 } {
+            if read && report == 0x11 && command == 6 {
+                self.ready.as_ref().unwrap().drain()?;
+            }
             self.dev.send(&req)?;
             if let Err(e) = self.ready.as_ref().unwrap().wait(command) {
                 if !read {
@@ -169,6 +172,15 @@ impl Channel {
         let mut s = self.initial_state();
         let (p, charging, wired) = protocol::mchose_battery(&self.mchose(0x11, 6, &[], true)?)?;
         s.percent = Some(p);
+        s.battery_raw = Some(p);
+        s.connection_path = Some(
+            if wired {
+                "USB 有线"
+            } else {
+                "2.4 GHz 接收器"
+            }
+            .into(),
+        );
         s.charging = charging;
         s.wired = wired;
         match self.config() {

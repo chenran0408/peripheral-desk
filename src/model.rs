@@ -8,6 +8,13 @@ pub struct State {
     pub present: bool,
     pub fresh: bool,
     pub percent: Option<u8>,
+    /// Exact device battery byte, when the protocol exposes one. `fresh` says
+    /// whether it came from the latest successful poll; stale snapshots retain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_raw: Option<u8>,
+    /// Privacy-safe transport label (never a HID path or user-provided string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_path: Option<String>,
     pub charging: Option<bool>,
     pub wired: bool,
     pub light: Option<u8>,

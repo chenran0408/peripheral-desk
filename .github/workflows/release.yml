@@ -8,6 +8,11 @@ on:
         description: Existing version tag at the current reviewed main commit
         required: true
         default: v0.4.0
+      check_scope:
+        description: Use targeted battery checks for this preview or the full release suite
+        type: choice
+        options: [full, targeted]
+        default: full
 permissions:
   contents: read
 jobs:
@@ -17,6 +22,7 @@ jobs:
     timeout-minutes: 30
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+      CHECK_SCOPE: ${{ inputs.check_scope || 'full' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,14 +49,30 @@ jobs:
         run: |
           cargo fmt --all --check
           if ($LASTEXITCODE -ne 0) { throw "Formatting check failed" }
+          if ($env:CHECK_SCOPE -eq "targeted") {
+            cargo clippy --locked --lib -- -D warnings
+            if ($LASTEXITCODE -ne 0) { throw "Battery host static check failed" }
+            cargo test --locked --lib battery_diagnostics_distinguish_raw_current_and_cached_values
+            if ($LASTEXITCODE -ne 0) { throw "Battery diagnostics test failed" }
+            cargo test --locked --lib g75_report_percent_is_raw_integer_and_invalid_placeholders_are_rejected
+            if ($LASTEXITCODE -ne 0) { throw "G75 battery parser test failed" }
+            cargo test --locked --lib mchose_official_schema_no_ten_percent_guessing
+            if ($LASTEXITCODE -ne 0) { throw "MCHOSE battery parser test failed" }
+          } else {
           cargo clippy --locked --all-targets -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "Desktop static checks failed" }
           cargo test --locked
           if ($LASTEXITCODE -ne 0) { throw "Desktop software tests failed" }
+          }
           cargo clippy --locked --no-default-features --features driver-runtime --lib -- -D warnings
           if ($LASTEXITCODE -ne 0) { throw "Driver SDK static checks failed" }
-          cargo test --locked --no-default-features --features driver-runtime --lib
-          if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
+          if ($env:CHECK_SCOPE -eq "targeted") {
+            cargo test --locked --no-default-features --features driver-runtime --lib mchose_official_schema_no_ten_percent_guessing
+            if ($LASTEXITCODE -ne 0) { throw "Driver SDK MCHOSE parser test failed" }
+          } else {
+            cargo test --locked --no-default-features --features driver-runtime --lib
+            if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
+          }
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
         run: cargo build --release --locked --no-default-features --features desktop

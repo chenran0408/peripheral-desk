@@ -65,6 +65,15 @@ impl FeatureReady {
         }
         Err(format!("等待迈从命令 0x{command:02X} 完成通知超时"))
     }
+    pub fn drain(&self) -> Result<()> {
+        let mut data = [0u8; 65];
+        for _ in 0..8 {
+            if Keyboard::transfer_timeout(&self.0, &mut data, false, 0)? == 0 {
+                return Ok(());
+            }
+        }
+        Err("迈从输入队列持续有旧通知，无法确认本次电量查询".into())
+    }
 }
 impl Keyboard {
     pub fn open(path: &str) -> Result<Self> {
@@ -103,6 +112,14 @@ impl Keyboard {
         }
     }
     fn transfer(handle: &Handle, data: &mut [u8], write: bool) -> Result<usize> {
+        Self::transfer_timeout(handle, data, write, 300)
+    }
+    fn transfer_timeout(
+        handle: &Handle,
+        data: &mut [u8],
+        write: bool,
+        timeout_ms: u32,
+    ) -> Result<usize> {
         unsafe {
             let event = Handle(CreateEventW(null(), 1, 0, null()));
             if event.0.is_null() {
@@ -132,7 +149,7 @@ impl Keyboard {
                 if GetLastError() != ERROR_IO_PENDING {
                     return Err(std::io::Error::last_os_error().to_string());
                 }
-                if WaitForSingleObject(event.0, 300) != WAIT_OBJECT_0 {
+                if WaitForSingleObject(event.0, timeout_ms) != WAIT_OBJECT_0 {
                     // Drain cancellation before freeing ov/event/buffer.
                     CancelIoEx(handle.0, &ov);
                     GetOverlappedResult(handle.0, &ov, &mut count, 1);
@@ -169,6 +186,22 @@ impl Keyboard {
         Ok(Some(p))
     }
     pub fn read_block(&self, command: u8) -> Result<Vec<u8>> {
+        // Battery responses do not carry a transaction number. Drain any
+        // already queued 0x4A reply before asking, so a prior poll cannot be
+        // mislabeled as a fresh reading. Bound the drain to avoid waiting on
+        // a chatty or malformed device indefinitely.
+        if command == 0x4a {
+            let mut drained = false;
+            for _ in 0..8 {
+                if self.frame()?.is_none() {
+                    drained = true;
+                    break;
+                }
+            }
+            if !drained {
+                return Err("键盘输入队列持续有旧报文，无法确认电量读数新鲜度".into());
+            }
+        }
         let mut req = [0; 20];
         req[..3].copy_from_slice(&[0x13, command, 1]);
         for _ in 0..3 {
@@ -182,6 +215,9 @@ impl Keyboard {
                 };
                 if p[1] != command {
                     continue;
+                }
+                if command == 0x4a && (p[2] != 1 || p[3] != 0 || p[4] != 2) {
+                    return Err("G75 Pro 电量应答分包结构不匹配".into());
                 }
                 if p[2] == 0 || p[2] > 40 || p[3] >= p[2] || p[4] > 14 {
                     return Err("键盘分包字段异常".into());
@@ -328,19 +364,14 @@ impl Keyboard {
         Ok(b)
     }
     pub fn read(&self, identity: String) -> Result<State> {
-        let b = self.read_block(0x4a)?;
-        if b.len() != 2 || b[0] > 100 {
-            return Err("键盘电量字段异常".into());
-        }
+        let (battery, charging) = parse_g75_battery(&self.read_block(0x4a)?)?;
         let mut s = State {
             present: true,
             fresh: true,
-            percent: Some(b[0]),
-            charging: match b[1] >> 4 {
-                0 => Some(false),
-                1 => Some(true),
-                _ => None,
-            },
+            percent: Some(battery),
+            battery_raw: Some(battery),
+            connection_path: Some("2.4 GHz 接收器".into()),
+            charging,
             updated: now(),
             identity,
             ..State::default()
@@ -491,6 +522,18 @@ fn validate(p: &[u8; 20]) -> Result<()> {
         return Err("键盘报文 Report ID 或校验和错误".into());
     }
     Ok(())
+}
+
+fn parse_g75_battery(block: &[u8]) -> Result<(u8, Option<bool>)> {
+    if block.len() != 2 || block[0] <= 1 || block[0] > 100 {
+        return Err("G75 Pro 电量字段无效（协议占位值为 0–1）".into());
+    }
+    let charging = match block[1] >> 4 {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    Ok((block[0], charging))
 }
 
 fn acknowledges(response: &[u8; 20], request: &[u8; 20]) -> bool {
@@ -976,12 +1019,16 @@ mod tests {
         assert!(!bytes.is_empty(), "empty color configuration");
     }
     #[test]
-    fn real_g75_full_battery_fixture() {
+    fn g75_report_percent_is_raw_integer_and_invalid_placeholders_are_rejected() {
         let mut p = [0u8; 20];
-        p[..7].copy_from_slice(&[0x13, 0x4a, 1, 0, 2, 100, 1]);
-        p[19] = 0xc5;
+        p[..7].copy_from_slice(&[0x13, 0x4a, 1, 0, 2, 0x24, 1]);
+        p[19] = 0x85;
         assert!(validate(&p).is_ok());
-        p[5] = 99;
-        assert!(validate(&p).is_err());
+        assert_eq!(parse_g75_battery(&[p[5], p[6]]).unwrap(), (36, Some(false)));
+        assert_eq!(parse_g75_battery(&[100, 0x10]).unwrap(), (100, Some(true)));
+        for invalid in [0, 1, 101, 255] {
+            assert!(parse_g75_battery(&[invalid, 0]).is_err());
+        }
+        assert!(parse_g75_battery(&[36]).is_err());
     }
 }

@@ -403,9 +403,9 @@ mod tests {
         let mut b = [0u8; 19];
         b[2] = 1;
         b[8] = 0x09;
-        b[9] = 8;
+        b[9] = 36;
         b[10] = 1;
-        assert_eq!(mchose_battery(&b).unwrap(), (8, Some(true), false));
+        assert_eq!(mchose_battery(&b).unwrap(), (36, Some(true), false));
         b[9] = 101;
         assert!(mchose_battery(&b).is_err());
         b[9] = 0;

@@ -767,6 +767,17 @@ fn error_category(error: &str) -> &'static str {
 fn anonymous_interface(interface: &crate::hid::Interface) -> Value {
     json!({"vid":interface.vid,"pid":interface.pid,"usage_page":interface.usage_page,"usage":interface.usage,"feature_length":interface.feature_len,"input_length":interface.input_len,"output_length":interface.output_len})
 }
+fn diagnostic_battery(state: &Value) -> Value {
+    let percent = state.get("percent").and_then(Value::as_u64);
+    let fresh = state.get("fresh").and_then(Value::as_bool).unwrap_or(false);
+    json!({
+        "raw_field": state.get("battery_raw").and_then(Value::as_u64),
+        "parsed_percent": percent,
+        "fresh": fresh,
+        "cached": percent.is_some() && !fresh,
+        "connection_path": state.get("connection_path").and_then(Value::as_str),
+    })
+}
 pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationReport> {
     let models: Vec<usize> = if let Some(key) = key {
         vec![checked_key(key)?]
@@ -807,7 +818,8 @@ pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationRep
             "rates":spec.rates,"wired_rates":spec.wired_rates,"sleeps":spec.sleeps,
             "advanced":spec.advanced.iter().map(|setting| json!({"key":setting.key,"choices":setting.choices})).collect::<Vec<_>>()
         });
-        devices.push(json!({"key":spec.key,"plugin":plugin,"interfaces":ports,"ui_metadata":ui_metadata,"connection":{"enumerated":!ports.is_empty(),"cached_present":state.get("present").and_then(Value::as_bool),"cached_fresh":state.get("fresh").and_then(Value::as_bool),"error_category":error_category(error)}}));
+        let battery = diagnostic_battery(&state);
+        devices.push(json!({"key":spec.key,"plugin":plugin,"interfaces":ports,"ui_metadata":ui_metadata,"battery":battery,"connection":{"enumerated":!ports.is_empty(),"cached_present":state.get("present").and_then(Value::as_bool),"cached_fresh":state.get("fresh").and_then(Value::as_bool),"error_category":error_category(error)}}));
     }
     write_json(
         path,
@@ -890,6 +902,25 @@ mod tests {
             assert!(!output.contains(forbidden));
         }
         assert!(output.contains("feature_length"));
+    }
+    #[test]
+    fn battery_diagnostics_distinguish_raw_current_and_cached_values() {
+        let fresh = diagnostic_battery(&json!({
+            "battery_raw":36,"percent":36,"fresh":true,
+            "connection_path":"2.4 GHz 接收器"
+        }));
+        assert_eq!(fresh["raw_field"], 36);
+        assert_eq!(fresh["parsed_percent"], 36);
+        assert_eq!(fresh["fresh"], true);
+        assert_eq!(fresh["cached"], false);
+        let cached = diagnostic_battery(&json!({
+            "battery_raw":36,"percent":36,"fresh":false,
+            "connection_path":"2.4 GHz 接收器"
+        }));
+        assert_eq!(cached["fresh"], false);
+        assert_eq!(cached["cached"], true);
+        assert_eq!(cached["raw_field"], 36);
+        assert!(!cached.to_string().contains("C:\\Users"));
     }
     #[test]
     fn legacy_configuration_requires_matching_device_and_preserves_extensions() {
