@@ -11,6 +11,7 @@ mod paint;
 mod plugin_ui;
 mod preset_ui;
 mod resident_macro_ui;
+mod startup;
 mod ui;
 mod update_ui;
 

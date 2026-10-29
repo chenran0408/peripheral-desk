@@ -4,6 +4,7 @@ use crate::{
     hid::wide,
     model::Tuning,
     paint::{self, Canvas, Images, R, *},
+    startup,
 };
 use std::{
     mem::{size_of, zeroed},
@@ -76,6 +77,7 @@ enum Command {
     Interval(u32),
     Threshold(u8),
     Notices,
+    Startup,
     Diagnose,
     Advanced(bool),
     SettingsPage(i32),
@@ -110,6 +112,7 @@ struct App {
     dragging: bool,
     status: String,
     status_error: bool,
+    startup_enabled: bool,
     images: Images,
     icon: HICON,
     tray_added: bool,
@@ -195,6 +198,7 @@ pub fn run(hidden: bool, battery: bool) {
                 "正在读取设备…".into()
             },
             status_error: false,
+            startup_enabled: startup::is_enabled().unwrap_or(false),
             images,
             icon,
             tray_added: false,
@@ -984,14 +988,14 @@ impl App {
                 self.add(
                     hwnd,
                     "检查更新",
-                    R::new(330, 566, 180, 40),
+                    R::new(330, 710, 180, 40),
                     GHOST,
                     Command::CoreUpdate,
                 );
                 self.add(
                     hwnd,
                     "配置备份与恢复",
-                    R::new(526, 566, 180, 40),
+                    R::new(526, 710, 180, 40),
                     GHOST,
                     Command::Configuration,
                 );
@@ -1033,6 +1037,17 @@ impl App {
                     R::new(330, 492, 180, 40),
                     GHOST,
                     Command::Diagnose,
+                );
+                self.add(
+                    hwnd,
+                    if self.startup_enabled {
+                        "开机启动：已开启"
+                    } else {
+                        "开机启动：关闭"
+                    },
+                    R::new(330, 585, 200, 40),
+                    CHIP,
+                    Command::Startup,
                 );
             }
         }
@@ -1269,6 +1284,21 @@ impl App {
                 self.snapshot.notices = !self.snapshot.notices;
                 self.save_preference(hwnd);
             }
+            Command::Startup => match startup::set_enabled(!self.startup_enabled) {
+                Ok(()) => {
+                    self.startup_enabled = !self.startup_enabled;
+                    self.set_status(
+                        if self.startup_enabled {
+                            "已开启开机启动，登录 Windows 后将在托盘运行"
+                        } else {
+                            "已关闭开机启动"
+                        },
+                        false,
+                    );
+                    self.layout(hwnd);
+                }
+                Err(error) => self.set_status(&error, true),
+            },
             Command::Diagnose => {
                 let path = backend::data_path().with_file_name("diagnostics.json");
                 let key = if let Page::Device(m) = self.page {
@@ -1683,6 +1713,7 @@ impl App {
             Command::Interval(v) => self.snapshot.interval == v,
             Command::Threshold(v) => self.snapshot.threshold == v,
             Command::Notices => self.snapshot.notices,
+            Command::Startup => self.startup_enabled,
             Command::Advanced(value) => self.advanced == value,
             Command::AudioPage(value) => self.audio_page == value,
             Command::AddDevice => true,
@@ -2403,7 +2434,7 @@ impl App {
     unsafe fn preferences(&self, c: &Canvas) {
         c.text("工具设置", R::new(40, 97, 500, 45), 28, 600, TEXT, DT_LEFT);
         c.round(
-            R::new(32, 170, self.width - 64, 430),
+            R::new(32, 170, self.width - 64, 520),
             20,
             PANEL,
             Some(BORDER),
@@ -2413,6 +2444,7 @@ impl App {
             (302, "低电阈值", "仅在未充电且读数有效时提醒"),
             (395, "低电提醒", "同一低电周期只提醒一次"),
             (487, "设备诊断", "仅导出本地 HID 元数据"),
+            (580, "开机启动", "登录 Windows 后在托盘运行"),
         ] {
             c.text(title, R::new(62, y, 240, 28), 16, 500, TEXT, DT_LEFT);
             c.text(hint, R::new(62, y + 30, 250, 25), 12, 400, DIM, DT_LEFT);
