@@ -7,7 +7,7 @@ description = "Native Windows peripheral controls and battery monitor"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:zip"]
+desktop = ["dep:zip", "dep:windows"]
 driver-runtime = ["dep:windows"]
 
 [lib]
@@ -26,16 +26,16 @@ sha2 = "0.10"
 zip = { version = "2", default-features = false, features = ["deflate"], optional = true }
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation", "Win32_Networking_WinHttp", "Win32_Devices_HumanInterfaceDevice",
-  "Win32_Devices_DeviceAndDriverInstallation", "Win32_Storage_FileSystem",
+  "Win32_Devices_DeviceAndDriverInstallation", "Win32_Devices_Properties", "Win32_Storage_FileSystem",
   "Win32_System_LibraryLoader", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_Security", "Win32_Security_Cryptography", "Win32_System_Diagnostics_ToolHelp",
   "Win32_Graphics_Gdi", "Win32_Graphics_GdiPlus", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell",
-  "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_UI_Controls_Dialogs", "Win32_System_IO", "Win32_UI_Input_KeyboardAndMouse"
+  "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_System_Registry", "Win32_UI_Controls_Dialogs", "Win32_System_IO", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Input_XboxController"
 ] }
 
 [dependencies.windows]
 version = "0.61"
 optional = true
-features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Variant"]
+features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Variant", "Gaming_Input", "Devices_Power", "Devices_Bluetooth", "Foundation", "System_Power"]
 
 [profile.release]
 opt-level = "s"

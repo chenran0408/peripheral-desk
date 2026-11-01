@@ -1,7 +1,7 @@
 #![windows_subsystem = "windows"]
 pub use peripheral_desk::{
     adapters, audio_fx, audio_lighting, backend, configuration, controls, devices, hid, model,
-    plugin_manager, profiles, protocol, storage,
+    plugin_manager, profiles, protocol, storage, system_battery,
 };
 mod configuration_ui;
 mod controls_ui;

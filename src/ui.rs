@@ -4,7 +4,7 @@ use crate::{
     hid::wide,
     model::Tuning,
     paint::{self, Canvas, Images, R, *},
-    startup,
+    startup, system_battery,
 };
 use std::{
     mem::{size_of, zeroed},
@@ -28,6 +28,15 @@ const GHOST: i32 = 3;
 const CARD: i32 = 4;
 const ENTRY: i32 = 5;
 const HOME_CONTENT_Y: i32 = 228;
+fn system_reading(device: &system_battery::SystemBattery) -> String {
+    if let Some(percent) = device.state.percent {
+        format!("{percent}%")
+    } else if let Some(level) = &device.level {
+        format!("{level}（等级）")
+    } else {
+        "电量未知".into()
+    }
+}
 fn detail_y(y: i32) -> i32 {
     145 + (y - 78) * 85 / 100
 }
@@ -51,12 +60,14 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 enum Page {
     Home,
     Device(usize),
+    System(usize),
     Preferences,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Home,
     Device(usize),
+    System(usize),
     Refresh,
     Close,
     Minimize,
@@ -600,7 +611,8 @@ impl App {
         }
         match self.page {
             Page::Home => {
-                if REGISTRY.is_empty() {
+                let total = REGISTRY.len() + self.snapshot.system_devices.len();
+                if total == 0 {
                     let center_y = HOME_CONTENT_Y + (h - HOME_CONTENT_Y - 86) / 2;
                     self.add(
                         hwnd,
@@ -610,36 +622,45 @@ impl App {
                         Command::AddDevice,
                     );
                 }
-                let cols = if REGISTRY.len() > 3 {
+                let cols = if total > 3 {
                     2
                 } else {
-                    (REGISTRY.len() as i32).clamp(1, 3)
+                    (total as i32).clamp(1, 3)
                 };
-                let page_size = if REGISTRY.len() > 3 { 4 } else { 3 };
+                let page_size = if total > 3 { 4 } else { 3 };
                 let cw = (w - 64 - 20 * (cols - 1)) / cols;
-                let card_h = if REGISTRY.len() > 3 {
+                let card_h = if total > 3 {
                     (h - HOME_CONTENT_Y - 106) / 2
                 } else {
                     (h - HOME_CONTENT_Y - 106).min(530)
                 };
-                for (slot, (index, spec)) in REGISTRY
-                    .iter()
-                    .enumerate()
+                for (slot, index) in (0..total)
                     .skip(self.home_page * page_size)
                     .take(page_size)
                     .enumerate()
                 {
                     let x = 32 + (slot as i32 % cols) * (cw + 20);
                     let y = HOME_CONTENT_Y + slot as i32 / cols * (card_h + 16);
+                    let name = if index < REGISTRY.len() {
+                        REGISTRY[index].name.to_owned()
+                    } else {
+                        self.snapshot.system_devices[index - REGISTRY.len()]
+                            .name
+                            .clone()
+                    };
                     self.add(
                         hwnd,
-                        spec.name,
+                        &name,
                         R::new(x, y, cw, card_h),
                         CARD,
-                        Command::Device(index),
+                        if index < REGISTRY.len() {
+                            Command::Device(index)
+                        } else {
+                            Command::System(index - REGISTRY.len())
+                        },
                     );
                 }
-                if REGISTRY.len() > page_size {
+                if total > page_size {
                     self.add(
                         hwnd,
                         "上一页",
@@ -956,6 +977,22 @@ impl App {
                     Command::Diagnose,
                 );
             }
+            Page::System(_) => {
+                self.add(
+                    hwnd,
+                    "‹  我的设备",
+                    R::new(28, 16, 133, 34),
+                    GHOST,
+                    Command::Home,
+                );
+                self.add(
+                    hwnd,
+                    "重新读取",
+                    R::new(w - 150, h - 61, 122, 39),
+                    GHOST,
+                    Command::Refresh,
+                );
+            }
             Page::Preferences => {
                 self.add(
                     hwnd,
@@ -1191,17 +1228,16 @@ impl App {
                 self.layout(hwnd);
             }
             Command::HomePage(delta) => {
+                let total = REGISTRY.len() + self.snapshot.system_devices.len();
                 self.home_page = (self.home_page as i32 + delta).clamp(
                     0,
-                    (REGISTRY
-                        .len()
-                        .div_ceil(if REGISTRY.len() > 3 { 4 } else { 3 })
-                        - 1) as i32,
+                    (total.div_ceil(if total > 3 { 4 } else { 3 }) - 1) as i32,
                 ) as usize;
                 self.layout(hwnd);
             }
             Command::Home => self.navigate(hwnd, Page::Home),
             Command::Device(m) => self.navigate(hwnd, Page::Device(m)),
+            Command::System(m) => self.navigate(hwnd, Page::System(m)),
             Command::Prefs => self.navigate(hwnd, Page::Preferences),
             Command::Minimize => {
                 ShowWindow(hwnd, SW_MINIMIZE);
@@ -1300,7 +1336,7 @@ impl App {
         self.set_status(
             if action.is_some() {
                 "正在保存到设备并读回确认…"
-            } else if REGISTRY.is_empty() {
+            } else if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
                 "打开驱动仓库，添加所需设备驱动；安装后自动重启生效"
             } else {
                 "正在读取设备…"
@@ -1375,7 +1411,28 @@ impl App {
         s.interval = self.snapshot.interval;
         s.threshold = self.snapshot.threshold;
         s.notices = self.snapshot.notices;
+        let selected_system = match self.page {
+            Page::System(index) => self
+                .snapshot
+                .system_devices
+                .get(index)
+                .map(|device| device.state.key.clone()),
+            _ => None,
+        };
         self.snapshot = s;
+        if let Some(key) = selected_system {
+            self.page = self
+                .snapshot
+                .system_devices
+                .iter()
+                .position(|device| device.state.key == key)
+                .map(Page::System)
+                .unwrap_or(Page::Home);
+        }
+        let total = REGISTRY.len() + self.snapshot.system_devices.len();
+        self.home_page = self
+            .home_page
+            .min(total.saturating_sub(1) / if total > 3 { 4 } else { 3 });
         if self.queued.is_empty() {
             self.preview_dpi = None;
         }
@@ -1395,13 +1452,14 @@ impl App {
             ),
             (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
             _ => {
-                let count = self.snapshot.devices.iter().filter(|d| d.fresh).count();
+                let count = self.snapshot.devices.iter().filter(|d| d.fresh).count()
+                    + self.snapshot.system_devices.len();
                 self.set_status(
                     &if let Some(notice) = profile_notice {
                         notice.into()
                     } else if writing {
                         "设置已保存，读回确认成功".into()
-                    } else if REGISTRY.is_empty() {
+                    } else if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
                         "打开驱动仓库添加设备；新驱动安装后自动重启生效".into()
                     } else {
                         format!("{count} 台设备在线 · 状态已更新")
@@ -1765,11 +1823,11 @@ impl App {
                     }
                 }
                 Command::HomePage(delta) => {
+                    let total = REGISTRY.len() + self.snapshot.system_devices.len();
                     if delta < 0 {
                         self.home_page > 0
                     } else {
-                        (self.home_page + 1) * if REGISTRY.len() > 3 { 4 } else { 3 }
-                            < REGISTRY.len()
+                        (self.home_page + 1) * if total > 3 { 4 } else { 3 } < total
                     }
                 }
                 Command::Refresh => self.pending.is_none() && self.queued.is_empty(),
@@ -1794,6 +1852,7 @@ impl App {
             match self.page {
                 Page::Home => self.home(&c),
                 Page::Device(m) => self.detail(&c, m),
+                Page::System(m) => self.system_detail(&c, m),
                 Page::Preferences => self.preferences(&c),
             }
             c.text(
@@ -1857,8 +1916,10 @@ impl App {
     unsafe fn home(&self, c: &Canvas) {
         c.text("我的设备", R::new(32, 154, 600, 40), 27, 600, TEXT, DT_LEFT);
         c.text(
-            if REGISTRY.is_empty() {
+            if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
                 "尚未加载设备驱动，先从驱动商店添加你的设备"
+            } else if REGISTRY.is_empty() {
+                "选择设备，查看 Windows 提供的电量"
             } else {
                 "选择设备，查看电量并调整设置"
             },
@@ -1868,7 +1929,7 @@ impl App {
             MUTED,
             DT_LEFT,
         );
-        if REGISTRY.is_empty() {
+        if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
             let center_y = HOME_CONTENT_Y + (self.height - HOME_CONTENT_Y - 86) / 2;
             c.round(
                 R::new(
@@ -1904,6 +1965,45 @@ impl App {
                 400,
                 DIM,
                 DT_CENTER,
+            );
+        }
+    }
+    unsafe fn system_detail(&self, c: &Canvas, m: usize) {
+        let Some(device) = self.snapshot.system_devices.get(m) else {
+            return;
+        };
+        c.text(
+            &device.name,
+            R::new(40, 165, self.width - 80, 64),
+            28,
+            600,
+            TEXT,
+            DT_LEFT,
+        );
+        c.text(
+            "Windows 系统电量 · 只读",
+            R::new(42, 230, self.width - 84, 30),
+            14,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            &system_reading(device),
+            R::new(42, 305, self.width - 84, 95),
+            54,
+            500,
+            TEXT,
+            DT_LEFT,
+        );
+        if device.state.charging == Some(true) {
+            c.text(
+                "正在充电",
+                R::new(42, 416, self.width - 84, 28),
+                15,
+                400,
+                MUTED,
+                DT_LEFT,
             );
         }
     }
@@ -2508,8 +2608,44 @@ impl App {
             && cursor.x < self.px(b.rect.w)
             && cursor.y < self.px(b.rect.h);
         if b.style == CARD {
-            if let Command::Device(m) = b.command {
-                self.card(&c, r, m);
+            if let Command::Device(m) | Command::System(m) = b.command {
+                if matches!(b.command, Command::Device(_)) {
+                    self.card(&c, r, m);
+                } else if let Some(device) = self.snapshot.system_devices.get(m) {
+                    c.round(r, 8, PANEL, Some(BORDER));
+                    c.text(
+                        "WINDOWS · 只读",
+                        R::new(24, 22, r.w - 48, 25),
+                        12,
+                        500,
+                        DIM,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        &device.name,
+                        R::new(24, 64, r.w - 48, 72),
+                        22,
+                        600,
+                        TEXT,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        &system_reading(device),
+                        R::new(24, r.h - 115, r.w - 48, 55),
+                        30,
+                        500,
+                        TEXT,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        "查看电量  ›",
+                        R::new(24, r.h - 55, r.w - 48, 30),
+                        13,
+                        400,
+                        MUTED,
+                        DT_RIGHT,
+                    );
+                }
                 if hover || item.itemState & ODS_FOCUS != 0 {
                     c.round(
                         R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
@@ -2528,7 +2664,9 @@ impl App {
         if b.style == ENTRY {
             c.rect(R::new(0, 0, b.rect.w, b.rect.h), BG);
             let selected = match b.command {
-                Command::Home => matches!(self.page, Page::Home | Page::Device(_)),
+                Command::Home => {
+                    matches!(self.page, Page::Home | Page::Device(_) | Page::System(_))
+                }
                 Command::Prefs => self.page == Page::Preferences,
                 _ => false,
             };
@@ -2834,10 +2972,18 @@ impl App {
                 )
             })
             .collect::<Vec<_>>()
+            .into_iter()
+            .chain(
+                self.snapshot
+                    .system_devices
+                    .iter()
+                    .map(|d| format!("{} {}", d.name, system_reading(d))),
+            )
+            .collect::<Vec<_>>()
             .join("\n");
         copy_wide(
             &mut n.szTip,
-            if REGISTRY.is_empty() {
+            if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
                 "外设盒 · 到主页面添加设备驱动"
             } else {
                 &tip
@@ -2939,7 +3085,9 @@ impl App {
         let mut area: RECT = zeroed();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as _, 0);
         let width = self.px(350);
-        let height = self.px(112 + REGISTRY.len().max(1) as i32 * 66);
+        let height = self
+            .px(112 + (REGISTRY.len() + self.snapshot.system_devices.len()).max(1) as i32 * 66)
+            .min(area.bottom - area.top - self.px(24));
         let x = (point.x - width).clamp(area.left, area.right - width);
         let y = (point.y - height - 12).clamp(area.top, area.bottom - height);
         SetWindowPos(
@@ -2986,11 +3134,14 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
             let dc = BeginPaint(hwnd, &mut ps);
             {
                 let c = Canvas::new(dc, a.dpi);
-                let height = 112 + REGISTRY.len().max(1) as i32 * 66;
+                let mut bounds: RECT = zeroed();
+                GetClientRect(hwnd, &mut bounds);
+                let height = a.logical(bounds.bottom);
+                let visible = ((height - 112) / 66).max(0) as usize;
                 c.rect(R::new(0, 0, 350, height), PANEL);
                 c.text("设备电量", R::new(21, 16, 240, 32), 17, 600, TEXT, DT_LEFT);
                 c.text("外设盒", R::new(21, 44, 280, 20), 10, 400, DIM, DT_LEFT);
-                if REGISTRY.is_empty() {
+                if REGISTRY.is_empty() && a.snapshot.system_devices.is_empty() {
                     c.text(
                         "未安装或尚未加载设备驱动",
                         R::new(21, 77, 308, 25),
@@ -3008,7 +3159,7 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                         DT_LEFT,
                     );
                 }
-                for (i, spec) in REGISTRY.iter().enumerate() {
+                for (i, spec) in REGISTRY.iter().enumerate().take(visible) {
                     let s = &a.snapshot.devices[i];
                     let y = 76 + i as i32 * 66;
                     c.image(a.images.images[i], R::new(18, y, 42, 45), s.fresh);
@@ -3042,6 +3193,42 @@ unsafe extern "system" fn flyout_proc(hwnd: HWND, msg: u32, _w: WPARAM, l: LPARA
                         300,
                         if s.fresh { TEXT } else { DIM },
                         DT_RIGHT,
+                    );
+                }
+                for (i, device) in a
+                    .snapshot
+                    .system_devices
+                    .iter()
+                    .enumerate()
+                    .take(visible.saturating_sub(REGISTRY.len()))
+                {
+                    let y = 76 + (REGISTRY.len() + i) as i32 * 66;
+                    c.text(&device.name, R::new(22, y, 216, 25), 13, 500, TEXT, DT_LEFT);
+                    c.text(
+                        "Windows · 只读",
+                        R::new(22, y + 25, 190, 19),
+                        11,
+                        400,
+                        DIM,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        &system_reading(device),
+                        R::new(230, y + 1, 100, 40),
+                        19,
+                        400,
+                        TEXT,
+                        DT_RIGHT,
+                    );
+                }
+                if REGISTRY.len() + a.snapshot.system_devices.len() > visible {
+                    c.text(
+                        "更多设备请在主页面查看",
+                        R::new(20, height - 62, 310, 20),
+                        11,
+                        400,
+                        DIM,
+                        DT_CENTER,
                     );
                 }
                 c.line(18, height - 40, 332, height - 40, BORDER, 1.);

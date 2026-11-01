@@ -22,6 +22,8 @@ pub mod plugin_manager;
 pub mod profiles;
 pub mod protocol;
 pub mod storage;
+#[cfg(feature = "desktop")]
+pub mod system_battery;
 
 #[cfg(feature = "desktop")]
 pub mod core_update;

@@ -16,6 +16,9 @@ pub use crate::model::{Action, State};
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     pub devices: Vec<State>,
+    #[cfg(feature = "desktop")]
+    #[serde(default, skip_serializing)]
+    pub system_devices: Vec<crate::system_battery::SystemBattery>,
     pub interval: u32,
     pub threshold: u8,
     pub notices: bool,
@@ -31,6 +34,8 @@ impl Default for Snapshot {
                     ..State::default()
                 })
                 .collect(),
+            #[cfg(feature = "desktop")]
+            system_devices: Vec::new(),
             interval: 60,
             threshold: 20,
             notices: true,
@@ -60,6 +65,8 @@ impl Snapshot {
             .unwrap_or_default();
         let saved = std::mem::take(&mut s.devices);
         s.devices = states_for_registry(&saved, &REGISTRY);
+        #[cfg(feature = "desktop")]
+        s.system_devices.clear();
         s.interval = s.interval.clamp(30, 1800);
         s.threshold = s.threshold.clamp(5, 50);
         for d in &mut s.devices {
@@ -130,7 +137,28 @@ fn states_for_registry(saved: &[State], registry: &[crate::devices::DeviceSpec])
 }
 
 pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapshot, Result<()>) {
-    refresh_with(previous, action, hid::enumerate(), crate::adapters::open)
+    let (next, result) = refresh_with(previous, action, hid::enumerate(), crate::adapters::open);
+    (
+        if action.is_none() {
+            with_system_battery(next)
+        } else {
+            next
+        },
+        result,
+    )
+}
+
+fn with_system_battery(next: Snapshot) -> Snapshot {
+    #[cfg(feature = "desktop")]
+    {
+        let mut next = next;
+        next.system_devices = crate::system_battery::enumerate();
+        next
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        next
+    }
 }
 
 pub fn refresh_progress<F>(previous: &Snapshot, mut progress: F) -> (Snapshot, Result<()>)
@@ -140,10 +168,14 @@ where
     let interfaces = match hid::enumerate() {
         Ok(interfaces) => interfaces,
         Err(error) => {
-            return refresh_scoped(previous, None, None, Err(error), crate::adapters::open)
+            let (next, result) =
+                refresh_scoped(previous, None, None, Err(error), crate::adapters::open);
+            return (with_system_battery(next), result);
         }
     };
-    refresh_parallel(previous, interfaces, crate::adapters::open, &mut progress)
+    let (next, result) =
+        refresh_parallel(previous, interfaces, crate::adapters::open, &mut progress);
+    (with_system_battery(next), result)
 }
 
 fn refresh_parallel<F, P>(
