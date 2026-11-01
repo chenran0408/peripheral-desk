@@ -414,10 +414,13 @@ mod tests {
     #[test]
     #[cfg(not(feature = "driver-runtime"))]
     fn installed_registry_controls_cached_state_identity_without_positional_defaults() {
-        let installed = crate::devices::host_registry_from_installed([(
-            "0.4.2".into(),
-            serde_json::json!({"key":"mchose-a5-ultra","name":"A5","brand":"MCHOSE","kind":"mouse","matches":[{"vid":14391,"pid":4108}]}),
-        )]);
+        let installed = crate::devices::host_registry_from_installed(
+            [(
+                "0.4.2".into(),
+                serde_json::json!({"key":"mchose-a5-ultra","name":"A5","brand":"MCHOSE","kind":"mouse","matches":[{"vid":14391,"pid":4108}]}),
+            )],
+            |_: &str| false,
+        );
         let saved = vec![
             State {
                 percent: Some(99),

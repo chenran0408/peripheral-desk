@@ -193,6 +193,44 @@ pub fn set_channel(value: &str) -> Result<()> {
     }
     storage::atomic_write(&root().join("channel.txt"), value.as_bytes())
 }
+// Plugins whose receiver identity cannot distinguish a specific model stay
+// unclaimed until the user installs them on purpose; installing is the claim.
+fn claims_path() -> PathBuf {
+    root().join("claims.json")
+}
+fn claims_file() -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Claims {
+        #[serde(default)]
+        claims: Vec<String>,
+    }
+    std::fs::read(claims_path())
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Claims>(&bytes).ok())
+        .map(|file| file.claims)
+        .unwrap_or_default()
+}
+pub fn is_claimed(key: &str) -> bool {
+    claims_file().iter().any(|claim| claim == key)
+}
+pub fn claimed_keys() -> Vec<String> {
+    claims_file()
+}
+pub fn set_claimed(key: &str, claimed: bool) -> Result<()> {
+    safe_id(key)?;
+    let mut keys: Vec<String> = claims_file()
+        .into_iter()
+        .filter(|claim| claim != key)
+        .collect();
+    if claimed {
+        keys.push(key.into());
+    }
+    let file = serde_json::json!({"schema": 1, "claims": keys});
+    storage::atomic_write(
+        &claims_path(),
+        &serde_json::to_vec_pretty(&file).map_err(|e| e.to_string())?,
+    )
+}
 fn cached_catalog() -> Result<Option<Vec<u8>>> {
     let pointer = root().join(format!("catalog-{}.pointer", channel()));
     let hash = match std::fs::read_to_string(pointer) {
@@ -790,6 +828,14 @@ fn install_bytes(package: &DriverPackage, bytes: &[u8]) -> Result<InstalledDrive
             &pointer(&package.id),
             &serde_json::to_vec_pretty(&current).map_err(|e| e.to_string())?,
         )?;
+        if package
+            .device
+            .get("manual")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            set_claimed(&package.id, true)?;
+        }
         Ok(current)
     })();
     if result.is_err() && incoming.exists() {
@@ -846,6 +892,7 @@ pub fn uninstall(id: &str) -> Result<()> {
     if directory.is_dir() {
         std::fs::remove_dir_all(directory).map_err(|e| e.to_string())?;
     }
+    let _ = set_claimed(id, false);
     Ok(())
 }
 struct Http(*mut c_void);

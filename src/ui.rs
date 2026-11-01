@@ -26,6 +26,11 @@ const BATTERY: u32 = WM_APP + 4;
 const CHIP: i32 = 1;
 const GHOST: i32 = 3;
 const CARD: i32 = 4;
+const ENTRY: i32 = 5;
+const HOME_CONTENT_Y: i32 = 228;
+fn detail_y(y: i32) -> i32 {
+    145 + (y - 78) * 85 / 100
+}
 type WorkResult = (Snapshot, Result<(), String>);
 enum WorkUpdate {
     Device(usize, backend::State),
@@ -575,38 +580,28 @@ impl App {
             Command::Minimize,
         );
         self.add(hwnd, "×", R::new(w - 56, 15, 34, 32), GHOST, Command::Close);
+        let entries = [
+            ("设备", Command::Home),
+            ("驱动商店", Command::DriverManager),
+            ("配置备份", Command::Configuration),
+            ("检查更新", Command::CoreUpdate),
+            ("工具设置", Command::Prefs),
+        ];
+        let gap = 10;
+        let entry_width = (w - 64 - gap * 4) / 5;
+        for (i, (label, command)) in entries.into_iter().enumerate() {
+            self.add(
+                hwnd,
+                label,
+                R::new(32 + i as i32 * (entry_width + gap), 77, entry_width, 58),
+                ENTRY,
+                command,
+            );
+        }
         match self.page {
             Page::Home => {
-                self.add(
-                    hwnd,
-                    "检查更新",
-                    R::new(w - 558, 102, 116, 38),
-                    GHOST,
-                    Command::CoreUpdate,
-                );
-                self.add(
-                    hwnd,
-                    "配置备份",
-                    R::new(w - 432, 102, 116, 38),
-                    GHOST,
-                    Command::Configuration,
-                );
-                self.add(
-                    hwnd,
-                    "驱动仓库",
-                    R::new(w - 306, 102, 146, 38),
-                    GHOST,
-                    Command::DriverManager,
-                );
-                self.add(
-                    hwnd,
-                    "重新读取",
-                    R::new(w - 154, 102, 122, 40),
-                    GHOST,
-                    Command::Refresh,
-                );
                 if REGISTRY.is_empty() {
-                    let center_y = 176 + (h - 266) / 2;
+                    let center_y = HOME_CONTENT_Y + (h - HOME_CONTENT_Y - 86) / 2;
                     self.add(
                         hwnd,
                         "＋  添加设备驱动",
@@ -623,9 +618,9 @@ impl App {
                 let page_size = if REGISTRY.len() > 3 { 4 } else { 3 };
                 let cw = (w - 64 - 20 * (cols - 1)) / cols;
                 let card_h = if REGISTRY.len() > 3 {
-                    (h - 250) / 2
+                    (h - HOME_CONTENT_Y - 106) / 2
                 } else {
-                    (h - 275).min(530)
+                    (h - HOME_CONTENT_Y - 106).min(530)
                 };
                 for (slot, (index, spec)) in REGISTRY
                     .iter()
@@ -635,7 +630,7 @@ impl App {
                     .enumerate()
                 {
                     let x = 32 + (slot as i32 % cols) * (cw + 20);
-                    let y = 176 + slot as i32 / cols * (card_h + 16);
+                    let y = HOME_CONTENT_Y + slot as i32 / cols * (card_h + 16);
                     self.add(
                         hwnd,
                         spec.name,
@@ -662,10 +657,10 @@ impl App {
                 }
                 self.add(
                     hwnd,
-                    "工具设置",
-                    R::new(32, h - 62, 112, 38),
+                    "重新读取",
+                    R::new(w - 272, h - 62, 116, 38),
                     GHOST,
-                    Command::Prefs,
+                    Command::Refresh,
                 );
                 self.add(
                     hwnd,
@@ -676,29 +671,6 @@ impl App {
                 );
             }
             Page::Device(m) => {
-                self.add(
-                    hwnd,
-                    "驱动管理",
-                    R::new(174, 16, 112, 34),
-                    GHOST,
-                    Command::DriverManager,
-                );
-                self.add(
-                    hwnd,
-                    "配置备份",
-                    R::new(
-                        if REGISTRY[m].kind == Kind::Headset {
-                            412
-                        } else {
-                            28
-                        },
-                        h - 62,
-                        136,
-                        38,
-                    ),
-                    GHOST,
-                    Command::Configuration,
-                );
                 self.add(
                     hwnd,
                     "‹  我的设备",
@@ -810,20 +782,20 @@ impl App {
                         self.add(
                             hwnd,
                             "上一页",
-                            R::new(rx + rw - 240, 101, 64, 34),
+                            R::new(rx + rw - 240, detail_y(101), 64, 34),
                             GHOST,
                             Command::SettingsPage(-1),
                         );
                         self.add(
                             hwnd,
                             "下一页",
-                            R::new(rx + rw - 94, 101, 64, 34),
+                            R::new(rx + rw - 94, detail_y(101), 64, 34),
                             GHOST,
                             Command::SettingsPage(1),
                         );
                     }
                     for (row, setting) in self.visible_settings(m).iter().enumerate() {
-                        let y = 172 + row as i32 * 78;
+                        let y = detail_y(172 + row as i32 * 78);
                         let volume = is_volume(setting.key);
                         let slots = setting.choices.len() as i32 + if volume { 2 } else { 0 };
                         let bw = ((rw - 280 - 6 * (slots - 1)) / slots).clamp(28, 88);
@@ -861,14 +833,14 @@ impl App {
                             self.add(
                                 hwnd,
                                 "+",
-                                R::new(x, 272, bw - 10, 30),
+                                R::new(x, detail_y(272), bw - 10, 30),
                                 CHIP,
                                 Command::AudioStep(*key, 1),
                             );
                             self.add(
                                 hwnd,
                                 "−",
-                                R::new(x, 522, bw - 10, 30),
+                                R::new(x, detail_y(522), bw - 10, 30),
                                 CHIP,
                                 Command::AudioStep(*key, -1),
                             );
@@ -876,7 +848,7 @@ impl App {
                         self.add(
                             hwnd,
                             "所有频段归零",
-                            R::new(cx, 586, 156, 36),
+                            R::new(cx, detail_y(586), 156, 36),
                             GHOST,
                             Command::FlatEq,
                         );
@@ -895,23 +867,23 @@ impl App {
                         self.add(
                             hwnd,
                             &label,
-                            R::new(cx + i as i32 * (bw + 10), 178, bw, 38),
+                            R::new(cx + i as i32 * (bw + 10), detail_y(178), bw, 38),
                             CHIP,
                             Command::Setting(action),
                         );
                     }
-                    self.slider = R::new(cx, 239, rw - 158, 24);
+                    self.slider = R::new(cx, detail_y(239), rw - 158, 24);
                     self.add(
                         hwnd,
                         "−",
-                        R::new(rx + rw - 112, 232, 34, 34),
+                        R::new(rx + rw - 112, detail_y(232), 34, 34),
                         GHOST,
                         Command::Step(-50),
                     );
                     self.add(
                         hwnd,
                         "+",
-                        R::new(rx + rw - 68, 232, 34, 34),
+                        R::new(rx + rw - 68, detail_y(232), 34, 34),
                         GHOST,
                         Command::Step(50),
                     );
@@ -924,7 +896,7 @@ impl App {
                             label,
                             R::new(
                                 cx + (i % 5) as i32 * (bw + 10),
-                                172 + (i / 5) as i32 * 48,
+                                detail_y(172 + (i / 5) as i32 * 48),
                                 bw,
                                 36,
                             ),
@@ -946,7 +918,7 @@ impl App {
                         self.add(
                             hwnd,
                             &format!("{rate} Hz"),
-                            R::new(x + i as i32 * (bw + gap), 358, bw, 37),
+                            R::new(x + i as i32 * (bw + gap), detail_y(358), bw, 37),
                             CHIP,
                             Command::Setting(Action::Rate(*rate)),
                         );
@@ -962,7 +934,7 @@ impl App {
                         self.add(
                             hwnd,
                             &sleep_label(*sec, false),
-                            R::new(x, 425, width, 35),
+                            R::new(x, detail_y(425), width, 35),
                             CHIP,
                             Command::Setting(Action::Sleep(*sec)),
                         );
@@ -987,20 +959,6 @@ impl App {
             Page::Preferences => {
                 self.add(
                     hwnd,
-                    "检查更新",
-                    R::new(330, 710, 180, 40),
-                    GHOST,
-                    Command::CoreUpdate,
-                );
-                self.add(
-                    hwnd,
-                    "配置备份与恢复",
-                    R::new(526, 710, 180, 40),
-                    GHOST,
-                    Command::Configuration,
-                );
-                self.add(
-                    hwnd,
                     "‹  我的设备",
                     R::new(28, 16, 133, 34),
                     GHOST,
@@ -1010,7 +968,7 @@ impl App {
                     self.add(
                         hwnd,
                         &format!("{value} 秒"),
-                        R::new(330 + i as i32 * 116, 214, 104, 40),
+                        R::new(330 + i as i32 * 116, 256, 104, 40),
                         CHIP,
                         Command::Interval(*value),
                     );
@@ -1019,7 +977,7 @@ impl App {
                     self.add(
                         hwnd,
                         &format!("{value}%"),
-                        R::new(330 + i as i32 * 84, 307, 72, 40),
+                        R::new(330 + i as i32 * 84, 349, 72, 40),
                         CHIP,
                         Command::Threshold(*value),
                     );
@@ -1027,14 +985,14 @@ impl App {
                 self.add(
                     hwnd,
                     "启用低电提醒",
-                    R::new(330, 400, 180, 40),
+                    R::new(330, 442, 180, 40),
                     CHIP,
                     Command::Notices,
                 );
                 self.add(
                     hwnd,
                     "导出设备诊断",
-                    R::new(330, 492, 180, 40),
+                    R::new(330, 534, 180, 40),
                     GHOST,
                     Command::Diagnose,
                 );
@@ -1045,7 +1003,7 @@ impl App {
                     } else {
                         "开机启动：关闭"
                     },
-                    R::new(330, 585, 200, 40),
+                    R::new(330, 627, 200, 40),
                     CHIP,
                     Command::Startup,
                 );
@@ -1515,7 +1473,12 @@ impl App {
             .iter()
             .enumerate()
             .find_map(|(i, (key, _))| {
-                let rect = R::new(430 + i as i32 * bw, 314, bw - 10, 190);
+                let rect = R::new(
+                    430 + i as i32 * bw,
+                    detail_y(314),
+                    bw - 10,
+                    detail_y(504) - detail_y(314),
+                );
                 (rect.contains(x, y) && self.tuning_value(m, *key).is_some())
                     .then_some((*key, rect))
             })
@@ -1526,18 +1489,21 @@ impl App {
     }
     unsafe fn eq_panel(&self, c: &Canvas, m: usize) {
         let bw = (self.width - 394 - 28 - 72) / 10;
+        let top = detail_y(314);
+        let bottom = detail_y(504);
+        let middle = (top + bottom) / 2;
         for (i, (key, label)) in crate::audio_fx::EQ_BANDS.iter().enumerate() {
             let x = 430 + i as i32 * bw;
             let center = x + (bw - 10) / 2;
             let value = self.tuning_value(m, *key);
             let available = value.is_some() && self.snapshot.devices[m].fresh;
-            c.line(center, 314, center, 504, BORDER, 5.);
-            c.line(center - 7, 409, center + 7, 409, DIM, 1.);
+            c.line(center, top, center, bottom, BORDER, 5.);
+            c.line(center - 7, middle, center + 7, middle, DIM, 1.);
             if let Some(v) = value {
-                let y = 504 - (v as f32 / 40. * 190.).round() as i32;
+                let y = bottom - (v as f32 / 40. * (bottom - top) as f32).round() as i32;
                 c.line(
                     center,
-                    409,
+                    middle,
                     center,
                     y,
                     if available { RED } else { DIM },
@@ -1554,13 +1520,20 @@ impl App {
                 &value
                     .map(|v| format!("{:+}", v as i16 - 20))
                     .unwrap_or_else(|| "—".into()),
-                R::new(x - 5, 239, bw, 25),
+                R::new(x - 5, detail_y(239), bw, 25),
                 12,
                 400,
                 MUTED,
                 DT_CENTER,
             );
-            c.text(label, R::new(x - 5, 556, bw, 22), 12, 400, DIM, DT_CENTER);
+            c.text(
+                label,
+                R::new(x - 5, detail_y(556) + 6, bw, 22),
+                12,
+                400,
+                DIM,
+                DT_CENTER,
+            );
         }
     }
     unsafe fn connect_audio(&mut self, hwnd: HWND) {
@@ -1831,12 +1804,12 @@ impl App {
                     R::new(180, self.height - 58, self.width - 500, 32)
                 } else if self.page == Page::Home {
                     R::new(
-                        170,
+                        32,
                         self.height - 58,
                         if REGISTRY.len() > 4 {
-                            (self.width / 2 - 300).max(120)
+                            (self.width / 2 - 150).max(120)
                         } else {
-                            self.width - 340
+                            self.width - 322
                         },
                         32,
                     )
@@ -1867,12 +1840,12 @@ impl App {
             if self.page == Page::Home {
                 "外设盒  /  外设控制中心"
             } else {
-                ""
+                "外设盒"
             },
             R::new(
                 if self.page == Page::Home { 47 } else { 206 },
                 18,
-                if self.page == Page::Home { 450 } else { 182 },
+                if self.page == Page::Home { 450 } else { 75 },
                 32,
             ),
             13,
@@ -1882,23 +1855,28 @@ impl App {
         );
     }
     unsafe fn home(&self, c: &Canvas) {
-        c.text("我的设备", R::new(32, 83, 600, 45), 30, 600, TEXT, DT_LEFT);
+        c.text("我的设备", R::new(32, 154, 600, 40), 27, 600, TEXT, DT_LEFT);
         c.text(
             if REGISTRY.is_empty() {
-                "尚未加载设备驱动，先从驱动仓库添加你的设备"
+                "尚未加载设备驱动，先从驱动商店添加你的设备"
             } else {
                 "选择设备，查看电量并调整设置"
             },
-            R::new(34, 134, 700, 24),
+            R::new(34, 199, 700, 23),
             13,
             400,
             MUTED,
             DT_LEFT,
         );
         if REGISTRY.is_empty() {
-            let center_y = 176 + (self.height - 266) / 2;
+            let center_y = HOME_CONTENT_Y + (self.height - HOME_CONTENT_Y - 86) / 2;
             c.round(
-                R::new(32, 176, self.width - 64, self.height - 266),
+                R::new(
+                    32,
+                    HOME_CONTENT_Y,
+                    self.width - 64,
+                    self.height - HOME_CONTENT_Y - 86,
+                ),
                 20,
                 PANEL,
                 Some(BORDER),
@@ -1936,24 +1914,28 @@ impl App {
         let rx = 394;
         let rw = self.width - rx - 28;
         let cx = rx + 30;
-        c.round(R::new(28, 78, 344, h - 160), 20, PANEL, Some(BORDER));
-        c.round(R::new(rx, 78, rw, h - 160), 20, PANEL, Some(BORDER));
+        c.round(R::new(28, 145, 344, h - 227), 20, PANEL, Some(BORDER));
+        c.round(R::new(rx, 145, rw, h - 227), 20, PANEL, Some(BORDER));
         if s.fresh {
-            c.glow(200, 185, 116);
+            c.glow(200, 225, 116);
         }
-        c.image(self.images.images[m], R::new(60, 100, 280, 188), s.fresh);
+        c.image(
+            self.images.images[m],
+            R::new(60, detail_y(100), 280, 162),
+            s.fresh,
+        );
         c.text(
             spec.name,
-            R::new(54, 308, 300, 32),
+            R::new(54, detail_y(308), 300, 32),
             20,
             600,
             if s.fresh { TEXT } else { MUTED },
             DT_LEFT,
         );
-        c.ellipse(R::new(56, 354, 7, 7), connection_color(s));
+        c.ellipse(R::new(56, detail_y(354), 7, 7), connection_color(s));
         c.text(
             connection(s, self.images.installed[m]),
-            R::new(74, 340, 272, 32),
+            R::new(74, detail_y(340), 272, 32),
             13,
             400,
             MUTED,
@@ -1961,17 +1943,17 @@ impl App {
         );
         c.text(
             spec.validation,
-            R::new(54, 370, 292, 17),
+            R::new(54, detail_y(370), 292, 17),
             10,
             400,
             DIM,
             DT_LEFT,
         );
-        c.line(54, 393, 346, 393, BORDER, 1.);
+        c.line(54, detail_y(393), 346, detail_y(393), BORDER, 1.);
         if spec.kind == Kind::Accessory {
             c.text(
                 "USB 供电 · 无电池",
-                R::new(54, 415, 292, 30),
+                R::new(54, detail_y(415), 292, 30),
                 18,
                 500,
                 MUTED,
@@ -1979,7 +1961,7 @@ impl App {
             );
             c.text(
                 "灯效控制",
-                R::new(424, 101, 400, 32),
+                R::new(424, detail_y(101), rw - 60, 32),
                 22,
                 600,
                 TEXT,
@@ -1987,7 +1969,7 @@ impl App {
             );
             c.text(
                 "点击顶部“灯效设置”读取并编辑设备灯光。",
-                R::new(424, 150, 660, 30),
+                R::new(424, detail_y(150), rw - 60, 30),
                 15,
                 400,
                 MUTED,
@@ -1995,7 +1977,7 @@ impl App {
             );
             c.text(
                 "仅开放插件声明的模式、颜色与调节范围。",
-                R::new(424, 194, 660, 30),
+                R::new(424, detail_y(194), rw - 60, 30),
                 13,
                 400,
                 DIM,
@@ -2012,7 +1994,7 @@ impl App {
             .iter()
             .enumerate()
             {
-                let y = 404 + i as i32 * 34;
+                let y = detail_y(404 + i as i32 * 34);
                 c.text(label, R::new(54, y, 150, 25), 13, 400, DIM, DT_LEFT);
                 c.text(
                     &self
@@ -2072,13 +2054,23 @@ impl App {
             if spec.kind == Kind::Keyboard && i == 0 {
                 continue;
             }
-            let y = 400 + i as i32 * 31;
+            let y = detail_y(400 + i as i32 * 31);
             c.text(label, R::new(54, y, 120, 25), 13, 400, DIM, DT_LEFT);
             c.text(value, R::new(168, y, 178, 25), 13, 400, MUTED, DT_RIGHT);
         }
-        let ring_y = (h - 303).max(538);
+        let compact_ring = h < 800;
+        let ring_y = if compact_ring {
+            526
+        } else {
+            (h - 303).max(538)
+        };
         c.ring(
-            R::new(133, ring_y, 134, 134),
+            R::new(
+                if compact_ring { 140 } else { 133 },
+                ring_y,
+                if compact_ring { 120 } else { 134 },
+                if compact_ring { 120 } else { 134 },
+            ),
             s.percent.filter(|_| s.fresh),
             s.fresh,
         );
@@ -2094,7 +2086,7 @@ impl App {
             } else {
                 "等待设备连接"
             },
-            R::new(60, ring_y + 150, 280, 24),
+            R::new(60, ring_y + if compact_ring { 136 } else { 150 }, 280, 24),
             13,
             400,
             MUTED,
@@ -2103,7 +2095,7 @@ impl App {
         if spec.read_only() {
             c.text(
                 "只读设备状态",
-                R::new(cx, 104, rw - 60, 34),
+                R::new(cx, detail_y(104), rw - 60, 34),
                 23,
                 600,
                 TEXT,
@@ -2111,16 +2103,21 @@ impl App {
             );
             c.text(
                 spec.validation,
-                R::new(cx, 152, rw - 60, 25),
+                R::new(cx, detail_y(152), rw - 60, 25),
                 13,
                 400,
                 AMBER,
                 DT_LEFT,
             );
-            c.round(R::new(cx, 205, rw - 60, 134), 16, FIELD, Some(BORDER));
+            c.round(
+                R::new(cx, detail_y(205), rw - 60, 134),
+                16,
+                FIELD,
+                Some(BORDER),
+            );
             c.text(
                 "此插件提供设备识别与电量读取。",
-                R::new(cx + 22, 225, rw - 104, 28),
+                R::new(cx + 22, detail_y(225), rw - 104, 28),
                 16,
                 500,
                 TEXT,
@@ -2128,7 +2125,7 @@ impl App {
             );
             c.text(
                 "DPI、改键、宏和灯效写入未开放。",
-                R::new(cx + 22, 268, rw - 104, 26),
+                R::new(cx + 22, detail_y(268), rw - 104, 26),
                 13,
                 400,
                 MUTED,
@@ -2140,7 +2137,7 @@ impl App {
                 } else {
                     &s.error
                 },
-                R::new(cx, 365, rw - 60, 70),
+                R::new(cx, detail_y(365), rw - 60, 70),
                 13,
                 400,
                 if s.fresh { GREEN } else { DIM },
@@ -2155,7 +2152,7 @@ impl App {
         if spec.kind == Kind::Mouse {
             c.text(
                 "DPI 灵敏度",
-                R::new(cx, 101, 300, 30),
+                R::new(cx, detail_y(101), 300, 30),
                 20,
                 600,
                 TEXT,
@@ -2163,7 +2160,7 @@ impl App {
             );
             c.text(
                 &format!("点击快捷值或拖动滑块调整，滚轮可 {} 步进", spec.dpi_step),
-                R::new(cx, 137, rw - 60, 24),
+                R::new(cx, detail_y(137), rw - 60, 24),
                 12,
                 400,
                 DIM,
@@ -2174,7 +2171,7 @@ impl App {
                     .value(m)
                     .map(|v| format_number(v as u32))
                     .unwrap_or_else(|| "—".into()),
-                R::new(rx + rw - 230, 97, 170, 52),
+                R::new(rx + rw - 230, detail_y(97), 170, 52),
                 38,
                 300,
                 if s.fresh { TEXT } else { DIM },
@@ -2182,7 +2179,7 @@ impl App {
             );
             c.text(
                 "DPI",
-                R::new(rx + rw - 53, 115, 30, 24),
+                R::new(rx + rw - 53, detail_y(115), 30, 24),
                 12,
                 400,
                 DIM,
@@ -2208,28 +2205,42 @@ impl App {
             }
             c.text(
                 "移动滑块可连续调整；点击 − / + 精调",
-                R::new(cx, 286, rw - 60, 24),
+                R::new(cx, detail_y(286), rw - 60, 24),
                 12,
                 400,
                 DIM,
                 DT_LEFT,
             );
         } else {
-            c.text("键盘灯效", R::new(cx, 101, 300, 32), 20, 600, TEXT, DT_LEFT);
+            c.text(
+                "键盘灯效",
+                R::new(cx, detail_y(101), 300, 32),
+                20,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
             c.text(
                 "选择灯光效果，保留其他灯光及按键设置",
-                R::new(cx, 137, rw - 60, 24),
+                R::new(cx, detail_y(137), rw - 60, 24),
                 12,
                 400,
                 DIM,
                 DT_LEFT,
             );
         }
-        c.line(cx, 337, rx + rw - 30, 337, BORDER, 1.);
-        c.text("回报率", R::new(cx, 354, 160, 29), 15, 500, MUTED, DT_LEFT);
+        c.line(cx, detail_y(337), rx + rw - 30, detail_y(337), BORDER, 1.);
+        c.text(
+            "回报率",
+            R::new(cx, detail_y(354), 135, 29),
+            15,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
         c.text(
             "决定输入上报频率",
-            R::new(cx, 382, 165, 22),
+            R::new(cx, detail_y(382), 135, 22),
             11,
             400,
             DIM,
@@ -2237,7 +2248,7 @@ impl App {
         );
         c.text(
             "自动休眠",
-            R::new(cx, 421, 165, 29),
+            R::new(cx, detail_y(421), 135, 29),
             15,
             500,
             MUTED,
@@ -2245,16 +2256,24 @@ impl App {
         );
         c.text(
             "空闲后进入省电状态",
-            R::new(cx, 451, 165, 22),
+            R::new(cx, detail_y(451), 135, 22),
             11,
             400,
             DIM,
             DT_LEFT,
         );
-        c.line(cx, 492, rx + rw - 30, 492, BORDER, 1.);
+        let lower_section = (h - 804).clamp(-22, 0);
+        c.line(
+            cx,
+            detail_y(492) + lower_section,
+            rx + rw - 30,
+            detail_y(492) + lower_section,
+            BORDER,
+            1.,
+        );
         c.text(
             "更多设备设置",
-            R::new(cx, 513, 200, 27),
+            R::new(cx, detail_y(513) + lower_section, 200, 23),
             15,
             500,
             MUTED,
@@ -2266,7 +2285,7 @@ impl App {
             } else {
                 "点击上方「高级设置」，调整更多设备参数"
             },
-            R::new(cx, 542, rw - 70, 24),
+            R::new(cx, detail_y(542) + lower_section, rw - 70, 22),
             13,
             400,
             DIM,
@@ -2330,7 +2349,7 @@ impl App {
             } else {
                 "高级设置"
             },
-            R::new(cx, 101, 350, 32),
+            R::new(cx, detail_y(101), 350, 32),
             22,
             600,
             TEXT,
@@ -2348,7 +2367,7 @@ impl App {
             } else {
                 "从设备读取当前值，调整后自动保存并核对"
             },
-            R::new(cx, 138, rw - 60, 23),
+            R::new(cx, detail_y(138), rw - 60, 23),
             13,
             400,
             DIM,
@@ -2357,7 +2376,7 @@ impl App {
         if !audio && self.settings_pages(m) > 1 {
             c.text(
                 &format!("{} / {}", self.settings_page + 1, self.settings_pages(m)),
-                R::new(rx + rw - 174, 101, 72, 34),
+                R::new(rx + rw - 174, detail_y(101), 72, 34),
                 12,
                 400,
                 MUTED,
@@ -2365,7 +2384,7 @@ impl App {
             );
         }
         for (i, setting) in self.visible_settings(m).iter().enumerate() {
-            let y = 169 + i as i32 * 78;
+            let y = detail_y(169 + i as i32 * 78);
             c.text(
                 setting.title,
                 R::new(cx, y, 210, 27),
@@ -2392,12 +2411,17 @@ impl App {
                 DIM,
                 DT_LEFT,
             );
-            c.line(cx, y + 65, rx + rw - 30, y + 65, BORDER, 1.);
+            c.line(cx, y + 58, rx + rw - 30, y + 58, BORDER, 1.);
         }
         if audio && self.audio_page == 1 {
             self.eq_panel(c, m);
         }
-        c.round(R::new(cx, h - 182, rw - 60, 60), 12, FIELD, None);
+        let notice_y = if audio && self.audio_page == 1 {
+            h - 166
+        } else {
+            h - 182
+        };
+        c.round(R::new(cx, notice_y, rw - 60, 60), 12, FIELD, None);
         c.text(
             if audio {
                 if self.snapshot.devices[m].settings_error.is_empty() {
@@ -2408,7 +2432,7 @@ impl App {
             } else {
                 "自动保存 · 设备读回确认"
             },
-            R::new(cx + 18, h - 172, rw - 96, 24),
+            R::new(cx + 18, notice_y + 10, rw - 96, 24),
             13,
             500,
             MUTED,
@@ -2424,7 +2448,7 @@ impl App {
             } else {
                 "灰色选项表示当前设备或灯效未开放该设置"
             },
-            R::new(cx + 18, h - 148, rw - 96, 20),
+            R::new(cx + 18, notice_y + 34, rw - 96, 20),
             12,
             400,
             DIM,
@@ -2432,19 +2456,19 @@ impl App {
         );
     }
     unsafe fn preferences(&self, c: &Canvas) {
-        c.text("工具设置", R::new(40, 97, 500, 45), 28, 600, TEXT, DT_LEFT);
+        c.text("工具设置", R::new(40, 155, 500, 40), 27, 600, TEXT, DT_LEFT);
         c.round(
-            R::new(32, 170, self.width - 64, 520),
+            R::new(32, 212, self.width - 64, 488),
             20,
             PANEL,
             Some(BORDER),
         );
         for (y, title, hint) in [
-            (209, "自动刷新", "较长间隔可减少设备唤醒"),
-            (302, "低电阈值", "仅在未充电且读数有效时提醒"),
-            (395, "低电提醒", "同一低电周期只提醒一次"),
-            (487, "设备诊断", "仅导出本地 HID 元数据"),
-            (580, "开机启动", "登录 Windows 后在托盘运行"),
+            (251, "自动刷新", "较长间隔可减少设备唤醒"),
+            (344, "低电阈值", "仅在未充电且读数有效时提醒"),
+            (437, "低电提醒", "同一低电周期只提醒一次"),
+            (529, "设备诊断", "仅导出本地 HID 元数据"),
+            (622, "开机启动", "登录 Windows 后在托盘运行"),
         ] {
             c.text(title, R::new(62, y, 240, 28), 16, 500, TEXT, DT_LEFT);
             c.text(hint, R::new(62, y + 30, 250, 25), 12, 400, DIM, DT_LEFT);
@@ -2498,6 +2522,41 @@ impl App {
                         }),
                     );
                 }
+            }
+            return;
+        }
+        if b.style == ENTRY {
+            c.rect(R::new(0, 0, b.rect.w, b.rect.h), BG);
+            let selected = match b.command {
+                Command::Home => matches!(self.page, Page::Home | Page::Device(_)),
+                Command::Prefs => self.page == Page::Preferences,
+                _ => false,
+            };
+            c.round(
+                r,
+                8,
+                if hover || selected { FIELD } else { PANEL },
+                Some(if selected { RED } else { BORDER }),
+            );
+            let hint = match b.command {
+                Command::Home => "查看与调整外设",
+                Command::DriverManager => "获取设备驱动",
+                Command::Configuration => "备份与恢复设置",
+                Command::CoreUpdate => "获取程序新版本",
+                Command::Prefs => "刷新与提醒",
+                _ => "",
+            };
+            c.text(
+                &b.label,
+                R::new(15, 7, r.w - 30, 26),
+                15,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(hint, R::new(15, 31, r.w - 30, 19), 11, 400, DIM, DT_LEFT);
+            if item.itemState & ODS_FOCUS != 0 {
+                c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 7, 0, Some(MUTED));
             }
             return;
         }
@@ -2598,19 +2657,20 @@ impl App {
             DT_LEFT,
         );
         if r.h < 400 {
+            let short = r.h < 280;
             if active {
                 c.glow(120, r.h / 2 + 12, 83);
             }
             let image_area = match spec.kind {
-                Kind::Keyboard => R::new(18, 72, 196, r.h - 106),
-                Kind::Mouse => R::new(36, 66, 160, r.h - 98),
-                Kind::Headset | Kind::Accessory => R::new(26, 66, 180, r.h - 98),
+                Kind::Keyboard => R::new(18, 62, 196, r.h - 92),
+                Kind::Mouse => R::new(36, 58, 160, r.h - 86),
+                Kind::Headset | Kind::Accessory => R::new(26, 58, 180, r.h - 86),
             };
             c.image(self.images.images[m], image_area, active);
             c.text(
                 spec.name,
-                R::new(222, 72, r.w - 244, 34),
-                22,
+                R::new(222, if short { 65 } else { 72 }, r.w - 244, 34),
+                if short { 17 } else { 22 },
                 600,
                 if active { TEXT } else { DIM },
                 DT_LEFT,
@@ -2622,7 +2682,7 @@ impl App {
                     Kind::Headset => "USB 双声卡耳机",
                     Kind::Accessory => "USB 外设",
                 },
-                R::new(224, 115, r.w - 248, 24),
+                R::new(224, if short { 102 } else { 115 }, r.w - 248, 24),
                 13,
                 400,
                 if active { MUTED } else { DIM },
@@ -2630,13 +2690,14 @@ impl App {
             );
             c.text(
                 spec.validation,
-                R::new(224, 145, r.w - 248, 22),
+                R::new(224, if short { 130 } else { 145 }, r.w - 248, 22),
                 11,
                 400,
                 DIM,
                 DT_LEFT,
             );
-            c.line(224, r.h - 110, r.w - 24, r.h - 110, BORDER, 1.);
+            let divider = if short { 155 } else { r.h - 110 };
+            c.line(224, divider, r.w - 24, divider, BORDER, 1.);
             c.text(
                 if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
                     "USB 有线供电"
@@ -2645,7 +2706,7 @@ impl App {
                 } else {
                     "设备电量"
                 },
-                R::new(224, r.h - 99, 180, 22),
+                R::new(224, if short { 161 } else { r.h - 99 }, 180, 22),
                 12,
                 400,
                 DIM,
@@ -2659,15 +2720,20 @@ impl App {
                         .map(|p| format!("{p}%"))
                         .unwrap_or_else(|| "—".into())
                 },
-                R::new(222, r.h - 72, 150, 43),
-                32,
+                R::new(
+                    222,
+                    if short { 183 } else { r.h - 72 },
+                    150,
+                    if short { 34 } else { 43 },
+                ),
+                if short { 27 } else { 32 },
                 300,
                 if active { TEXT } else { DIM },
                 DT_LEFT,
             );
             c.text(
                 "设备设置  ›",
-                R::new(r.w - 150, r.h - 65, 124, 32),
+                R::new(r.w - 150, r.h - if short { 43 } else { 65 }, 124, 32),
                 13,
                 500,
                 if active { RED } else { DIM },

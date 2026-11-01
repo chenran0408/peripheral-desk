@@ -33,6 +33,7 @@ pub struct DeviceSpec {
     pub image_file: &'static str,
     pub image_bytes: &'static [u8],
     pub advanced: &'static [SettingSpec],
+    pub manual: bool,
     pub matcher: fn(&Interface) -> bool,
     pub extra_matchers: &'static [DeviceMatch],
 }
@@ -64,10 +65,14 @@ pub static REGISTRY: std::sync::LazyLock<Vec<DeviceSpec>> = std::sync::LazyLock:
     }
     #[cfg(all(not(feature = "driver-runtime"), not(test)))]
     {
-        host_registry_from_descriptors(crate::plugin_manager::installed_descriptors(), |key| {
-            crate::plugin_manager::installed(key)
-                .map(|driver| driver.map(|driver| (driver.version, driver.manifest.device)))
-        })
+        host_registry_from_descriptors(
+            crate::plugin_manager::installed_descriptors(),
+            |key| {
+                crate::plugin_manager::installed(key)
+                    .map(|driver| driver.map(|driver| (driver.version, driver.manifest.device)))
+            },
+            crate::plugin_manager::is_claimed,
+        )
     }
 });
 
@@ -89,6 +94,7 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             advanced: RAZER_ADVANCED,
             image_file: "deathadder.png",
             image_bytes: &[],
+            manual: false,
             matcher: |i| {
                 i.vid == 0x1532
                     && [0x00b6, 0x00b7].contains(&i.pid)
@@ -112,6 +118,7 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             advanced: A5_ADVANCED,
             image_file: "a5.png",
             image_bytes: &[],
+            manual: false,
             matcher: |i| {
                 [0x5253, 0x0bda, 0x3837].contains(&i.vid)
                     && ["a5 ultra", "mchose a5 ultra"]
@@ -136,6 +143,7 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             advanced: G75_ADVANCED,
             image_file: "g75.png",
             image_bytes: &[],
+            manual: false,
             matcher: |i| {
                 ((i.vid == 0x3554 && i.pid == 0xfa09) || (i.vid == 0x41e4 && i.pid == 0x2001))
                     && i.usage_page == 0xff02
@@ -159,6 +167,7 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             image_file: "g2pro.png",
             image_bytes: &[],
             advanced: AUDIO_SETTINGS,
+            manual: false,
             matcher: |i| {
                 i.vid == 0x35bb
                     && i.pid == 0xa100
@@ -176,20 +185,25 @@ fn legacy_specs() -> Vec<DeviceSpec> {
 fn host_registry_from_descriptors(
     descriptors: impl IntoIterator<Item = serde_json::Value>,
     mut installed: impl FnMut(&str) -> Result<Option<(String, serde_json::Value)>, String>,
+    claims: impl Fn(&str) -> bool,
 ) -> Vec<DeviceSpec> {
-    host_registry_from_installed(descriptors.into_iter().filter_map(|descriptor| {
-        let key = descriptor.get("key").and_then(serde_json::Value::as_str)?;
-        // One broken record, or a record changed during startup, cannot hide
-        // other valid installations. Use the successfully reread metadata.
-        let (version, metadata) = installed(key).ok().flatten()?;
-        (metadata.get("key").and_then(serde_json::Value::as_str) == Some(key))
-            .then_some((version, metadata))
-    }))
+    host_registry_from_installed(
+        descriptors.into_iter().filter_map(|descriptor| {
+            let key = descriptor.get("key").and_then(serde_json::Value::as_str)?;
+            // One broken record, or a record changed during startup, cannot hide
+            // other valid installations. Use the successfully reread metadata.
+            let (version, metadata) = installed(key).ok().flatten()?;
+            (metadata.get("key").and_then(serde_json::Value::as_str) == Some(key))
+                .then_some((version, metadata))
+        }),
+        claims,
+    )
 }
 
 #[cfg(any(not(feature = "driver-runtime"), test))]
 pub(crate) fn host_registry_from_installed(
     installed: impl IntoIterator<Item = (String, serde_json::Value)>,
+    claims: impl Fn(&str) -> bool,
 ) -> Vec<DeviceSpec> {
     let mut devices = Vec::new();
     for (version, value) in installed {
@@ -205,6 +219,11 @@ pub(crate) fn host_registry_from_installed(
         let Ok(mut spec) = metadata.into_spec() else {
             continue;
         };
+        // Manual-claim devices share a receiver identity with another model.
+        // They only become cards after the user installs them on purpose.
+        if spec.manual && !claims(spec.key) {
+            continue;
+        }
         // These released 0.4.x packages predate complete UI metadata. Restore
         // only their missing capability descriptions, never their old matcher
         // or another device. Future packages must supply their own metadata.
@@ -757,6 +776,10 @@ pub struct DeviceManifest {
     #[serde(default)]
     pub advanced: Vec<SettingManifest>,
     #[serde(default)]
+    pub manual: bool,
+    #[serde(default)]
+    pub manual_hint: Option<String>,
+    #[serde(default)]
     pub validation: serde_json::Value,
 }
 impl DeviceManifest {
@@ -789,6 +812,14 @@ impl DeviceManifest {
             || self.sleeps.len() > 32
         {
             return Err("设备描述字段不支持".into());
+        }
+        if self.manual
+            != self
+                .manual_hint
+                .as_deref()
+                .is_some_and(|hint| !hint.is_empty())
+        {
+            return Err("手动认领设备必须说明共用接收器原因".into());
         }
         Ok(())
     }
@@ -844,6 +875,7 @@ impl DeviceManifest {
             image_file: "device.png",
             image_bytes: &[],
             advanced: Box::leak(advanced.into_boxed_slice()),
+            manual: self.manual,
             matcher: |_| false,
             extra_matchers: Box::leak(self.matches.into_boxed_slice()),
         })
@@ -861,14 +893,18 @@ mod manifest_tests {
         let mut broken = a5();
         broken["key"] = serde_json::json!("broken-install");
         let mut looked_up = Vec::new();
-        let devices = host_registry_from_descriptors([a5(), broken], |key| {
-            looked_up.push(key.to_owned());
-            if key == "broken-install" {
-                Err("installed.json is malformed".into())
-            } else {
-                Ok(Some(("0.4.1".into(), a5())))
-            }
-        });
+        let devices = host_registry_from_descriptors(
+            [a5(), broken],
+            |key| {
+                looked_up.push(key.to_owned());
+                if key == "broken-install" {
+                    Err("installed.json is malformed".into())
+                } else {
+                    Ok(Some(("0.4.1".into(), a5())))
+                }
+            },
+            |_: &str| false,
+        );
         assert_eq!(looked_up, ["mchose-a5-ultra", "broken-install"]);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].key, "mchose-a5-ultra");
@@ -876,9 +912,9 @@ mod manifest_tests {
     }
     #[test]
     fn desktop_registry_has_only_installed_metadata_and_no_four_device_default() {
-        assert!(host_registry_from_installed([]).is_empty());
+        assert!(host_registry_from_installed([], |_: &str| false).is_empty());
         for version in ["0.4.0", "0.4.1"] {
-            let devices = host_registry_from_installed([(version.into(), a5())]);
+            let devices = host_registry_from_installed([(version.into(), a5())], |_: &str| false);
             assert_eq!(devices.len(), 1);
             let spec = &devices[0];
             assert_eq!(spec.key, "mchose-a5-ultra");
@@ -900,22 +936,43 @@ mod manifest_tests {
     #[test]
     fn future_or_different_device_metadata_never_guesses_legacy_capabilities() {
         for version in ["0.4.2", "0.5.0", "0.4.1-preview.1"] {
-            let devices = host_registry_from_installed([(version.into(), a5())]);
+            let devices = host_registry_from_installed([(version.into(), a5())], |_: &str| false);
             assert_eq!(devices.len(), 1);
             assert!(devices[0].read_only());
             assert!(devices[0].advanced.is_empty());
         }
         let mut other_kind = a5();
         other_kind["kind"] = serde_json::json!("headset");
-        let devices = host_registry_from_installed([("0.4.1".into(), other_kind)]);
+        let devices = host_registry_from_installed([("0.4.1".into(), other_kind)], |_: &str| false);
         assert!(devices[0].advanced.is_empty());
         assert_eq!(devices[0].dpi_range, None);
         let mut precise = a5();
         precise["dpi_range"] = serde_json::json!([100, 1000]);
         precise["rates"] = serde_json::json!([125]);
-        let devices = host_registry_from_installed([("0.4.1".into(), precise)]);
+        let devices = host_registry_from_installed([("0.4.1".into(), precise)], |_: &str| false);
         assert_eq!(devices[0].dpi_range, Some((100, 1000)));
         assert_eq!(devices[0].rates, &[125]);
+    }
+    #[test]
+    fn manual_claim_devices_stay_hidden_until_the_user_claims_them() {
+        let mut shared = a5();
+        shared["key"] = serde_json::json!("manual-keyboard");
+        shared["manual"] = serde_json::json!(true);
+        shared["manual_hint"] = serde_json::json!("与另一型号共用接收器标识");
+        assert!(
+            host_registry_from_installed([("0.4.11".into(), shared.clone())], |_| false).is_empty()
+        );
+        let devices = host_registry_from_installed([("0.4.11".into(), shared)], |key| {
+            key == "manual-keyboard"
+        });
+        assert_eq!(devices.len(), 1);
+        assert!(devices[0].manual);
+        let mut hintless = a5();
+        hintless["manual"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<DeviceManifest>(hintless)
+            .unwrap()
+            .validate()
+            .is_err());
     }
     #[test]
     fn a_read_only_plugin_does_not_inherit_writable_mouse_controls() {

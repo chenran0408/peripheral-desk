@@ -77,6 +77,7 @@ struct DriverRow<'a> {
     changelog: &'a str,
     download_bytes: u64,
     catalog_available: bool,
+    manual_hint: Option<&'a str>,
 }
 impl Inventory {
     fn len(&self) -> usize {
@@ -92,6 +93,18 @@ impl Inventory {
                 changelog: &package.changelog,
                 download_bytes: package.download_bytes,
                 catalog_available: true,
+                manual_hint: package
+                    .device
+                    .get("manual")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+                    .then(|| {
+                        package
+                            .device
+                            .get("manual_hint")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("此插件与另一型号共用接收器标识，需要手动确认设备")
+                    }),
             });
         }
         let driver = self
@@ -105,6 +118,20 @@ impl Inventory {
             changelog: &driver.manifest.changelog,
             download_bytes: 0,
             catalog_available: false,
+            manual_hint: driver
+                .manifest
+                .device
+                .get("manual")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                .then(|| {
+                    driver
+                        .manifest
+                        .device
+                        .get("manual_hint")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("此插件与另一型号共用接收器标识，需要手动确认设备")
+                }),
         })
     }
 }
@@ -245,13 +272,21 @@ fn inventory(refresh: bool) -> Result<Inventory, String> {
     let detected = packages
         .iter()
         .map(|p| {
-            let found = serde_json::from_value::<crate::devices::DeviceManifest>(p.device.clone())
-                .ok()
-                .is_some_and(|d| {
-                    interfaces
-                        .iter()
-                        .any(|i| d.matches.iter().any(|m| m.matches(i)))
-                });
+            // Manual-claim packages share a receiver identity with another
+            // model, so hardware presence must never select them implicitly.
+            let manual = p
+                .device
+                .get("manual")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let found = !manual
+                && serde_json::from_value::<crate::devices::DeviceManifest>(p.device.clone())
+                    .ok()
+                    .is_some_and(|d| {
+                        interfaces
+                            .iter()
+                            .any(|i| d.matches.iter().any(|m| m.matches(i)))
+                    });
             (p.id.clone(), found)
         })
         .collect();
@@ -530,6 +565,22 @@ impl Manager {
             .selected()
             .map(|p| format!("{}\r\n包标识：{}", p.description, p.id))
             .unwrap_or_else(|| "目录尚不可用，请查看操作结果，或点击“刷新驱动仓库”。".into());
+        let description = match self.selected().and_then(|p| p.manual_hint) {
+            Some(hint) => {
+                let claimed = self
+                    .selected()
+                    .is_some_and(|p| crate::plugin_manager::is_claimed(p.id));
+                format!(
+                    "{description}\r\n共用接收器型号 · 手动认领：{hint}\r\n认领状态：{}",
+                    if claimed {
+                        "已认领"
+                    } else {
+                        "安装本插件即视为确认型号并认领"
+                    }
+                )
+            }
+            None => description,
+        };
         let detail = match self.installation() {
             Installation::Broken(error) => format!("{description}\r\n安装记录异常：{error}"),
             _ => description,
