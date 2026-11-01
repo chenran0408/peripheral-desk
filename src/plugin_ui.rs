@@ -61,11 +61,24 @@ impl Installation {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Recommendation {
+    Clear,
+    Ambiguous,
+}
+impl Recommendation {
+    fn rank(self) -> u8 {
+        match self {
+            Self::Clear => 0,
+            Self::Ambiguous => 1,
+        }
+    }
+}
 struct Inventory {
     packages: Vec<DriverPackage>,
     installed_only: Vec<InstalledDriver>,
     installed: BTreeMap<String, Installation>,
-    detected: BTreeMap<String, bool>,
+    recommendation: BTreeMap<String, Recommendation>,
     channel: String,
     focus: Option<String>,
 }
@@ -78,6 +91,7 @@ struct DriverRow<'a> {
     download_bytes: u64,
     catalog_available: bool,
     manual_hint: Option<&'a str>,
+    recommendation: Option<Recommendation>,
 }
 impl Inventory {
     fn len(&self) -> usize {
@@ -105,6 +119,7 @@ impl Inventory {
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or("此插件与另一型号共用接收器标识，需要手动确认设备")
                     }),
+                recommendation: self.recommendation.get(&package.id).copied(),
             });
         }
         let driver = self
@@ -132,6 +147,7 @@ impl Inventory {
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("此插件与另一型号共用接收器标识，需要手动确认设备")
                 }),
+            recommendation: None,
         })
     }
 }
@@ -261,35 +277,88 @@ fn size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024. * 1024.))
     }
 }
+/// Splits detected hardware into unambiguous recommendations and ambiguous
+/// candidates. Manual-claim packages share a receiver identity with another
+/// model, so hardware presence must never select them implicitly.
+fn classify_detection(
+    packages: &[plugin_manager::DriverPackage],
+    interfaces: &[crate::hid::Interface],
+) -> BTreeMap<String, Recommendation> {
+    let manifests: Vec<Option<crate::devices::DeviceManifest>> = packages
+        .iter()
+        .map(|p| {
+            let manual = p
+                .device
+                .get("manual")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if manual {
+                None
+            } else {
+                serde_json::from_value(p.device.clone()).ok()
+            }
+        })
+        .collect();
+    let mut candidates: std::collections::HashMap<&str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (index, manifest) in manifests.iter().enumerate() {
+        if let Some(manifest) = manifest {
+            for interface in interfaces {
+                if manifest.matches.iter().any(|m| m.matches(interface)) {
+                    candidates
+                        .entry(interface.path.as_str())
+                        .or_default()
+                        .push(index);
+                }
+            }
+        }
+    }
+    let mut recommendation = BTreeMap::new();
+    for (index, manifest) in manifests.iter().enumerate() {
+        let Some(manifest) = manifest else {
+            continue;
+        };
+        let mut found = false;
+        let mut ambiguous = false;
+        for interface in interfaces {
+            if manifest.matches.iter().any(|m| m.matches(interface)) {
+                found = true;
+                if candidates
+                    .get(interface.path.as_str())
+                    .is_some_and(|c| c.len() > 1)
+                {
+                    ambiguous = true;
+                }
+            }
+        }
+        if found {
+            let id = &packages[index].id;
+            recommendation.insert(
+                id.clone(),
+                if ambiguous {
+                    Recommendation::Ambiguous
+                } else {
+                    Recommendation::Clear
+                },
+            );
+        }
+    }
+    recommendation
+}
 fn inventory(refresh: bool) -> Result<Inventory, String> {
-    let packages = if refresh {
+    let mut packages = if refresh {
         plugin_manager::refresh_catalog()
     } else {
         plugin_manager::catalog()
     }
     .map_err(|e| e.to_string())?;
     let interfaces = crate::hid::enumerate()?;
-    let detected = packages
+    let recommendation = classify_detection(&packages, &interfaces);
+    let mut rank: std::collections::HashMap<&str, u8> = recommendation
         .iter()
-        .map(|p| {
-            // Manual-claim packages share a receiver identity with another
-            // model, so hardware presence must never select them implicitly.
-            let manual = p
-                .device
-                .get("manual")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let found = !manual
-                && serde_json::from_value::<crate::devices::DeviceManifest>(p.device.clone())
-                    .ok()
-                    .is_some_and(|d| {
-                        interfaces
-                            .iter()
-                            .any(|i| d.matches.iter().any(|m| m.matches(i)))
-                    });
-            (p.id.clone(), found)
-        })
+        .map(|(id, r)| (id.as_str(), r.rank()))
         .collect();
+    packages.sort_by_key(|p| rank.remove(p.id.as_str()).unwrap_or(2));
     let mut installed = BTreeMap::new();
     for package in &packages {
         let status = match plugin_manager::installed(&package.id) {
@@ -323,7 +392,7 @@ fn inventory(refresh: bool) -> Result<Inventory, String> {
     Ok(Inventory {
         packages,
         installed_only,
-        detected,
+        recommendation,
         installed,
         channel: plugin_manager::channel(),
         focus: None,
@@ -565,8 +634,12 @@ impl Manager {
             .selected()
             .map(|p| format!("{}\r\n包标识：{}", p.description, p.id))
             .unwrap_or_else(|| "目录尚不可用，请查看操作结果，或点击“刷新驱动仓库”。".into());
-        let description = match self.selected().and_then(|p| p.manual_hint) {
-            Some(hint) => {
+        let selected = self.selected();
+        let description = match (
+            selected.as_ref().and_then(|p| p.manual_hint),
+            selected.as_ref().and_then(|p| p.recommendation),
+        ) {
+            (Some(hint), _) => {
                 let claimed = self
                     .selected()
                     .is_some_and(|p| crate::plugin_manager::is_claimed(p.id));
@@ -579,7 +652,10 @@ impl Manager {
                     }
                 )
             }
-            None => description,
+            (None, Some(Recommendation::Ambiguous)) => format!(
+                "{description}\r\n共用硬件标识：同一接口可能对应多个型号，请先核对你的设备型号再安装。"
+            ),
+            _ => description,
         };
         let detail = match self.installation() {
             Installation::Broken(error) => format!("{description}\r\n安装记录异常：{error}"),
@@ -933,7 +1009,8 @@ impl Manager {
                         let checked = row.catalog_available
                             && (id == SELECT_ALL
                                 || id == SELECT_DETECTED
-                                    && inventory.detected.get(row.id) == Some(&true)
+                                    && inventory.recommendation.get(row.id)
+                                        == Some(&Recommendation::Clear)
                                 || id == SELECT_UPDATES && updatable.contains(row.id));
                         if checked {
                             self.checked.insert(row.id.to_string());
@@ -1100,9 +1177,17 @@ impl Manager {
                         } else if self
                             .inventory
                             .as_ref()
-                            .is_some_and(|i| i.detected.get(package.id) == Some(&true))
+                            .and_then(|i| i.recommendation.get(package.id).copied())
+                            == Some(Recommendation::Clear)
                         {
-                            "已发现设备接口"
+                            "已识别此设备，可直接安装"
+                        } else if self
+                            .inventory
+                            .as_ref()
+                            .and_then(|i| i.recommendation.get(package.id).copied())
+                            == Some(Recommendation::Ambiguous)
+                        {
+                            "疑似兼容：多个型号共用此接口，请核对型号"
                         } else {
                             "未发现设备接口"
                         },
@@ -1286,11 +1371,18 @@ impl Manager {
                 if checked {
                     c.text("✓", R::new(8, 10, 18, 20), 13, 600, TEXT, DT_CENTER);
                 }
-                let detected = self
+                let recommendation = self
                     .inventory
                     .as_ref()
-                    .is_some_and(|i| i.detected.get(row.id) == Some(&true));
-                c.ellipse(R::new(40, 17, 6, 6), if detected { GREEN } else { DIM });
+                    .and_then(|i| i.recommendation.get(row.id).copied());
+                c.ellipse(
+                    R::new(40, 17, 6, 6),
+                    match recommendation {
+                        Some(Recommendation::Clear) => GREEN,
+                        Some(Recommendation::Ambiguous) => ORANGE,
+                        None => DIM,
+                    },
+                );
                 let color = if disabled { DIM } else { TEXT };
                 c.text(
                     row.name,
@@ -1670,11 +1762,57 @@ mod tests {
                 ("older".into(), Installation::Present("0.5.0".into())),
                 ("invalid".into(), Installation::Present("0.4.2".into())),
             ]),
-            detected: BTreeMap::new(),
+            recommendation: BTreeMap::new(),
             channel: "stable".into(),
             focus: None,
         };
         assert_eq!(updatable_ids(&inventory), BTreeSet::from(["newer".into()]));
+    }
+
+    #[test]
+    fn clear_and_ambiguous_recommendations_are_separated() {
+        let device = |id: &str, vid: u16, pid: u16| {
+            serde_json::json!({
+                "key": id, "name": id, "brand": "TEST", "kind": "mouse",
+                "matches": [{"vid": vid, "pid": pid}]
+            })
+        };
+        let packages = [
+            ("clear-a", 0x1111u16, 0x2222u16),
+            ("share-a", 0x3333, 0x4444),
+            ("share-b", 0x3333, 0x4444),
+        ]
+        .map(|(id, vid, pid)| {
+            serde_json::from_value::<DriverPackage>(serde_json::json!({
+                "id": id, "name": id, "version": "0.4.2", "description": "fixture",
+                "download_bytes": 0, "package_url": "https://example.invalid/f.zip",
+                "sha256": "f", "dll_sha256": "f", "device": device(id, vid, pid)
+            }))
+            .unwrap()
+        })
+        .to_vec();
+        let interfaces =
+            [(0x1111u16, 0x2222u16), (0x3333, 0x4444)].map(|(vid, pid)| crate::hid::Interface {
+                path: format!("\\\\?\\hid#{vid:04x}{pid:04x}"),
+                vid,
+                pid,
+                usage_page: 0,
+                usage: 0,
+                feature_len: 0,
+                input_len: 0,
+                output_len: 0,
+                product: String::new(),
+            });
+        let recommendation = classify_detection(&packages, &interfaces);
+        assert_eq!(recommendation.get("clear-a"), Some(&Recommendation::Clear));
+        assert_eq!(
+            recommendation.get("share-a"),
+            Some(&Recommendation::Ambiguous)
+        );
+        assert_eq!(
+            recommendation.get("share-b"),
+            Some(&Recommendation::Ambiguous)
+        );
     }
 
     #[test]
@@ -1695,7 +1833,7 @@ mod tests {
                     ("a".into(), Installation::Broken("损坏记录".into())),
                     ("b".into(), Installation::Present("0.4.1".into())),
                 ]),
-                detected: BTreeMap::from([("b".into(), true)]),
+                recommendation: BTreeMap::new(),
                 channel: "stable".into(),
                 focus: None,
             }),
