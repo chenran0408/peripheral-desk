@@ -23,6 +23,28 @@ pub(crate) struct TrayFx {
     target: RECT,
     rows_started: Option<Instant>,
     rings_started: usize,
+    scroll_offset: i32,
+    scroll_drag: Option<(i32, i32)>,
+}
+
+fn scroll_metrics(app: &App, height: i32) -> (i32, i32, i32, i32, i32) {
+    let count = REGISTRY.len() + app.snapshot.system_devices.len();
+    let sections =
+        i32::from(!REGISTRY.is_empty()) + i32::from(!app.snapshot.system_devices.is_empty());
+    let content_height = sections * 22 + count as i32 * 64;
+    let list_top = 58;
+    let footer = height - 50;
+    let viewport_height = footer - list_top;
+    let max_offset = (content_height - viewport_height).max(0);
+    let track_top = list_top + 18;
+    let track_bottom = footer - 18;
+    let track_height = track_bottom - track_top;
+    let thumb_height = if max_offset == 0 {
+        track_height
+    } else {
+        (track_height * viewport_height / content_height).clamp(24, track_height)
+    };
+    (list_top, footer, max_offset, track_top, thumb_height)
 }
 
 impl TrayFx {
@@ -164,7 +186,10 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 let height = a.logical(bounds.bottom);
                 let count = REGISTRY.len() + a.snapshot.system_devices.len();
                 let hids = REGISTRY.len();
-                let mut y = 58;
+                let (list_top, footer, max_offset, track_top, thumb_height) =
+                    scroll_metrics(a, height);
+                let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
+                let mut y = list_top - scroll;
                 c.rect(R::new(0, 0, 360, height), PANEL);
                 c.text("外设盒", R::new(20, 13, 205, 25), 17, 600, TEXT, DT_LEFT);
                 c.text(
@@ -176,6 +201,8 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     DT_RIGHT,
                 );
                 c.line(18, 48, 342, 48, BORDER, 1.);
+                let clip = SaveDC(dc);
+                IntersectClipRect(dc, 0, a.px(list_top), a.px(360), a.px(footer));
                 if count == 0 {
                     c.text(
                         "未安装或尚未加载设备驱动",
@@ -202,7 +229,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     let s = &a.snapshot.devices[i];
                     let key = 0x2000 + i as u64;
                     if a.fx.widget.hover(key) {
-                        c.capsule(R::new(9, y, 342, 60), HOVER, None);
+                        c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.image(a.images.images[i], R::new(19, y + 7, 40, 44), s.fresh);
                     c.text(
@@ -266,7 +293,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     let index = REGISTRY.len() + i;
                     let key = 0x2000 + index as u64;
                     if a.fx.widget.hover(key) {
-                        c.capsule(R::new(9, y, 342, 60), HOVER, None);
+                        c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.text(
                         &device.name,
@@ -316,7 +343,33 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     }
                     y += 64;
                 }
-                let footer = height - 50;
+                RestoreDC(dc, clip);
+                if max_offset > 0 {
+                    let track_height = footer - 18 - track_top;
+                    let thumb_y = track_top + (track_height - thumb_height) * scroll / max_offset;
+                    c.chevron(
+                        R::new(343, list_top + 3, 12, 12),
+                        ChevronDirection::Up,
+                        if scroll > 0 { DIM } else { BORDER },
+                        1.2,
+                    );
+                    c.chevron(
+                        R::new(343, footer - 15, 12, 12),
+                        ChevronDirection::Down,
+                        if scroll < max_offset { DIM } else { BORDER },
+                        1.2,
+                    );
+                    c.capsule(R::new(347, track_top, 3, track_height), BORDER, None);
+                    c.capsule(
+                        R::new(343, thumb_y, 11, thumb_height),
+                        if a.fx.flyout.scroll_drag.is_some() {
+                            RED
+                        } else {
+                            DIM
+                        },
+                        None,
+                    );
+                }
                 c.line(18, footer, 342, footer, BORDER, 1.);
                 let labels = ["打开主窗口", "重新读取", "退出"];
                 let widths = [112, 112, 112];
@@ -348,31 +401,41 @@ pub(super) unsafe extern "system" fn flyout_proc(
         WM_LBUTTONUP => {
             let x = a.logical(l as i16 as i32);
             let y = a.logical((l >> 16) as i16 as i32);
+            if a.fx.flyout.scroll_drag.take().is_some() {
+                ReleaseCapture();
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let height = a.logical(rc.bottom);
+            let (list_top, footer, max_offset, _, _) = scroll_metrics(a, height);
+            if x >= 338 && y >= list_top && y < footer {
+                return 0;
+            }
+            let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
+            let content_y = y + scroll;
             let mut row_y = 80;
             let mut device = None;
             for i in 0..REGISTRY.len() {
-                if y >= row_y && y < row_y + 64 {
+                if (9..=335).contains(&x) && content_y >= row_y && content_y < row_y + 64 {
                     device = Some(i + 1);
                     break;
                 }
                 row_y += 64;
             }
             if device.is_none() && !a.snapshot.system_devices.is_empty() {
-                let sys_y = 80
-                    + if REGISTRY.is_empty() {
-                        0
-                    } else {
-                        REGISTRY.len() as i32 * 64 + 22
-                    };
-                let idx = ((y - sys_y) / 64).max(0) as usize;
-                if y >= sys_y && idx < a.snapshot.system_devices.len() {
+                let sys_y = 80 + REGISTRY.len() as i32 * 64;
+                let sys_y = sys_y + i32::from(!REGISTRY.is_empty()) * 22;
+                let idx = ((content_y - sys_y) / 64).max(0) as usize;
+                if (9..=335).contains(&x)
+                    && content_y >= sys_y
+                    && idx < a.snapshot.system_devices.len()
+                {
                     device = Some(0);
                 }
             }
-            let mut rc: RECT = zeroed();
-            GetClientRect(hwnd, &mut rc);
-            let footer_y = a.logical(rc.bottom) - 50;
-            let action = if y >= footer_y + 8 && y <= footer_y + 40 {
+            let action = if y >= footer + 8 && y <= footer + 40 {
                 match x {
                     12..=124 => Some(0),
                     128..=240 => Some(1),
@@ -408,7 +471,33 @@ pub(super) unsafe extern "system" fn flyout_proc(
             let y = a.logical((l >> 16) as i16 as i32);
             let mut rect: RECT = zeroed();
             GetClientRect(hwnd, &mut rect);
-            let footer = a.logical(rect.bottom) - 50;
+            let height = a.logical(rect.bottom);
+            let (list_top, footer, max_offset, track_top, thumb_height) = scroll_metrics(a, height);
+            if max_offset > 0 && x >= 338 && y >= list_top && y < footer {
+                let track_height = footer - 18 - track_top;
+                let thumb_y = track_top
+                    + (track_height - thumb_height)
+                        * a.fx.flyout.scroll_offset.clamp(0, max_offset)
+                        / max_offset;
+                if y < list_top + 18 {
+                    a.fx.flyout.scroll_offset =
+                        (a.fx.flyout.scroll_offset - 64).clamp(0, max_offset);
+                } else if y >= footer - 18 {
+                    a.fx.flyout.scroll_offset =
+                        (a.fx.flyout.scroll_offset + 64).clamp(0, max_offset);
+                } else if (thumb_y..thumb_y + thumb_height).contains(&y) {
+                    a.fx.flyout.scroll_drag = Some((y, a.fx.flyout.scroll_offset));
+                    SetCapture(hwnd);
+                } else {
+                    let thumb_top = y - thumb_height / 2;
+                    let travel = track_height - thumb_height;
+                    a.fx.flyout.scroll_offset =
+                        ((thumb_top - track_top).clamp(0, travel) * max_offset / travel)
+                            .clamp(0, max_offset);
+                }
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
             if y >= footer + 8 && y <= footer + 40 {
                 let index = ((x - 12) / 116).clamp(0, 2) as u64;
                 a.fx.widget.press(0x2100 + index);
@@ -428,17 +517,32 @@ pub(super) unsafe extern "system" fn flyout_proc(
             let y = a.logical((l >> 16) as i16 as i32);
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
-            let mut row_y = 80;
+            let height = a.logical(rc.bottom);
+            let (list_top, footer, max_offset, track_top, thumb_height) = scroll_metrics(a, height);
+            if let Some((start_y, start_offset)) = a.fx.flyout.scroll_drag {
+                let track_height = footer - 18 - track_top;
+                let travel = track_height - thumb_height;
+                let delta = (y - start_y) * max_offset / travel;
+                a.fx.flyout.scroll_offset = (start_offset + delta).clamp(0, max_offset);
+                InvalidateRect(hwnd, null(), 0);
+                return 0;
+            }
+            let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
+            let mut row_y = 80 - scroll;
             for i in 0..REGISTRY.len() + a.snapshot.system_devices.len() {
                 let key = 0x2000 + i as u64;
-                a.fx.widget
-                    .set_hover(key, (9..=351).contains(&x) && y >= row_y && y < row_y + 60);
+                a.fx.widget.set_hover(
+                    key,
+                    (9..=335).contains(&x)
+                        && (list_top..footer).contains(&y)
+                        && y >= row_y
+                        && y < row_y + 60,
+                );
                 row_y += 64;
                 if i + 1 == REGISTRY.len() && !a.snapshot.system_devices.is_empty() {
                     row_y += 22;
                 }
             }
-            let footer = a.logical(rc.bottom) - 50;
             for i in 0..3 {
                 let left = 12 + i * 116;
                 a.fx.widget.set_hover(
@@ -446,6 +550,16 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     x >= left && x < left + 112 && y >= footer + 8 && y < footer + 40,
                 );
             }
+            InvalidateRect(hwnd, null(), 0);
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let mut rc: RECT = zeroed();
+            GetClientRect(hwnd, &mut rc);
+            let height = a.logical(rc.bottom);
+            let (_, _, max_offset, _, _) = scroll_metrics(a, height);
+            let delta = ((w >> 16) as i16 as i32) * 64 / WHEEL_DELTA as i32;
+            a.fx.flyout.scroll_offset = (a.fx.flyout.scroll_offset - delta).clamp(0, max_offset);
             InvalidateRect(hwnd, null(), 0);
             0
         }
@@ -687,13 +801,7 @@ impl App {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as _, 0);
         let width = self.px(360);
         let count = REGISTRY.len() + self.snapshot.system_devices.len();
-        let sections =
-            i32::from(!REGISTRY.is_empty()) + i32::from(!self.snapshot.system_devices.is_empty());
-        let logical_height = if count == 0 {
-            196
-        } else {
-            108 + sections * 22 + count as i32 * 64
-        };
+        let logical_height = 488;
         let height = self
             .px(logical_height)
             .min(area.bottom - area.top - self.px(24));
@@ -709,6 +817,8 @@ impl App {
         self.fx.flyout.closing = None;
         self.fx.flyout.rows_started = Some(Instant::now());
         self.fx.flyout.rings_started = 0;
+        self.fx.flyout.scroll_offset = 0;
+        self.fx.flyout.scroll_drag = None;
         for row in 0..count {
             self.fx.widget.ring_target(0x2000 + row as u64, Some(0));
         }
