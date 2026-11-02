@@ -2,20 +2,11 @@
 //! wndproc forwards mouse motion and timer ticks here; each sub-struct owns
 //! its own state and returns true while it still needs frames.
 
+#[derive(Default)]
 pub(crate) struct Fx {
     pub(crate) widget: super::widgets::WidgetFx,
     pub(crate) nav: super::pages::NavFx,
     pub(crate) flyout: super::tray::TrayFx,
-}
-
-impl Default for Fx {
-    fn default() -> Self {
-        Self {
-            widget: Default::default(),
-            nav: Default::default(),
-            flyout: Default::default(),
-        }
-    }
 }
 
 impl super::App {
@@ -29,6 +20,7 @@ impl super::App {
         active
     }
 
+    #[allow(dead_code)] // agents call this when starting animations
     pub(crate) fn fx_wake(&self, hwnd: windows_sys::Win32::Foundation::HWND) {
         unsafe {
             windows_sys::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, 3, 16, None);
