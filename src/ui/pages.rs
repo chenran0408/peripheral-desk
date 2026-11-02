@@ -1,4 +1,5 @@
 //! Page painting for the main window: home dashboard, device detail and preferences.
+use super::widgets::{FONT_LG, FONT_MD, RADIUS_LG, RADIUS_MD};
 use super::{widget_key, App, Command, Page, CARD, CHIP, ENTRY, GHOST, HOME_CONTENT_Y, SIDEBAR};
 use crate::{
     backend::{self, Action},
@@ -154,7 +155,7 @@ impl App {
         let spec = &REGISTRY[m];
         let panel = R::new(SIDEBAR + 16, 88, 158, (self.height - 172).max(400));
         c.soft_shadow(panel, 12);
-        c.round(panel, 12, PANEL, Some(BORDER));
+        c.round(panel, RADIUS_MD, PANEL, Some(BORDER));
         c.image(
             self.images.images[m],
             R::new(panel.x + 18, panel.y + 22, 122, 98),
@@ -402,7 +403,12 @@ impl App {
             DT_LEFT,
         );
         c.soft_shadow(R::new(left, 168, width, 360), 14);
-        c.round(R::new(left, 168, width, 360), 14, PANEL, Some(BORDER));
+        c.round(
+            R::new(left, 168, width, 360),
+            RADIUS_LG,
+            PANEL,
+            Some(BORDER),
+        );
         c.text(
             &device.name,
             R::new(left + 32, 202, width - 64, 48),
@@ -453,8 +459,13 @@ impl App {
         let rx = 394;
         let rw = self.width - rx - 28;
         let cx = rx + 30;
-        c.round(R::new(28, 145, 344, h - 227), 20, PANEL, Some(BORDER));
-        c.round(R::new(rx, 145, rw, h - 227), 20, PANEL, Some(BORDER));
+        c.round(
+            R::new(28, 145, 344, h - 227),
+            RADIUS_LG,
+            PANEL,
+            Some(BORDER),
+        );
+        c.round(R::new(rx, 145, rw, h - 227), RADIUS_LG, PANEL, Some(BORDER));
         if s.fresh {
             c.glow(200, 225, 116);
         }
@@ -548,7 +559,7 @@ impl App {
                 );
             }
             let y = (h - 312).max(520);
-            c.round(R::new(112, y, 176, 112), 20, FIELD, Some(BORDER));
+            c.round(R::new(112, y, 176, 112), RADIUS_LG, FIELD, Some(BORDER));
             c.text(
                 "USB",
                 R::new(112, y + 13, 176, 48),
@@ -692,7 +703,7 @@ impl App {
             c.text(
                 "DPI 灵敏度",
                 R::new(cx, detail_y(101), 300, 30),
-                20,
+                FONT_LG,
                 600,
                 TEXT,
                 DT_LEFT,
@@ -754,7 +765,7 @@ impl App {
             c.text(
                 "键盘灯效",
                 R::new(cx, detail_y(101), 300, 32),
-                20,
+                FONT_LG,
                 600,
                 TEXT,
                 DT_LEFT,
@@ -889,7 +900,7 @@ impl App {
                 "高级设置"
             },
             R::new(cx, detail_y(101), 350, 32),
-            22,
+            FONT_LG,
             600,
             TEXT,
             DT_LEFT,
@@ -927,7 +938,7 @@ impl App {
             c.text(
                 setting.title,
                 R::new(cx, y, 210, 27),
-                15,
+                FONT_MD,
                 500,
                 TEXT,
                 DT_LEFT,
@@ -960,7 +971,7 @@ impl App {
         } else {
             h - 182
         };
-        c.round(R::new(cx, notice_y, rw - 60, 60), 12, FIELD, None);
+        c.round(R::new(cx, notice_y, rw - 60, 60), RADIUS_MD, FIELD, None);
         c.text(
             if audio {
                 if self.snapshot.devices[m].settings_error.is_empty() {
@@ -1284,7 +1295,7 @@ impl App {
         c.soft_shadow(r, 14);
         c.round(
             r,
-            14,
+            RADIUS_LG,
             if self.fx.widget.hover(0x1000 + m as u64) {
                 crate::paint::blend(
                     PANEL,
