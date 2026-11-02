@@ -1,4 +1,5 @@
 //! Native GDI+ surfaces with ClearType GDI text, images and vector controls.
+#![allow(dead_code)]
 use crate::hid::wide;
 use std::{
     mem::{size_of, zeroed},
@@ -11,9 +12,9 @@ use windows_sys::Win32::{
 };
 
 pub const BG: u32 = 0xff0a0a0d;
-pub const PANEL: u32 = 0xff121218;
-pub const FIELD: u32 = 0xff1e1e26;
-pub const BORDER: u32 = 0xff292930;
+pub const PANEL: u32 = 0xff15151c;
+pub const FIELD: u32 = 0xff1c1c24;
+pub const BORDER: u32 = 0xff30303a;
 pub const TEXT: u32 = 0xfff2f2f5;
 pub const MUTED: u32 = 0xffa1a1ae;
 pub const DIM: u32 = 0xff737382;
@@ -179,6 +180,7 @@ impl Canvas {
     pub unsafe fn round(&self, r: R, radius: i32, color: u32, border: Option<u32>) {
         let mut path = null_mut();
         GdipCreatePath(FillModeAlternate, &mut path);
+        let radius = radius.max(0).min(r.w.min(r.h) / 2);
         let d = radius * 2;
         GdipAddPathArcI(path, r.x, r.y, d, d, 180., 90.);
         GdipAddPathArcI(path, r.x + r.w - d, r.y, d, d, 270., 90.);
@@ -235,6 +237,105 @@ impl Canvas {
         );
         GdipFillRectangleI(self.graphics, b as _, r.x, r.y, r.w, r.h);
         GdipDeleteBrush(b as _);
+    }
+    pub unsafe fn gradient_v(&self, r: R, first: u32, last: u32) {
+        let mut b = null_mut();
+        let gr = Rect {
+            X: r.x,
+            Y: r.y,
+            Width: r.w,
+            Height: r.h,
+        };
+        GdipCreateLineBrushFromRectI(
+            &gr,
+            first,
+            last,
+            LinearGradientModeVertical,
+            WrapModeTileFlipXY,
+            &mut b,
+        );
+        GdipFillRectangleI(self.graphics, b as _, r.x, r.y, r.w, r.h);
+        GdipDeleteBrush(b as _);
+    }
+    pub unsafe fn soft_shadow(&self, r: R, radius: i32) {
+        for layer in (1..=6).rev() {
+            let spread = layer * 2;
+            let alpha = (7 - layer) as u32 * 2;
+            self.round(
+                R::new(
+                    r.x - spread,
+                    r.y - spread,
+                    r.w + spread * 2,
+                    r.h + spread * 2,
+                ),
+                radius + spread,
+                alpha << 24,
+                None,
+            );
+        }
+    }
+    pub unsafe fn capsule(&self, r: R, color: u32, border: Option<u32>) {
+        self.round(r, r.h.min(r.w) / 2, color, border);
+    }
+    pub unsafe fn chevron(&self, r: R, direction: ChevronDirection, color: u32, width: f32) {
+        let cx = r.x + r.w / 2;
+        let cy = r.y + r.h / 2;
+        let dx = r.w.min(r.h) / 4;
+        let dy = dx;
+        let (a, b, c) = match direction {
+            ChevronDirection::Left => (
+                (cx + dx / 2, cy - dy),
+                (cx - dx / 2, cy),
+                (cx + dx / 2, cy + dy),
+            ),
+            ChevronDirection::Right => (
+                (cx - dx / 2, cy - dy),
+                (cx + dx / 2, cy),
+                (cx - dx / 2, cy + dy),
+            ),
+            ChevronDirection::Up => (
+                (cx - dx, cy + dy / 2),
+                (cx, cy - dy / 2),
+                (cx + dx, cy + dy / 2),
+            ),
+            ChevronDirection::Down => (
+                (cx - dx, cy - dy / 2),
+                (cx, cy + dy / 2),
+                (cx + dx, cy - dy / 2),
+            ),
+        };
+        self.line(a.0, a.1, b.0, b.1, color, width);
+        self.line(b.0, b.1, c.0, c.1, color, width);
+    }
+    pub unsafe fn battery_icon(&self, r: R, percent: u8, charging: bool, color: u32) {
+        let percent = percent.min(100);
+        let cap_w = (r.w / 8).max(2);
+        let shell = R::new(r.x, r.y + r.h / 8, r.w - cap_w, r.h * 3 / 4);
+        self.round(shell, (r.h / 8).max(1), 0x00000000, Some(color));
+        self.round(
+            R::new(
+                shell.x + 2,
+                shell.y + 2,
+                (shell.w - 4).max(0) * percent as i32 / 100,
+                (shell.h - 4).max(0),
+            ),
+            (r.h / 12).max(1),
+            color,
+            None,
+        );
+        self.round(
+            R::new(r.x + r.w - cap_w, r.y + r.h / 3, cap_w, r.h / 3),
+            (cap_w / 2).max(1),
+            color,
+            None,
+        );
+        if charging {
+            let cx = shell.x + shell.w / 2;
+            let cy = shell.y + shell.h / 2;
+            self.line(cx + 1, cy - r.h / 4, cx - r.h / 10, cy, color, 1.5);
+            self.line(cx - r.h / 10, cy, cx + r.h / 12, cy, color, 1.5);
+            self.line(cx + r.h / 12, cy, cx - 1, cy + r.h / 4, color, 1.5);
+        }
     }
     pub unsafe fn ellipse(&self, r: R, color: u32) {
         let mut b = null_mut();
@@ -311,10 +412,62 @@ impl Canvas {
         }
         GdipReleaseDC(self.graphics, dc);
     }
+    pub unsafe fn measure_text(&self, text: &str, size: i32, weight: i32) -> (i32, i32) {
+        let name = wide(if text.is_ascii() {
+            "Segoe UI"
+        } else {
+            "Microsoft YaHei UI"
+        });
+        let mut family = null_mut();
+        let mut font = null_mut();
+        let mut format = null_mut();
+        if GdipCreateFontFamilyFromName(name.as_ptr(), null_mut(), &mut family) != 0 {
+            return (0, 0);
+        }
+        let style = if weight >= 600 {
+            FontStyleBold
+        } else {
+            FontStyleRegular
+        };
+        let created = GdipCreateFont(family, size.max(1) as f32, style, UnitPoint, &mut font) == 0;
+        GdipDeleteFontFamily(family);
+        if !created || GdipCreateStringFormat(0, 0, &mut format) != 0 {
+            if !font.is_null() {
+                GdipDeleteFont(font);
+            }
+            return (0, 0);
+        }
+        let string = wide(text);
+        let layout = RectF {
+            X: 0.,
+            Y: 0.,
+            Width: f32::MAX,
+            Height: f32::MAX,
+        };
+        let mut bounds: RectF = zeroed();
+        GdipMeasureString(
+            self.graphics,
+            string.as_ptr(),
+            (string.len() - 1) as i32,
+            font,
+            &layout,
+            format,
+            &mut bounds,
+            null_mut(),
+            null_mut(),
+        );
+        GdipDeleteStringFormat(format);
+        GdipDeleteFont(font);
+        (bounds.Width.ceil() as i32, bounds.Height.ceil() as i32)
+    }
     pub unsafe fn glow(&self, cx: i32, cy: i32, radius: i32) {
-        for n in (1..=24).rev() {
-            let r = radius * n / 24;
-            self.ellipse(R::new(cx - r, cy - r, r * 2, r * 2), 0x04ff3859);
+        for n in (1..=32).rev() {
+            let r = radius * n / 32;
+            let alpha = (33 - n) as u32 * 2;
+            self.ellipse(
+                R::new(cx - r, cy - r, r * 2, r * 2),
+                (alpha << 24) | 0x00ff3859,
+            );
         }
     }
     pub unsafe fn image(&self, image: *mut GpImage, r: R, active: bool) {
@@ -366,24 +519,16 @@ impl Canvas {
         GdipDisposeImageAttributes(attr);
     }
     pub unsafe fn ring(&self, r: R, percent: Option<u8>, active: bool) {
-        self.arc(r, -90., 359.9, BORDER, 9.);
+        let track_color = if active { BORDER } else { DIM };
+        self.arc(r, -90., 359.9, track_color, 8.);
         if let Some(p) = percent {
-            let sweep = 360. * p as f32 / 100.;
-            for n in 0..60 {
-                let at = n as f32 * 6.;
-                if at >= sweep {
-                    break;
-                }
-                let t = n as f32 / 60.;
-                let color = blend(RED, ORANGE, t);
-                self.arc(
-                    r,
-                    -90. + at,
-                    (sweep - at).min(6.),
-                    if active { color } else { DIM },
-                    9.,
-                );
-            }
+            let sweep = 360. * p.min(100) as f32 / 100.;
+            let color = if active {
+                blend(RED, ORANGE, p.min(100) as f32 / 100.)
+            } else {
+                DIM
+            };
+            self.arc(r, -90., sweep, color, 8.);
         }
         self.text(
             &percent.map(|p| p.to_string()).unwrap_or_else(|| "—".into()),
@@ -403,7 +548,8 @@ impl Canvas {
         );
     }
 }
-fn blend(a: u32, b: u32, t: f32) -> u32 {
+pub(crate) fn blend(a: u32, b: u32, t: f32) -> u32 {
+    let t = t.clamp(0., 1.);
     let mut c = 0xff000000;
     for s in [0, 8, 16] {
         let x = ((a >> s) & 255) as f32;
@@ -411,6 +557,14 @@ fn blend(a: u32, b: u32, t: f32) -> u32 {
         c |= ((x + (y - x) * t) as u32) << s;
     }
     c
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ChevronDirection {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 pub struct Images {
