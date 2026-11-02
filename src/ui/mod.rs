@@ -19,8 +19,10 @@ use windows_sys::Win32::{
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
+pub(crate) mod fx;
 mod pages;
 mod tray;
+pub(crate) mod widgets;
 
 use pages::{detail_y, is_volume, sleep_label};
 
@@ -131,6 +133,7 @@ struct App {
     taskbar_created: u32,
     flyout: HWND,
     main: HWND,
+    pub(crate) fx: fx::Fx,
 }
 
 pub fn message(text: &str) {
@@ -217,6 +220,7 @@ pub fn run(hidden: bool, battery: bool) {
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             flyout: null_mut(),
             main: null_mut(),
+            fx: fx::Fx::default(),
         });
         let dpi = app.dpi;
         let raw = &mut *app as *mut App;
@@ -379,6 +383,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             0
         }
+        WM_TIMER if w == 3 => {
+            a.tick_fx(hwnd);
+            0
+        }
         DONE => {
             a.complete(hwnd);
             0
@@ -412,6 +420,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_MOUSEMOVE => {
+            let mut tracking = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: hwnd,
+                dwHoverTime: 0,
+            };
+            TrackMouseEvent(&mut tracking);
+            let (hx, hy) = a.mouse(l);
+            a.on_hover_move(hx, hy);
             if let Some((key, rect)) = a.eq_drag {
                 let (_, y) = a.mouse(l);
                 a.eq_slide(hwnd, key, rect, y);
@@ -420,6 +437,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 let (x, _) = a.mouse(l);
                 a.slide(hwnd, x);
             }
+            0
+        }
+        WM_MOUSELEAVE => {
+            a.on_hover_leave();
+            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_LBUTTONUP => {

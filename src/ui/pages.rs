@@ -14,6 +14,20 @@ use windows_sys::Win32::{
     UI::{Controls::*, WindowsAndMessaging::*},
 };
 
+/// Navigation/transition state owned by the main-window rework.
+#[derive(Default)]
+pub(crate) struct NavFx {}
+
+impl NavFx {
+    pub(crate) fn tick(&mut self, _hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+        false
+    }
+
+    pub(crate) fn on_move(&mut self, _x: i32, _y: i32) {}
+
+    pub(crate) fn on_leave(&mut self) {}
+}
+
 pub(super) fn system_reading(device: &system_battery::SystemBattery) -> String {
     if let Some(percent) = device.state.percent {
         format!("{percent}%")

@@ -10,6 +10,16 @@ use crate::{
 };
 use std::mem::{size_of, zeroed};
 use std::ptr::{null, null_mut};
+
+/// Flyout animation state owned by the tray rework.
+#[derive(Default)]
+pub(crate) struct TrayFx {}
+
+impl TrayFx {
+    pub(crate) fn tick(&mut self, _hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+        false
+    }
+}
 use windows_sys::Win32::{
     Foundation::*,
     Graphics::Gdi::*,
