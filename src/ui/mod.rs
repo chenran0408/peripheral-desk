@@ -37,7 +37,19 @@ const CHIP: i32 = 1;
 const GHOST: i32 = 3;
 const CARD: i32 = 4;
 const ENTRY: i32 = 5;
-const HOME_CONTENT_Y: i32 = 228;
+const SIDEBAR: i32 = 204;
+const HOME_CONTENT_Y: i32 = 164;
+fn widget_key(command: Command) -> u64 {
+    match command {
+        Command::Home => 0x100,
+        Command::DriverManager => 0x101,
+        Command::CoreUpdate => 0x102,
+        Command::Prefs => 0x103,
+        Command::Device(model) => 0x1000 + model as u64,
+        Command::System(model) => 0x8000 + model as u64,
+        _ => 0,
+    }
+}
 type WorkResult = (Snapshot, Result<(), String>);
 enum WorkUpdate {
     Device(usize, backend::State),
@@ -384,7 +396,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_TIMER if w == 3 => {
-            a.tick_fx(hwnd);
+            if a.tick_fx(hwnd) {
+                InvalidateRect(hwnd, null(), 0);
+            }
             0
         }
         DONE => {
@@ -429,6 +443,23 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             TrackMouseEvent(&mut tracking);
             let (hx, hy) = a.mouse(l);
             a.on_hover_move(hx, hy);
+            let mut changed = false;
+            for b in &a.controls {
+                let key = widget_key(b.command);
+                if key != 0 && a.fx.widget.set_hover(key, b.rect.contains(hx, hy)) {
+                    if b.rect.contains(hx, hy) {
+                        a.fx.widget.animate(key, 0., 0);
+                        a.fx.widget.animate(key, 1., 130);
+                    } else {
+                        a.fx.widget.animate(key, 0., 130);
+                    }
+                    changed = true;
+                }
+            }
+            if changed {
+                a.fx_wake(hwnd);
+                InvalidateRect(hwnd, null(), 0);
+            }
             if let Some((key, rect)) = a.eq_drag {
                 let (_, y) = a.mouse(l);
                 a.eq_slide(hwnd, key, rect, y);
@@ -532,6 +563,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
 }
 
 impl App {
+    fn update_ring_targets(&mut self) {
+        for (i, state) in self.snapshot.devices.iter().enumerate() {
+            self.fx.widget.ring_target(0x1000 + i as u64, state.percent);
+        }
+        for (i, device) in self.snapshot.system_devices.iter().enumerate() {
+            self.fx
+                .widget
+                .ring_target(0x8000 + i as u64, device.state.percent);
+        }
+    }
     fn px(&self, v: i32) -> i32 {
         v * self.dpi as i32 / 96
     }
@@ -588,6 +629,7 @@ impl App {
         GetClientRect(hwnd, &mut r);
         self.width = self.logical(r.right).max(1000);
         self.height = self.logical(r.bottom).max(780);
+        self.fx.widget.clear_press();
         for b in self.controls.drain(..) {
             DestroyWindow(b.hwnd);
         }
@@ -610,21 +652,61 @@ impl App {
         );
         self.add(hwnd, "×", R::new(w - 56, 15, 34, 32), GHOST, Command::Close);
         let entries = [
-            ("设备", Command::Home),
+            ("我的设备", Command::Home),
             ("驱动商店", Command::DriverManager),
-            ("配置备份", Command::Configuration),
             ("检查更新", Command::CoreUpdate),
-            ("工具设置", Command::Prefs),
+            ("偏好设置", Command::Prefs),
         ];
-        let gap = 10;
-        let entry_width = (w - 64 - gap * 4) / 5;
         for (i, (label, command)) in entries.into_iter().enumerate() {
             self.add(
                 hwnd,
                 label,
-                R::new(32 + i as i32 * (entry_width + gap), 77, entry_width, 58),
+                R::new(12, 66 + i as i32 * 44, SIDEBAR - 24, 38),
                 ENTRY,
                 command,
+            );
+        }
+        let total_devices = REGISTRY.len() + self.snapshot.system_devices.len();
+        let page_size = 4;
+        let pages = total_devices.div_ceil(page_size).max(1);
+        self.home_page = self.home_page.min(pages - 1);
+        for (slot, index) in (self.home_page * page_size..total_devices)
+            .take(page_size)
+            .enumerate()
+        {
+            let name = if index < REGISTRY.len() {
+                REGISTRY[index].name.to_owned()
+            } else {
+                self.snapshot.system_devices[index - REGISTRY.len()]
+                    .name
+                    .clone()
+            };
+            self.add(
+                hwnd,
+                &name,
+                R::new(12, 286 + slot as i32 * 42, SIDEBAR - 24, 38),
+                ENTRY,
+                if index < REGISTRY.len() {
+                    Command::Device(index)
+                } else {
+                    Command::System(index - REGISTRY.len())
+                },
+            );
+        }
+        if pages > 1 {
+            self.add(
+                hwnd,
+                "‹",
+                R::new(34, h - 58, 44, 34),
+                GHOST,
+                Command::HomePage(-1),
+            );
+            self.add(
+                hwnd,
+                "›",
+                R::new(126, h - 58, 44, 34),
+                GHOST,
+                Command::HomePage(1),
             );
         }
         match self.page {
@@ -640,25 +722,15 @@ impl App {
                         Command::AddDevice,
                     );
                 }
-                let cols = if total > 3 {
-                    2
-                } else {
-                    (total as i32).clamp(1, 3)
-                };
-                let page_size = if total > 3 { 4 } else { 3 };
-                let cw = (w - 64 - 20 * (cols - 1)) / cols;
-                let card_h = if total > 3 {
-                    (h - HOME_CONTENT_Y - 106) / 2
-                } else {
-                    (h - HOME_CONTENT_Y - 106).min(530)
-                };
-                for (slot, index) in (0..total)
-                    .skip(self.home_page * page_size)
-                    .take(page_size)
-                    .enumerate()
-                {
-                    let x = 32 + (slot as i32 % cols) * (cw + 20);
+                let cols = if w - SIDEBAR > 1040 { 3 } else { 2 };
+                let cw = ((w - SIDEBAR - 52 - 18 * (cols - 1)) / cols).max(250);
+                let card_h = ((h - HOME_CONTENT_Y - 110) / 2).clamp(250, 360);
+                for (slot, index) in (self.home_page * 4..total).take(4).enumerate() {
+                    let x = SIDEBAR + 24 + (slot as i32 % cols) * (cw + 18);
                     let y = HOME_CONTENT_Y + slot as i32 / cols * (card_h + 16);
+                    if y + card_h > h - 78 {
+                        break;
+                    }
                     let name = if index < REGISTRY.len() {
                         REGISTRY[index].name.to_owned()
                     } else {
@@ -678,45 +750,29 @@ impl App {
                         },
                     );
                 }
-                if total > page_size {
-                    self.add(
-                        hwnd,
-                        "上一页",
-                        R::new(w / 2 - 110, h - 62, 90, 38),
-                        GHOST,
-                        Command::HomePage(-1),
-                    );
-                    self.add(
-                        hwnd,
-                        "下一页",
-                        R::new(w / 2 + 20, h - 62, 90, 38),
-                        GHOST,
-                        Command::HomePage(1),
-                    );
-                }
                 self.add(
                     hwnd,
                     "重新读取",
-                    R::new(w - 272, h - 62, 116, 38),
+                    R::new(w - 268, h - 56, 116, 34),
                     GHOST,
                     Command::Refresh,
                 );
                 self.add(
                     hwnd,
+                    "配置备份",
+                    R::new(w - 396, h - 56, 116, 34),
+                    GHOST,
+                    Command::Configuration,
+                );
+                self.add(
+                    hwnd,
                     "退出程序",
-                    R::new(w - 144, h - 62, 112, 38),
+                    R::new(w - 144, h - 56, 112, 34),
                     GHOST,
                     Command::Quit,
                 );
             }
             Page::Device(m) => {
-                self.add(
-                    hwnd,
-                    "‹  我的设备",
-                    R::new(28, 16, 133, 34),
-                    GHOST,
-                    Command::Home,
-                );
                 let rx = 394;
                 let rw = w - rx - 28;
                 let cx = rx + 30;
@@ -747,21 +803,21 @@ impl App {
                     self.add(
                         hwnd,
                         "导入音效组件",
-                        R::new(28, h - 62, 148, 38),
+                        R::new(SIDEBAR + 16, h - 62, 148, 38),
                         GHOST,
                         Command::ConnectAudio,
                     );
                     self.add(
                         hwnd,
                         "导出音效",
-                        R::new(188, h - 62, 96, 38),
+                        R::new(SIDEBAR + 176, h - 62, 96, 38),
                         GHOST,
                         Command::ExportAudio,
                     );
                     self.add(
                         hwnd,
                         "导入音效",
-                        R::new(296, h - 62, 96, 38),
+                        R::new(SIDEBAR + 284, h - 62, 96, 38),
                         GHOST,
                         Command::ImportAudio,
                     );
@@ -998,13 +1054,6 @@ impl App {
             Page::System(_) => {
                 self.add(
                     hwnd,
-                    "‹  我的设备",
-                    R::new(28, 16, 133, 34),
-                    GHOST,
-                    Command::Home,
-                );
-                self.add(
-                    hwnd,
                     "重新读取",
                     R::new(w - 150, h - 61, 122, 39),
                     GHOST,
@@ -1012,18 +1061,11 @@ impl App {
                 );
             }
             Page::Preferences => {
-                self.add(
-                    hwnd,
-                    "‹  我的设备",
-                    R::new(28, 16, 133, 34),
-                    GHOST,
-                    Command::Home,
-                );
                 for (i, value) in [30, 60, 120, 300, 600, 1800].iter().enumerate() {
                     self.add(
                         hwnd,
                         &format!("{value} 秒"),
-                        R::new(330 + i as i32 * 116, 256, 104, 40),
+                        R::new(330 + i as i32 * 116, 251, 104, 36),
                         CHIP,
                         Command::Interval(*value),
                     );
@@ -1032,7 +1074,7 @@ impl App {
                     self.add(
                         hwnd,
                         &format!("{value}%"),
-                        R::new(330 + i as i32 * 84, 349, 72, 40),
+                        R::new(330 + i as i32 * 84, 346, 72, 36),
                         CHIP,
                         Command::Threshold(*value),
                     );
@@ -1040,14 +1082,14 @@ impl App {
                 self.add(
                     hwnd,
                     "启用低电提醒",
-                    R::new(330, 442, 180, 40),
+                    R::new(330, 441, 180, 40),
                     CHIP,
                     Command::Notices,
                 );
                 self.add(
                     hwnd,
                     "导出设备诊断",
-                    R::new(330, 534, 180, 40),
+                    R::new(330, 536, 180, 40),
                     GHOST,
                     Command::Diagnose,
                 );
@@ -1058,7 +1100,7 @@ impl App {
                     } else {
                         "开机启动：关闭"
                     },
-                    R::new(330, 627, 200, 40),
+                    R::new(330, 625, 200, 40),
                     CHIP,
                     Command::Startup,
                 );
@@ -1085,11 +1127,18 @@ impl App {
         }
     }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
+        match page {
+            Page::Device(model) => self.home_page = model / 4,
+            Page::System(model) => self.home_page = (REGISTRY.len() + model) / 4,
+            Page::Home | Page::Preferences => {}
+        }
         self.page = page;
         self.advanced = false;
         self.settings_page = 0;
         self.audio_page = 0;
         self.preview_dpi = None;
+        self.fx.nav.start();
+        self.fx_wake(hwnd);
         self.layout(hwnd);
         InvalidateRect(hwnd, null(), 0);
     }
@@ -1447,10 +1496,11 @@ impl App {
                 .map(Page::System)
                 .unwrap_or(Page::Home);
         }
+        self.update_ring_targets();
+        self.fx_wake(hwnd);
         let total = REGISTRY.len() + self.snapshot.system_devices.len();
-        self.home_page = self
-            .home_page
-            .min(total.saturating_sub(1) / if total > 3 { 4 } else { 3 });
+        let page_size = 4;
+        self.home_page = self.home_page.min(total.saturating_sub(1) / page_size);
         if self.queued.is_empty() {
             self.preview_dpi = None;
         }
@@ -1764,10 +1814,11 @@ impl App {
                 }
                 Command::HomePage(delta) => {
                     let total = REGISTRY.len() + self.snapshot.system_devices.len();
+                    let page_size = 4;
                     if delta < 0 {
                         self.home_page > 0
                     } else {
-                        (self.home_page + 1) * if total > 3 { 4 } else { 3 } < total
+                        (self.home_page + 1) * page_size < total
                     }
                 }
                 Command::Refresh => self.pending.is_none() && self.queued.is_empty(),
@@ -1791,29 +1842,39 @@ impl App {
             self.background(&c);
             match self.page {
                 Page::Home => self.home(&c),
-                Page::Device(m) => self.detail(&c, m),
+                Page::Device(m) => {
+                    self.detail(&c, m);
+                    self.device_summary(&c, m);
+                }
                 Page::System(m) => self.system_detail(&c, m),
                 Page::Preferences => self.preferences(&c),
             }
+            self.sidebar_overlay(&c);
             c.text(
                 &self.status,
                 if matches!(self.page,Page::Device(m) if REGISTRY[m].kind==Kind::Headset) {
                     R::new(562, self.height - 58, self.width - 880, 32)
                 } else if matches!(self.page, Page::Device(_)) {
-                    R::new(180, self.height - 58, self.width - 500, 32)
+                    R::new(
+                        SIDEBAR + 24,
+                        self.height - 54,
+                        self.width - SIDEBAR - 320,
+                        30,
+                    )
                 } else if self.page == Page::Home {
                     R::new(
-                        32,
-                        self.height - 58,
-                        if REGISTRY.len() > 4 {
-                            (self.width / 2 - 150).max(120)
-                        } else {
-                            self.width - 322
-                        },
-                        32,
+                        SIDEBAR + 24,
+                        self.height - 52,
+                        self.width - SIDEBAR - 420,
+                        28,
                     )
                 } else {
-                    R::new(28, self.height - 58, self.width - 350, 32)
+                    R::new(
+                        SIDEBAR + 24,
+                        self.height - 54,
+                        self.width - SIDEBAR - 350,
+                        30,
+                    )
                 },
                 12,
                 400,
@@ -1848,6 +1909,14 @@ unsafe extern "system" fn button_proc(
             dwHoverTime: 0,
         };
         TrackMouseEvent(&mut tracking);
+        let parent = GetParent(hwnd);
+        let mut point = POINT {
+            x: l as i16 as i32,
+            y: (l >> 16) as i16 as i32,
+        };
+        MapWindowPoints(hwnd, parent, &mut point, 1);
+        let packed = ((point.y as u16 as isize) << 16) | point.x as u16 as isize;
+        SendMessageW(parent, WM_MOUSEMOVE, w, packed);
         InvalidateRect(hwnd, null(), 0);
     }
     if msg == WM_MOUSELEAVE {

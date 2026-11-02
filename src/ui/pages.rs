@@ -1,5 +1,5 @@
 //! Page painting for the main window: home dashboard, device detail and preferences.
-use super::{App, Command, Page, CARD, CHIP, ENTRY, GHOST, HOME_CONTENT_Y};
+use super::{widget_key, App, Command, Page, CARD, CHIP, ENTRY, GHOST, HOME_CONTENT_Y, SIDEBAR};
 use crate::{
     backend::{self, Action},
     devices::{Kind, REGISTRY},
@@ -16,11 +16,23 @@ use windows_sys::Win32::{
 
 /// Navigation/transition state owned by the main-window rework.
 #[derive(Default)]
-pub(crate) struct NavFx {}
+pub(crate) struct NavFx {
+    started: Option<std::time::Instant>,
+}
 
 impl NavFx {
+    pub(crate) fn start(&mut self) {
+        self.started = Some(std::time::Instant::now());
+    }
+
+    fn value(&self) -> f32 {
+        self.started
+            .map(|start| (start.elapsed().as_millis() as f32 / 250.).clamp(0., 1.))
+            .unwrap_or(1.)
+    }
+
     pub(crate) fn tick(&mut self, _hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
-        false
+        self.value() < 1.
     }
 
     pub(crate) fn on_move(&mut self, _x: i32, _y: i32) {}
@@ -107,6 +119,91 @@ pub(super) fn power(s: &backend::State) -> &'static str {
 }
 
 impl App {
+    pub(super) unsafe fn sidebar_overlay(&self, c: &Canvas) {
+        c.gradient_v(R::new(0, 0, SIDEBAR, self.height), 0xff111117, 0xff0e0e12);
+        c.line(SIDEBAR, 0, SIDEBAR, self.height, BORDER, 1.);
+        c.text(
+            "外设盒",
+            R::new(20, 20, SIDEBAR - 40, 30),
+            18,
+            600,
+            TEXT,
+            DT_LEFT,
+        );
+        c.text(
+            "PERIPHERAL DESK",
+            R::new(20, 46, SIDEBAR - 40, 18),
+            10,
+            500,
+            DIM,
+            DT_LEFT,
+        );
+        c.text(
+            "设备",
+            R::new(18, 252, SIDEBAR - 36, 20),
+            11,
+            600,
+            DIM,
+            DT_LEFT,
+        );
+    }
+
+    pub(super) unsafe fn device_summary(&self, c: &Canvas, m: usize) {
+        c.rect(R::new(SIDEBAR + 1, 66, 189, self.height - 66), BG);
+        let s = &self.snapshot.devices[m];
+        let spec = &REGISTRY[m];
+        let panel = R::new(SIDEBAR + 16, 88, 158, (self.height - 172).max(400));
+        c.soft_shadow(panel, 12);
+        c.round(panel, 12, PANEL, Some(BORDER));
+        c.image(
+            self.images.images[m],
+            R::new(panel.x + 18, panel.y + 22, 122, 98),
+            s.fresh,
+        );
+        c.text(
+            spec.brand,
+            R::new(panel.x + 12, panel.y + 132, 134, 20),
+            10,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            spec.name,
+            R::new(panel.x + 12, panel.y + 156, 134, 42),
+            13,
+            600,
+            TEXT,
+            DT_LEFT,
+        );
+        c.ellipse(
+            R::new(panel.x + 13, panel.y + 210, 6, 6),
+            connection_color(s),
+        );
+        c.text(
+            connection(s, self.images.installed[m]),
+            R::new(panel.x + 26, panel.y + 202, 120, 34),
+            10,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        let ring = R::new(panel.x + 29, panel.y + 270, 100, 100);
+        c.ring(ring, s.percent.filter(|_| s.fresh), s.fresh);
+        c.text(
+            if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
+                "USB 供电"
+            } else {
+                power(s)
+            },
+            R::new(panel.x + 12, panel.y + 386, 134, 24),
+            11,
+            400,
+            DIM,
+            DT_CENTER,
+        );
+    }
+
     pub(super) fn eq_hit(&self, x: i32, y: i32) -> Option<(Tuning, R)> {
         if !self.can_adjust() || self.audio_page != 1 {
             return None;
@@ -187,32 +284,48 @@ impl App {
     }
     pub(super) unsafe fn background(&self, c: &Canvas) {
         c.rect(R::new(0, 0, self.width, self.height), BG);
-        c.gradient(R::new(0, 0, self.width * 2 / 3, 68), 0xff261119, BG);
-        c.line(28, 65, self.width - 28, 65, 0xff19191f, 1.);
-        c.ellipse(
-            R::new(if self.page == Page::Home { 28 } else { 186 }, 31, 7, 7),
-            RED,
+        c.gradient_v(R::new(0, 0, SIDEBAR, self.height), 0xff111117, 0xff0e0e12);
+        c.line(SIDEBAR, 0, SIDEBAR, self.height, BORDER, 1.);
+        c.gradient_v(
+            R::new(SIDEBAR + 1, 0, self.width - SIDEBAR - 1, 66),
+            crate::paint::blend(BG, 0xff25131a, self.fx.nav.value()),
+            BG,
+        );
+        c.line(SIDEBAR + 24, 65, self.width - 28, 65, 0xff19191f, 1.);
+        c.text(
+            "外设盒",
+            R::new(20, 20, SIDEBAR - 40, 30),
+            18,
+            600,
+            TEXT,
+            DT_LEFT,
         );
         c.text(
-            if self.page == Page::Home {
-                "外设盒  /  外设控制中心"
-            } else {
-                "外设盒"
-            },
-            R::new(
-                if self.page == Page::Home { 47 } else { 206 },
-                18,
-                if self.page == Page::Home { 450 } else { 75 },
-                32,
-            ),
-            13,
-            400,
-            MUTED,
+            "PERIPHERAL DESK",
+            R::new(20, 46, SIDEBAR - 40, 18),
+            10,
+            500,
+            DIM,
+            DT_LEFT,
+        );
+        c.text(
+            "设备",
+            R::new(18, 252, SIDEBAR - 36, 20),
+            11,
+            600,
+            DIM,
             DT_LEFT,
         );
     }
     pub(super) unsafe fn home(&self, c: &Canvas) {
-        c.text("我的设备", R::new(32, 154, 600, 40), 27, 600, TEXT, DT_LEFT);
+        c.text(
+            "我的设备",
+            R::new(SIDEBAR + 24, 88, 600, 34),
+            24,
+            600,
+            TEXT,
+            DT_LEFT,
+        );
         c.text(
             if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
                 "尚未加载设备驱动，先从驱动商店添加你的设备"
@@ -221,7 +334,7 @@ impl App {
             } else {
                 "选择设备，查看电量并调整设置"
             },
-            R::new(34, 199, 700, 23),
+            R::new(SIDEBAR + 26, 124, 700, 23),
             13,
             400,
             MUTED,
@@ -231,9 +344,9 @@ impl App {
             let center_y = HOME_CONTENT_Y + (self.height - HOME_CONTENT_Y - 86) / 2;
             c.round(
                 R::new(
-                    32,
+                    SIDEBAR + 24,
                     HOME_CONTENT_Y,
-                    self.width - 64,
+                    self.width - SIDEBAR - 48,
                     self.height - HOME_CONTENT_Y - 86,
                 ),
                 20,
@@ -242,7 +355,7 @@ impl App {
             );
             c.text(
                 "从添加设备驱动开始",
-                R::new(60, center_y - 98, self.width - 120, 42),
+                R::new(SIDEBAR + 64, center_y - 98, self.width - SIDEBAR - 128, 42),
                 28,
                 600,
                 TEXT,
@@ -250,7 +363,7 @@ impl App {
             );
             c.text(
                 "驱动按设备下载，只安装你需要的型号。",
-                R::new(60, center_y - 44, self.width - 120, 26),
+                R::new(SIDEBAR + 64, center_y - 44, self.width - SIDEBAR - 128, 26),
                 15,
                 400,
                 MUTED,
@@ -258,7 +371,7 @@ impl App {
             );
             c.text(
                 "安装新设备驱动后，请退出并重新打开主程序。",
-                R::new(60, center_y + 76, self.width - 120, 26),
+                R::new(SIDEBAR + 64, center_y + 76, self.width - SIDEBAR - 128, 26),
                 13,
                 400,
                 DIM,
@@ -270,26 +383,46 @@ impl App {
         let Some(device) = self.snapshot.system_devices.get(m) else {
             return;
         };
+        let left = SIDEBAR + 24;
+        let width = self.width - left - 48;
+        c.text(
+            "Windows 设备",
+            R::new(left, 88, 600, 34),
+            24,
+            600,
+            TEXT,
+            DT_LEFT,
+        );
+        c.text(
+            "系统提供电量 · 只读状态",
+            R::new(left + 2, 124, width - 4, 22),
+            13,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.soft_shadow(R::new(left, 168, width, 360), 14);
+        c.round(R::new(left, 168, width, 360), 14, PANEL, Some(BORDER));
         c.text(
             &device.name,
-            R::new(40, 165, self.width - 80, 64),
-            28,
+            R::new(left + 32, 202, width - 64, 48),
+            24,
             600,
             TEXT,
             DT_LEFT,
         );
         c.text(
             "Windows 系统电量 · 只读",
-            R::new(42, 230, self.width - 84, 30),
-            14,
+            R::new(left + 34, 252, width - 68, 24),
+            13,
             400,
             MUTED,
             DT_LEFT,
         );
         c.text(
             &system_reading(device),
-            R::new(42, 305, self.width - 84, 95),
-            54,
+            R::new(left + 34, 316, width - 68, 78),
+            48,
             500,
             TEXT,
             DT_LEFT,
@@ -297,13 +430,21 @@ impl App {
         if device.state.charging == Some(true) {
             c.text(
                 "正在充电",
-                R::new(42, 416, self.width - 84, 28),
-                15,
+                R::new(left + 34, 416, width - 68, 26),
+                14,
                 400,
                 MUTED,
                 DT_LEFT,
             );
         }
+        c.text(
+            "由 Windows 提供的只读电量数据",
+            R::new(left + 34, 478, width - 68, 22),
+            12,
+            400,
+            DIM,
+            DT_LEFT,
+        );
     }
     pub(super) unsafe fn detail(&self, c: &Canvas, m: usize) {
         let s = &self.snapshot.devices[m];
@@ -854,22 +995,44 @@ impl App {
         );
     }
     pub(super) unsafe fn preferences(&self, c: &Canvas) {
-        c.text("工具设置", R::new(40, 155, 500, 40), 27, 600, TEXT, DT_LEFT);
-        c.round(
-            R::new(32, 212, self.width - 64, 488),
-            20,
-            PANEL,
-            Some(BORDER),
+        let left = SIDEBAR + 24;
+        let width = self.width - left - 48;
+        c.text(
+            "偏好设置",
+            R::new(left, 88, 500, 36),
+            24,
+            600,
+            TEXT,
+            DT_LEFT,
         );
+        c.text(
+            "刷新、低电提醒与 Windows 启动行为",
+            R::new(left + 2, 126, width - 4, 22),
+            13,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.round(R::new(left, 168, width, 532), 14, PANEL, Some(BORDER));
         for (y, title, hint) in [
-            (251, "自动刷新", "较长间隔可减少设备唤醒"),
-            (344, "低电阈值", "仅在未充电且读数有效时提醒"),
-            (437, "低电提醒", "同一低电周期只提醒一次"),
-            (529, "设备诊断", "仅导出本地 HID 元数据"),
-            (622, "开机启动", "登录 Windows 后在托盘运行"),
+            (202, "自动刷新", "选择读取间隔，较长间隔可减少设备唤醒"),
+            (297, "低电阈值", "仅在未充电且读数有效时提醒"),
+            (392, "低电提醒", "同一低电周期只提醒一次"),
+            (487, "设备诊断", "仅导出本地 HID 元数据"),
+            (576, "开机启动", "登录 Windows 后在托盘运行"),
         ] {
-            c.text(title, R::new(62, y, 240, 28), 16, 500, TEXT, DT_LEFT);
-            c.text(hint, R::new(62, y + 30, 250, 25), 12, 400, DIM, DT_LEFT);
+            c.text(title, R::new(left + 24, y, 210, 25), 14, 600, TEXT, DT_LEFT);
+            c.text(
+                hint,
+                R::new(left + 24, y + 25, width - 48, 21),
+                12,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+            if y < 550 {
+                c.line(left + 24, y + 90, left + width - 24, y + 90, BORDER, 1.);
+            }
         }
     }
     pub(super) unsafe fn draw_button(&self, item: &DRAWITEMSTRUCT) {
@@ -910,7 +1073,8 @@ impl App {
                 if matches!(b.command, Command::Device(_)) {
                     self.card(&c, r, m);
                 } else if let Some(device) = self.snapshot.system_devices.get(m) {
-                    c.round(r, 8, PANEL, Some(BORDER));
+                    c.soft_shadow(r, 14);
+                    c.round(r, 14, PANEL, Some(BORDER));
                     c.text(
                         "WINDOWS · 只读",
                         R::new(24, 22, r.w - 48, 25),
@@ -944,15 +1108,22 @@ impl App {
                         DT_RIGHT,
                     );
                 }
-                if hover || item.itemState & ODS_FOCUS != 0 {
+                if hover
+                    || self.fx.widget.hover(widget_key(b.command))
+                    || item.itemState & ODS_FOCUS != 0
+                {
                     c.round(
                         R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
-                        18,
+                        14,
                         0,
                         Some(if item.itemState & ODS_FOCUS != 0 {
                             RED
                         } else {
-                            0xff66505c
+                            crate::paint::blend(
+                                PANEL,
+                                crate::ui::widgets::HOVER,
+                                self.fx.widget.value(widget_key(b.command)),
+                            )
                         }),
                     );
                 }
@@ -960,37 +1131,90 @@ impl App {
             return;
         }
         if b.style == ENTRY {
-            c.rect(R::new(0, 0, b.rect.w, b.rect.h), BG);
-            let selected = match b.command {
+            c.rect(R::new(0, 0, b.rect.w, b.rect.h), 0xff111117);
+            let active = match b.command {
                 Command::Home => {
                     matches!(self.page, Page::Home | Page::Device(_) | Page::System(_))
                 }
+                Command::DriverManager => false,
+                Command::CoreUpdate => false,
                 Command::Prefs => self.page == Page::Preferences,
+                Command::Device(m) => self.page == Page::Device(m),
+                Command::System(m) => self.page == Page::System(m),
                 _ => false,
+            };
+            let key = widget_key(b.command);
+            let over = hover || self.fx.widget.hover(key);
+            let fill = if active {
+                0xff29232b
+            } else if over {
+                crate::paint::blend(PANEL, crate::ui::widgets::HOVER, self.fx.widget.value(key))
+            } else {
+                0xff111117
             };
             c.round(
                 r,
                 8,
-                if hover || selected { FIELD } else { PANEL },
-                Some(if selected { RED } else { BORDER }),
+                fill,
+                Some(if active { 0xff4a3038 } else { 0xff111117 }),
             );
-            let hint = match b.command {
-                Command::Home => "查看与调整外设",
-                Command::DriverManager => "获取设备驱动",
-                Command::Configuration => "备份与恢复设置",
-                Command::CoreUpdate => "获取程序新版本",
-                Command::Prefs => "刷新与提醒",
-                _ => "",
-            };
-            c.text(
-                &b.label,
-                R::new(15, 7, r.w - 30, 26),
-                15,
-                600,
-                TEXT,
-                DT_LEFT,
-            );
-            c.text(hint, R::new(15, 31, r.w - 30, 19), 11, 400, DIM, DT_LEFT);
+            if active {
+                c.round(R::new(2, 8, 3, r.h - 16), 1, RED, None);
+            }
+            match b.command {
+                Command::Device(m) => {
+                    let percent = self
+                        .fx
+                        .widget
+                        .ring_value(0x1000 + m as u64)
+                        .map(|v| v.round() as u8);
+                    mini_ring(
+                        &c,
+                        R::new(10, 7, 24, 24),
+                        percent,
+                        self.snapshot.devices[m].fresh,
+                    );
+                    c.ellipse(
+                        R::new(r.w - 14, 16, 6, 6),
+                        connection_color(&self.snapshot.devices[m]),
+                    );
+                    c.text(
+                        &b.label,
+                        R::new(42, 4, r.w - 62, r.h - 8),
+                        12,
+                        500,
+                        if active { TEXT } else { MUTED },
+                        DT_LEFT,
+                    );
+                }
+                Command::System(m) => {
+                    let percent = self
+                        .fx
+                        .widget
+                        .ring_value(0x8000 + m as u64)
+                        .map(|v| v.round() as u8);
+                    mini_ring(&c, R::new(10, 7, 24, 24), percent, true);
+                    c.ellipse(R::new(r.w - 14, 16, 6, 6), crate::paint::GREEN);
+                    c.text(
+                        &b.label,
+                        R::new(42, 4, r.w - 62, r.h - 8),
+                        12,
+                        500,
+                        if active { TEXT } else { MUTED },
+                        DT_LEFT,
+                    );
+                }
+                _ => {
+                    c.text(
+                        &b.label,
+                        R::new(14, 3, r.w - 28, r.h - 6),
+                        13,
+                        500,
+                        if active { TEXT } else { MUTED },
+                        DT_LEFT,
+                    );
+                }
+            }
             if item.itemState & ODS_FOCUS != 0 {
                 c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 7, 0, Some(MUTED));
             }
@@ -1057,10 +1281,21 @@ impl App {
         let spec = &REGISTRY[m];
         let active = s.fresh;
         c.rect(R::new(0, 0, r.w + 2, r.h + 2), BG);
+        c.soft_shadow(r, 14);
         c.round(
             r,
-            20,
-            if active { PANEL } else { 0xff101014 },
+            14,
+            if self.fx.widget.hover(0x1000 + m as u64) {
+                crate::paint::blend(
+                    PANEL,
+                    crate::ui::widgets::HOVER,
+                    self.fx.widget.value(0x1000 + m as u64),
+                )
+            } else if active {
+                PANEL
+            } else {
+                0xff101014
+            },
             Some(if active { 0xff39313a } else { 0xff222229 }),
         );
         c.text(
@@ -1175,6 +1410,11 @@ impl App {
                 if active { RED } else { DIM },
                 DT_RIGHT,
             );
+            let ring = R::new(r.w - 60, r.h - 76, 40, 40);
+            c.arc(ring, -90., 359.9, BORDER, 3.);
+            if let Some(percent) = self.fx.widget.ring_value(0x1000 + m as u64) {
+                c.arc(ring, -90., 360. * percent.clamp(0., 100.) / 100., RED, 3.);
+            }
             return;
         }
         if active {
@@ -1242,6 +1482,32 @@ impl App {
             500,
             if active { RED } else { DIM },
             DT_RIGHT,
+        );
+        if let Some(percent) = self.fx.widget.ring_value(0x1000 + m as u64) {
+            let ring = R::new(r.w - 72, r.h - 82, 46, 46);
+            c.arc(ring, -90., 359.9, BORDER, 4.);
+            c.arc(ring, -90., 360. * percent.clamp(0., 100.) / 100., RED, 4.);
+            c.text(
+                &format!("{}%", percent.round() as u8),
+                R::new(r.w - 88, r.h - 66, 78, 18),
+                11,
+                500,
+                MUTED,
+                DT_CENTER,
+            );
+        }
+    }
+}
+
+unsafe fn mini_ring(c: &Canvas, r: R, percent: Option<u8>, active: bool) {
+    c.arc(r, -90., 359.9, BORDER, 2.5);
+    if let Some(percent) = percent {
+        c.arc(
+            r,
+            -90.,
+            360. * percent.min(100) as f32 / 100.,
+            if active { RED } else { DIM },
+            2.5,
         );
     }
 }
