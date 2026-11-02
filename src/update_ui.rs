@@ -1,7 +1,8 @@
 //! Independent core release channel and restart-aware native update window.
 use crate::{
     hid::wide,
-    paint::{self, Canvas, BG, BORDER, DIM, FIELD, GREEN, MUTED, ORANGE, PANEL, R, RED, TEXT},
+    paint::{self, blend, Canvas, BG, BORDER, DIM, FIELD, MUTED, PANEL, R, RED, TEXT},
+    ui::widgets::{DANGER, HOVER, PRESSED, RADIUS_LG, RADIUS_MD, SPACE_2, SUCCESS},
 };
 use peripheral_desk::{
     core_update::{self, UpdateInfo},
@@ -225,7 +226,7 @@ impl Updater {
             PLUGIN_STATUS,
             "EDIT",
             "正在检查已安装插件…",
-            R::new(44, 634, 580, 76),
+            R::new(44, 640, 580, 76),
             ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
         );
         self.add(
@@ -233,7 +234,7 @@ impl Updater {
             PLUGINS,
             "BUTTON",
             "查看 / 更新插件",
-            R::new(644, 634, 252, 42),
+            R::new(644, 640, 252, 42),
             BS_OWNERDRAW as u32,
         );
         for child in &self.children {
@@ -447,12 +448,12 @@ impl Updater {
         {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-            c.gradient(R::new(0, 0, WIDTH, 84), 0xff201017, BG);
-            c.text("检查更新", R::new(28, 18, 490, 34), 23, 600, TEXT, DT_LEFT);
+            c.gradient_v(R::new(0, 0, WIDTH, 84), blend(BG, 0xff25131a, 0.8), BG);
+            c.text("检查更新", R::new(28, 16, 490, 28), 18, 500, TEXT, DT_LEFT);
             c.text(
                 "一次检查主程序与已安装插件，按需选择更新。",
-                R::new(28, 56, 500, 24),
-                14,
+                R::new(28, 46, 500, 20),
+                12,
                 400,
                 MUTED,
                 DT_LEFT,
@@ -465,7 +466,10 @@ impl Updater {
                 MUTED,
                 DT_LEFT,
             );
-            c.round(R::new(24, 110, 892, 420), 14, PANEL, Some(BORDER));
+            let version_card = R::new(24, 110, 892, 420);
+            c.soft_shadow(version_card, 12);
+            c.round(version_card, RADIUS_LG, PANEL, Some(BORDER));
+            c.round(R::new(44, 300, 852, 210), RADIUS_MD, FIELD, Some(BORDER));
             c.text(
                 "当前版本",
                 R::new(44, 134, 150, 26),
@@ -477,7 +481,7 @@ impl Updater {
             c.text(
                 env!("CARGO_PKG_VERSION"),
                 R::new(210, 128, 450, 38),
-                25,
+                24,
                 400,
                 TEXT,
                 DT_LEFT,
@@ -493,10 +497,10 @@ impl Updater {
             c.text(
                 self.info.as_ref().map_or("尚未检查", |i| &i.version),
                 R::new(210, 178, 450, 38),
-                25,
+                24,
                 400,
                 if self.info.as_ref().is_some_and(|i| i.available) {
-                    GREEN
+                    SUCCESS
                 } else {
                     MUTED
                 },
@@ -522,10 +526,14 @@ impl Updater {
                 MUTED,
                 DT_LEFT,
             );
-            c.round(R::new(24, 606, 892, 120), 14, PANEL, Some(BORDER));
+            let plugin_card = R::new(24, 606, 892, 120);
+            c.soft_shadow(plugin_card, 12);
+            c.round(plugin_card, RADIUS_LG, PANEL, Some(BORDER));
+            c.round(R::new(44, 640, 580, 76), RADIUS_MD, FIELD, Some(BORDER));
+            c.round(R::new(644, 640, 252, 42), RADIUS_MD, FIELD, Some(BORDER));
             c.text(
                 "设备插件 · 使用驱动商店所选通道",
-                R::new(44, 608, 800, 24),
+                R::new(44, 606 + SPACE_2, 800, 24),
                 14,
                 600,
                 TEXT,
@@ -551,7 +559,7 @@ impl Updater {
                 R::new(28, 760, 884, 18),
                 12,
                 400,
-                if self.error { ORANGE } else { DIM },
+                if self.error { DANGER } else { DIM },
                 DT_LEFT,
             );
         }
@@ -577,16 +585,22 @@ impl Updater {
         let height = (item.rcItem.bottom - item.rcItem.top) * 96 / self.dpi as i32;
         let disabled = item.itemState & ODS_DISABLED != 0;
         let primary = child.id == INSTALL;
+        let pressed = item.itemState & ODS_SELECTED != 0;
+        let hovered = item.itemState & ODS_HOTLIGHT != 0;
         c.rect(R::new(0, 0, width, height), BG);
         c.round(
             R::new(0, 0, width - 1, height - 1),
-            9,
-            if disabled || !primary {
+            RADIUS_MD,
+            if disabled {
                 FIELD
-            } else if item.itemState & ODS_SELECTED != 0 {
-                ORANGE
-            } else {
+            } else if pressed {
+                PRESSED
+            } else if primary {
                 RED
+            } else if hovered {
+                HOVER
+            } else {
+                FIELD
             },
             Some(if item.itemState & ODS_FOCUS != 0 {
                 MUTED

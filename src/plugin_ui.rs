@@ -1,7 +1,10 @@
 //! On-demand native driver-package manager. Package verification stays in the library.
 use crate::{
     hid::wide,
-    paint::{Canvas, BG, BORDER, DIM, FIELD, GREEN, MUTED, ORANGE, PANEL, R, RED, TEXT},
+    paint::{blend, Canvas, BG, BORDER, DIM, FIELD, MUTED, PANEL, R, TEXT},
+    ui::widgets::{
+        DANGER, HOVER, PRESSED, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_4, SUCCESS, WARN,
+    },
 };
 use peripheral_desk::plugin_manager::{self, DriverPackage, InstalledDriver};
 use std::{
@@ -481,13 +484,17 @@ impl Manager {
         for child in self.children.drain(..) {
             DestroyWindow(child.hwnd);
         }
-        for (id, label, x) in [(CHANNEL, "稳定版", 518), (PREVIEW, "预览版", 602)] {
+        let channel_x = 132;
+        for (id, label, x) in [
+            (CHANNEL, "稳定版", channel_x),
+            (PREVIEW, "预览版", channel_x + 76 + SPACE_2),
+        ] {
             self.add(
                 hwnd,
                 id,
                 "BUTTON",
                 label,
-                R::new(x, 26, 76, 38),
+                R::new(x, 104, 76, 32),
                 BS_OWNERDRAW as u32,
             );
         }
@@ -496,7 +503,7 @@ impl Manager {
             OFFLINE,
             "BUTTON",
             "离线安装…",
-            R::new(688, 26, 136, 38),
+            R::new(channel_x + 76 * 2 + SPACE_2 + SPACE_4, 104, 136, 32),
             BS_OWNERDRAW as u32,
         );
         self.add(
@@ -504,7 +511,12 @@ impl Manager {
             REFRESH,
             "BUTTON",
             "检查更新",
-            R::new(836, 26, 176, 38),
+            R::new(
+                channel_x + 76 * 2 + SPACE_2 + SPACE_4 + 136 + SPACE_3,
+                104,
+                176,
+                32,
+            ),
             BS_OWNERDRAW as u32,
         );
         self.add(
@@ -512,7 +524,7 @@ impl Manager {
             LIST,
             "LISTBOX",
             "",
-            R::new(40, 176, 960, 164),
+            R::new(40, 204, 960, 144),
             LBS_NOTIFY as u32
                 | LBS_NOINTEGRALHEIGHT as u32
                 | LBS_OWNERDRAWFIXED as u32
@@ -552,16 +564,26 @@ impl Manager {
         }
         for (id, label, x, width) in [
             (SELECT_ALL, "全选", 44, 84),
-            (SELECT_NONE, "取消选择", 138, 108),
-            (SELECT_DETECTED, "选择已识别设备", 256, 170),
-            (SELECT_UPDATES, "选择可更新", 438, 144),
+            (SELECT_NONE, "取消选择", 44 + 84 + SPACE_2, 108),
+            (
+                SELECT_DETECTED,
+                "选择已识别设备",
+                44 + 84 + SPACE_2 + 108 + SPACE_2,
+                170,
+            ),
+            (
+                SELECT_UPDATES,
+                "选择可更新",
+                44 + 84 + SPACE_2 + 108 + SPACE_2 + 170 + SPACE_2,
+                144,
+            ),
         ] {
             self.add(
                 hwnd,
                 id,
                 "BUTTON",
                 label,
-                R::new(x, 110, width, 32),
+                R::new(x, 144, width, 30),
                 BS_OWNERDRAW as u32,
             );
         }
@@ -1099,18 +1121,18 @@ impl Manager {
         {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-            c.gradient(R::new(0, 0, WIDTH, 84), 0xff201017, BG);
-            c.text("驱动管理", R::new(28, 18, 390, 32), 23, 600, TEXT, DT_LEFT);
-            c.text("更新通道", R::new(426, 30, 84, 24), 13, 400, MUTED, DT_LEFT);
+            c.gradient_v(R::new(0, 0, WIDTH, 84), blend(BG, 0xff25131a, 0.8), BG);
+            c.text("驱动管理", R::new(28, 16, 390, 28), 18, 500, TEXT, DT_LEFT);
             c.text(
                 "按型号勾选，一次安装多个驱动。点击行即可勾选，无需 Ctrl。",
-                R::new(28, 55, 500, 24),
-                13,
+                R::new(28, 46, 620, 20),
+                12,
                 400,
                 MUTED,
                 DT_LEFT,
             );
-            c.round(R::new(24, 98, 992, 258), 18, PANEL, Some(BORDER));
+            c.round(R::new(24, 98, 992, 270), RADIUS_LG, PANEL, Some(BORDER));
+            c.text("更新通道", R::new(44, 108, 76, 24), 12, 500, MUTED, DT_LEFT);
             let targets = self.targets();
             let bytes = targets.iter().map(|t| t.bytes).sum();
             c.text(
@@ -1123,7 +1145,7 @@ impl Manager {
                         size(bytes)
                     }
                 ),
-                R::new(452, 114, 540, 24),
+                R::new(648, 108, 344, 24),
                 12,
                 400,
                 MUTED,
@@ -1137,7 +1159,7 @@ impl Manager {
             ] {
                 c.text(
                     label,
-                    R::new(x, 148, width, 22),
+                    R::new(x, 176, width, 20),
                     12,
                     500,
                     DIM,
@@ -1158,13 +1180,13 @@ impl Manager {
                     DT_CENTER,
                 );
             }
-            c.round(R::new(24, 372, 992, 216), 18, PANEL, Some(BORDER));
+            c.round(R::new(24, 382, 992, 206), RADIUS_LG, PANEL, Some(BORDER));
             c.round(R::new(36, 448, 968, 68), 10, FIELD, Some(BORDER));
             if let Some(package) = self.selected() {
                 c.text(
                     package.name,
-                    R::new(44, 384, 760, 30),
-                    21,
+                    R::new(44, 392, 760, 28),
+                    18,
                     600,
                     TEXT,
                     DT_LEFT,
@@ -1199,11 +1221,11 @@ impl Manager {
                             "—".into()
                         }
                     ),
-                    R::new(44, 420, 952, 24),
-                    13,
+                    R::new(44, 426, 952, 22),
+                    12,
                     400,
                     if matches!(self.installation(), Installation::Present(_)) {
-                        GREEN
+                        SUCCESS
                     } else {
                         MUTED
                     },
@@ -1246,10 +1268,10 @@ impl Manager {
                 R::new(28, 612, 984, 21),
                 12,
                 400,
-                if self.error { ORANGE } else { DIM },
+                if self.error { DANGER } else { DIM },
                 DT_LEFT,
             );
-            c.round(R::new(24, 634, 992, 52), 10, FIELD, Some(BORDER));
+            c.round(R::new(24, 634, 992, 52), RADIUS_MD, FIELD, Some(BORDER));
         }
         BitBlt(dest, 0, 0, area.right, area.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old);
@@ -1289,16 +1311,23 @@ impl Manager {
                 PANEL
             },
         );
+        let pressed = item.itemState & ODS_SELECTED != 0;
+        let hovered = item.itemState & ODS_HOTLIGHT != 0;
+        let fill = if disabled {
+            FIELD
+        } else if pressed {
+            PRESSED
+        } else if active {
+            crate::paint::RED
+        } else if hovered {
+            HOVER
+        } else {
+            FIELD
+        };
         c.round(
             R::new(0, 0, width - 1, height - 1),
-            9,
-            if disabled || !active {
-                FIELD
-            } else if item.itemState & ODS_SELECTED != 0 {
-                ORANGE
-            } else {
-                RED
-            },
+            RADIUS_MD,
+            fill,
             Some(if item.itemState & ODS_FOCUS != 0 {
                 MUTED
             } else {
@@ -1346,18 +1375,18 @@ impl Manager {
                 let disabled = item.itemState & ODS_DISABLED != 0;
                 c.round(
                     R::new(0, 2, width - 2, height - 4),
-                    9,
+                    RADIUS_MD,
                     if checked {
-                        0xff2b1822
+                        blend(FIELD, DANGER, 0.12)
                     } else if focus {
                         FIELD
                     } else {
                         PANEL
                     },
                     Some(if checked {
-                        RED
+                        DANGER
                     } else if focus && item.itemState & ODS_FOCUS != 0 {
-                        ORANGE
+                        WARN
                     } else {
                         BORDER
                     }),
@@ -1365,7 +1394,7 @@ impl Manager {
                 c.round(
                     R::new(8, 11, 18, 18),
                     5,
-                    if checked { RED } else { PANEL },
+                    if checked { DANGER } else { PANEL },
                     Some(if row.catalog_available { MUTED } else { BORDER }),
                 );
                 if checked {
@@ -1378,8 +1407,8 @@ impl Manager {
                 c.ellipse(
                     R::new(40, 17, 6, 6),
                     match recommendation {
-                        Some(Recommendation::Clear) => GREEN,
-                        Some(Recommendation::Ambiguous) => ORANGE,
+                        Some(Recommendation::Clear) => SUCCESS,
+                        Some(Recommendation::Ambiguous) => WARN,
                         None => DIM,
                     },
                 );
@@ -1414,9 +1443,9 @@ impl Manager {
                     12,
                     400,
                     if matches!(installed, Some(Installation::Broken(_))) {
-                        ORANGE
+                        WARN
                     } else if matches!(installed, Some(Installation::Present(_))) {
-                        GREEN
+                        SUCCESS
                     } else {
                         DIM
                     },
