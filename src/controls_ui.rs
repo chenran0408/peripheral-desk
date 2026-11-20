@@ -43,6 +43,7 @@ const ADD: i32 = 125;
 const DELETE: i32 = 126;
 const UP: i32 = 127;
 const DOWN: i32 = 128;
+const MODE: i32 = 129;
 const PICK: i32 = 130;
 const ALL: i32 = 131;
 const STATUS: i32 = 140;
@@ -71,6 +72,7 @@ struct Editor {
     keys: Vec<(u16, String)>,
     events: Vec<MacroEvent>,
     macro_name: String,
+    macro_mode: MacroMode,
     macro_control: Option<u16>,
     macro_drafts: BTreeMap<u16, MacroDefinition>,
     rgb: [u8; 3],
@@ -174,6 +176,23 @@ const MEDIA: [(u16, &str); 7] = [
     (0xea, "音量 -"),
     (0xe2, "静音"),
 ];
+#[derive(Clone, Copy)]
+enum EventInput {
+    Key(bool),
+    Mouse(bool),
+    Delay,
+    Wheel(i8),
+}
+impl EventInput {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Key(_) => "key",
+            Self::Mouse(_) => "mouse",
+            Self::Delay => "delay",
+            Self::Wheel(_) => "wheel",
+        }
+    }
+}
 fn mouse_name(value: u8) -> &'static str {
     match value {
         1 => "左键",
@@ -185,6 +204,57 @@ fn mouse_name(value: u8) -> &'static str {
     }
 }
 impl Editor {
+    fn macro_modes(&self) -> &[MacroMode] {
+        self.state
+            .as_ref()
+            .map_or(&[MacroMode::Once], ControlState::modes)
+    }
+    fn event_options(&self) -> Vec<(EventInput, &'static str)> {
+        [
+            (EventInput::Key(true), "键盘按下"),
+            (EventInput::Key(false), "键盘释放"),
+            (EventInput::Delay, "等待"),
+            (EventInput::Mouse(true), "鼠标按下"),
+            (EventInput::Mouse(false), "鼠标释放"),
+            (EventInput::Wheel(1), "滚轮向上"),
+            (EventInput::Wheel(-1), "滚轮向下"),
+        ]
+        .into_iter()
+        .filter(|(event, _)| {
+            self.state
+                .as_ref()
+                .is_some_and(|state| state.supports_event(event.kind()))
+        })
+        .collect()
+    }
+    unsafe fn selected_event(&self) -> Option<EventInput> {
+        self.event_options()
+            .get(self.select(EVENT))
+            .map(|(event, _)| *event)
+    }
+    unsafe fn event_targets(&self) {
+        let target = self.child(EVENT_KEY);
+        SendMessageW(target, CB_RESETCONTENT, 0, 0);
+        match self.selected_event() {
+            Some(EventInput::Key(_)) => {
+                for (_, label) in &self.keys {
+                    SendMessageW(target, CB_ADDSTRING, 0, wide(label).as_ptr() as isize);
+                }
+            }
+            Some(EventInput::Mouse(_)) => {
+                for button in 1..=5 {
+                    SendMessageW(
+                        target,
+                        CB_ADDSTRING,
+                        0,
+                        wide(mouse_name(button)).as_ptr() as isize,
+                    );
+                }
+            }
+            _ => {}
+        }
+        self.set_select(EVENT_KEY, 0);
+    }
     fn kinds(&self) -> Vec<usize> {
         let declared = self
             .state
@@ -475,7 +545,24 @@ impl Editor {
                     R::new(390, 208, 292, 30),
                     ES_AUTOHSCROLL as u32,
                 );
-                SendMessageW(self.child(NAME), EM_SETLIMITTEXT, 20, 0);
+                let name_limit = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.macro_name_max_bytes)
+                    .unwrap_or(20);
+                SendMessageW(self.child(NAME), EM_SETLIMITTEXT, name_limit, 0);
+                let modes = self
+                    .macro_modes()
+                    .iter()
+                    .map(|m| match m {
+                        MacroMode::Once => "单次".into(),
+                        MacroMode::WhileHeld => "按住循环".into(),
+                        MacroMode::Toggle => "再次按下停止".into(),
+                        MacroMode::UntilOtherKey => "按其他键停止".into(),
+                        MacroMode::Repeat(n) => format!("重复 {n} 次"),
+                    })
+                    .collect::<Vec<String>>();
+                self.combo(hwnd, MODE, R::new(710, 208, 278, 184), &modes);
                 self.add(
                     hwnd,
                     STEPS,
@@ -491,12 +578,15 @@ impl Editor {
                     hwnd,
                     EVENT,
                     R::new(390, 526, 130, 200),
-                    &["按键按下", "按键释放", "等待"].map(String::from),
+                    &self
+                        .event_options()
+                        .iter()
+                        .map(|(_, label)| (*label).to_string())
+                        .collect::<Vec<_>>(),
                 );
                 self.set_select(EVENT, 0);
-                let names = self.keys.iter().map(|(_, s)| s.clone()).collect::<Vec<_>>();
-                self.combo(hwnd, EVENT_KEY, R::new(532, 526, 176, 300), &names);
-                self.set_select(EVENT_KEY, 0);
+                self.combo(hwnd, EVENT_KEY, R::new(532, 526, 176, 300), &[]);
+                self.event_targets();
                 self.add(
                     hwnd,
                     DELAY,
@@ -507,7 +597,7 @@ impl Editor {
                 );
                 SendMessageW(self.child(DELAY), EM_SETLIMITTEXT, 5, 0);
                 self.button(hwnd, ADD, "添加步骤", R::new(840, 526, 148, 36));
-                self.button(hwnd, APPLY, "写入单次宏", R::new(838, 592, 150, 38));
+                self.button(hwnd, APPLY, "写入板载宏", R::new(838, 592, 150, 38));
                 self.sync_macro();
                 self.availability();
             }
@@ -554,14 +644,18 @@ impl Editor {
                     && editable
                     && self.binding().is_some_and(|b| b.layer == 0);
                 for id in [
-                    NAME, STEPS, EVENT, EVENT_KEY, DELAY, ADD, DELETE, UP, DOWN, APPLY,
+                    NAME, MODE, STEPS, EVENT, EVENT_KEY, DELAY, ADD, DELETE, UP, DOWN, APPLY,
                 ] {
                     self.enable(id, supported);
                 }
                 if supported {
-                    let delay = self.select(EVENT) == 2;
-                    self.enable(EVENT_KEY, !delay);
-                    self.enable(DELAY, delay);
+                    let event = self.selected_event();
+                    self.enable(
+                        EVENT_KEY,
+                        matches!(event, Some(EventInput::Key(_) | EventInput::Mouse(_))),
+                    );
+                    self.enable(DELAY, matches!(event, Some(EventInput::Delay)));
+                    self.enable(MODE, self.macro_modes().len() > 1);
                     let max = self.state.as_ref().unwrap().macro_max_events;
                     self.enable(ADD, self.events.len() < max);
                     let selected = self.select(STEPS);
@@ -669,7 +763,7 @@ impl Editor {
                 control,
                 MacroDefinition {
                     name: self.macro_name.clone(),
-                    mode: MacroMode::Once,
+                    mode: self.macro_mode,
                     events: self.events.clone(),
                 },
             );
@@ -688,13 +782,26 @@ impl Editor {
             });
             if let Some(definition) = definition {
                 self.macro_name = definition.name;
+                self.macro_mode = definition.mode;
                 self.events = definition.events;
             } else {
                 self.macro_name = "我的宏".into();
+                self.macro_mode = self
+                    .macro_modes()
+                    .first()
+                    .copied()
+                    .unwrap_or(MacroMode::Once);
                 self.events.clear();
             }
         }
         self.set_text(NAME, &self.macro_name);
+        self.set_select(
+            MODE,
+            self.macro_modes()
+                .iter()
+                .position(|mode| *mode == self.macro_mode)
+                .unwrap_or(usize::MAX),
+        );
         self.sync_steps(None);
     }
     unsafe fn sync_steps(&self, selected: Option<usize>) {
@@ -707,7 +814,12 @@ impl Editor {
                     self.key_name(*usage)
                 ),
                 MacroEvent::Delay(ms) => format!("等待 {ms} 毫秒"),
-                _ => "未识别步骤（不可写入）".into(),
+                MacroEvent::Mouse { button, pressed } => format!(
+                    "{}  {}",
+                    if *pressed { "按下" } else { "释放" },
+                    mouse_name(*button)
+                ),
+                MacroEvent::Wheel(delta) => format!("滚轮 {delta:+}"),
             };
             SendMessageW(
                 self.child(STEPS),
@@ -777,6 +889,11 @@ impl Editor {
         };
         match rx.try_recv() {
             Ok(Ok(state)) => {
+                if self.saving && self.page == 1 {
+                    if let Some(control) = self.macro_control.take() {
+                        self.macro_drafts.remove(&control);
+                    }
+                }
                 let notice = state.notice.clone();
                 self.state = Some(state);
                 self.status = if self.saving {
@@ -857,23 +974,24 @@ impl Editor {
         }
         let control = binding.control;
         self.macro_name = self.text(NAME);
-        if self.macro_name.trim().is_empty() {
-            self.status(
-                hwnd,
-                "请为宏填写名称。A5 名称最多 20 个 UTF-8 字节（约 6 个汉字）。",
-                true,
-            );
+        let definition = MacroDefinition {
+            name: self.macro_name.clone(),
+            mode: self.macro_mode,
+            events: self.events.clone(),
+        };
+        if let Some(error) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.macro_limit_error(&definition))
+        {
+            self.status(hwnd, error, true);
             return;
         }
         self.begin(
             hwnd,
             Some(ControlAction::Macro {
                 control,
-                definition: MacroDefinition {
-                    name: self.macro_name.clone(),
-                    mode: MacroMode::Once,
-                    events: self.events.clone(),
-                },
+                definition,
             }),
         );
     }
@@ -887,18 +1005,25 @@ impl Editor {
                 if !state.macro_supported || self.events.len() >= state.macro_max_events {
                     return;
                 }
-                let event = match self.select(EVENT) {
-                    0 | 1 => {
+                let event = match self.selected_event() {
+                    Some(EventInput::Key(pressed)) => {
                         let Some((usage, _)) = self.keys.get(self.select(EVENT_KEY)) else {
                             self.status(hwnd, "请选择步骤的键盘按键。", true);
                             return;
                         };
                         MacroEvent::Key {
                             usage: *usage,
-                            pressed: self.select(EVENT) == 0,
+                            pressed,
                         }
                     }
-                    2 => {
+                    Some(EventInput::Mouse(pressed)) if self.select(EVENT_KEY) < 5 => {
+                        MacroEvent::Mouse {
+                            button: self.select(EVENT_KEY) as u8 + 1,
+                            pressed,
+                        }
+                    }
+                    Some(EventInput::Wheel(delta)) => MacroEvent::Wheel(delta),
+                    Some(EventInput::Delay) => {
                         let Ok(ms) = self.text(DELAY).parse::<u16>() else {
                             self.status(hwnd, "等待时间请输入 1–65535 毫秒。", true);
                             return;
@@ -1016,7 +1141,15 @@ impl Editor {
                 self.targets();
                 RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
             }
-            EVENT if event == CBN_SELCHANGE => self.availability(),
+            EVENT if event == CBN_SELCHANGE => {
+                self.event_targets();
+                self.availability()
+            }
+            MODE if event == CBN_SELCHANGE => {
+                if let Some(mode) = self.macro_modes().get(self.select(MODE)).copied() {
+                    self.macro_mode = mode;
+                }
+            }
             STEPS if event == LBN_SELCHANGE => self.availability(),
             APPLY => match self.page {
                 0 => self.save_binding(hwnd),
@@ -1129,19 +1262,12 @@ impl Editor {
                     self.wrapped(&c,if self.editable(){"选择操作后点击应用。组合键在所选按键上叠加 Ctrl、Shift、Alt、Win；设备不支持的动作会给出原因。"}else{"此键当前只读。主点击、Fn、未知功能或已有宏会按设备规则保留，避免覆盖无法完整恢复的配置。"},390,450,592,4,DIM);
                 }
                 1 => {
-                    c.text(
-                        "创建单次宏",
-                        R::new(390, 158, 598, 30),
-                        20,
-                        600,
-                        TEXT,
-                        DT_LEFT,
-                    );
+                    c.text("板载宏", R::new(390, 158, 598, 30), 20, 600, TEXT, DT_LEFT);
                     c.text("宏名称", R::new(390, 184, 292, 20), 13, 400, MUTED, DT_LEFT);
                     c.text(
-                        "播放方式：单次",
-                        R::new(718, 210, 270, 25),
-                        14,
+                        "播放方式",
+                        R::new(710, 184, 278, 20),
+                        13,
                         400,
                         MUTED,
                         DT_LEFT,
@@ -1423,6 +1549,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         keys: key_names(),
         events: Vec::new(),
         macro_name: "我的宏".into(),
+        macro_mode: MacroMode::Once,
         macro_control: None,
         macro_drafts: BTreeMap::new(),
         rgb: [255, 56, 89],

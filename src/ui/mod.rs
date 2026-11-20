@@ -21,6 +21,7 @@ use windows_sys::Win32::{
 
 pub(crate) mod fx;
 mod pages;
+mod pointer_editor;
 mod tray;
 pub(crate) mod widgets;
 
@@ -90,6 +91,7 @@ enum Command {
     System(usize),
     Refresh,
     ReadPointer,
+    PointerEditor,
     Close,
     Minimize,
     Quit,
@@ -852,6 +854,9 @@ impl App {
                         );
                     }
                     let mut tabs = Vec::new();
+                    if pointer_editor::available(spec) {
+                        tabs.push(("指针与性能", Command::PointerEditor));
+                    }
                     if spec.has_g2_audio() {
                         for (i, label) in crate::audio_fx::PAGES.iter().enumerate() {
                             tabs.push((*label, Command::AudioPage(i as u8)));
@@ -1412,6 +1417,22 @@ impl App {
             Command::Evidence => {
                 self.show_evidence = !self.show_evidence;
                 self.layout(hwnd);
+            }
+            Command::PointerEditor => {
+                if let Page::Device(model) = self.page {
+                    if self.pending.is_none()
+                        && self.queued.is_empty()
+                        && !self.modal_open
+                        && !self.hub_controls(model)
+                        && pointer_editor::available(&REGISTRY[model])
+                    {
+                        self.modal_open = true;
+                        self.pointer_sample = pointer_editor::open(hwnd, &REGISTRY[model])
+                            .map(|sample| (model, sample));
+                        self.modal_open = false;
+                        self.render(hwnd);
+                    }
+                }
             }
             Command::ControlsEditor
             | Command::ResidentMacros
@@ -2072,7 +2093,7 @@ impl App {
                         (self.home_page + 1) * page_size < total
                     }
                 }
-                Command::ReadPointer => {
+                Command::ReadPointer | Command::PointerEditor => {
                     matches!(self.page, Page::Device(m) if self.snapshot.devices[m].present && !self.hub_controls(m))
                         && self.pending.is_none()
                         && self.queued.is_empty()

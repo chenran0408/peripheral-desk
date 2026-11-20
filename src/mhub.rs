@@ -1,4 +1,8 @@
 //! Official online M HUB in a dedicated WebView2 window and COM apartment.
+mod bootstrap;
+mod menu;
+mod resources;
+mod workspace;
 use crate::hid::wide;
 use std::{
     cell::RefCell,
@@ -154,6 +158,7 @@ fn run_window(owner: HWND) -> Result<(), String> {
         if hwnd.is_null() {
             return Err(std::io::Error::last_os_error().to_string());
         }
+        menu::create(hwnd);
         WINDOW.store(hwnd as usize, Ordering::Release);
         if let Err(error) = attach(hwnd, &profile) {
             // Closing the window during startup cancels the pending WebView2 callback.
@@ -207,6 +212,7 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
     env.CreateCoreWebView2Controller(ComWindow(hwnd), &completion)?;
     let controller = wait_with_pump(rx)??;
     let web = controller.CoreWebView2()?;
+    resources::attach(hwnd, &web, &env)?;
     let settings = web.Settings()?;
     settings.SetAreHostObjectsAllowed(false)?;
     settings.SetIsWebMessageEnabled(false)?;
@@ -217,7 +223,7 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
-                if !uri.starts_with(SITE) {
+                if !uri.starts_with(SITE) && !uri.starts_with(workspace::LOCAL_SITE) {
                     args.SetCancel(true)?;
                     let mut clicked = windows::core::BOOL::default();
                     args.IsUserInitiated(&mut clicked)?;
@@ -235,7 +241,7 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
-                if uri.starts_with(SITE) {
+                if uri.starts_with(SITE) || uri.starts_with(workspace::LOCAL_SITE) {
                     browser.Navigate(PCWSTR(wide(&uri).as_ptr()))?;
                 } else {
                     let mut clicked = windows::core::BOOL::default();
@@ -248,7 +254,7 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
         &mut token,
     )?;
     web.add_NavigationCompleted(
-        &NavigationCompletedEventHandler::create(Box::new(move |_, args| {
+        &NavigationCompletedEventHandler::create(Box::new(move |sender, args| {
             if let Some(args) = args {
                 let mut success = windows::core::BOOL::default();
                 args.IsSuccess(&mut success)?;
@@ -260,7 +266,18 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                     }
                 }
                 let title = if success.as_bool() {
-                    TITLE
+                    let mut local = false;
+                    if let Some(web) = sender {
+                        let mut uri = PWSTR::null();
+                        web.Source(&mut uri)?;
+                        local = take_pwstr(uri).starts_with(workspace::LOCAL_SITE);
+                        let _ = menu::apply_style(&web);
+                    }
+                    if local {
+                        "迈从 M HUB · 本地可编辑工作区"
+                    } else {
+                        TITLE
+                    }
                 } else {
                     "M HUB 页面未载入 · 请检查网络后刷新"
                 };
@@ -271,8 +288,9 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
         &mut token,
     )?;
     resize(hwnd, &controller)?;
+    controller.SetZoomFactor(menu::saved_zoom())?;
     controller.SetIsVisible(true)?;
-    web.Navigate(PCWSTR(wide(SITE).as_ptr()))?;
+    menu::open_initial(&web)?;
     let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     CONTROLLER.set(Some(controller));
     Ok(())
@@ -304,6 +322,28 @@ unsafe fn resize(hwnd: HWND, controller: &ICoreWebView2Controller) -> windows::c
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
+        WM_COMMAND if l == 0 => {
+            menu::report(hwnd, menu::command(hwnd, w & 0xffff));
+            0
+        }
+        resources::READY => {
+            resources::ready(w);
+            0
+        }
+        menu::PROGRESS => {
+            if menu::has_download() {
+                SetWindowTextW(
+                    hwnd,
+                    wide(&format!("下载 M HUB 工作区 · 已保存 {w} / {l} 项")).as_ptr(),
+                );
+            }
+            0
+        }
+        menu::INSTALLED => {
+            SetWindowTextW(hwnd, wide(TITLE).as_ptr());
+            menu::report(hwnd, menu::installed(hwnd));
+            0
+        }
         WM_SIZE | WM_SETFOCUS | WM_MOVE => {
             if let Some(controller) = CONTROLLER.with_borrow(Clone::clone) {
                 let _ = match msg {
@@ -317,6 +357,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_DESTROY => {
+            resources::close();
             if let Some(controller) = CONTROLLER.take() {
                 let _ = controller.Close();
             }

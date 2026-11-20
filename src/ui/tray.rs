@@ -25,6 +25,41 @@ pub(crate) struct TrayFx {
     rings_started: usize,
     scroll_offset: i32,
     scroll_drag: Option<(i32, i32)>,
+    hovered: Option<HoverTarget>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HoverTarget {
+    Row(usize),
+    Footer(usize),
+}
+
+fn hover_target(
+    x: i32,
+    y: i32,
+    footer: i32,
+    scroll: i32,
+    installed: usize,
+    system: usize,
+) -> Option<HoverTarget> {
+    if (footer + 8..footer + 40).contains(&y) && (12..356).contains(&x) {
+        let offset = x - 12;
+        return (offset % 116 < 112).then_some(HoverTarget::Footer((offset / 116) as usize));
+    }
+    if !(9..335).contains(&x) || !(58..footer).contains(&y) {
+        return None;
+    }
+    let mut row_y = y + scroll - 80;
+    for (offset, count) in [(0, installed), (installed, system)] {
+        if count == 0 {
+            continue;
+        }
+        if (0..64 * count as i32).contains(&row_y) {
+            return (row_y % 64 < 60).then_some(HoverTarget::Row(offset + (row_y / 64) as usize));
+        }
+        row_y -= 64 * count as i32 + 22;
+    }
+    None
 }
 
 fn scroll_metrics(app: &App, height: i32) -> (i32, i32, i32, i32, i32) {
@@ -124,8 +159,8 @@ impl TrayFx {
             }
             self.opening.is_some()
                 || self.closing.is_some()
-                || self.rings_started < REGISTRY.len() + app.snapshot.system_devices.len()
-                || app.fx.widget.is_active()
+                || (self.rows_started.is_some()
+                    && self.rings_started < REGISTRY.len() + app.snapshot.system_devices.len())
         }
     }
 }
@@ -178,11 +213,14 @@ pub(super) unsafe extern "system" fn flyout_proc(
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             let mut ps = zeroed();
-            let dc = BeginPaint(hwnd, &mut ps);
+            let dest = BeginPaint(hwnd, &mut ps);
+            let mut bounds: RECT = zeroed();
+            GetClientRect(hwnd, &mut bounds);
+            let dc = CreateCompatibleDC(dest);
+            let bitmap = CreateCompatibleBitmap(dest, bounds.right, bounds.bottom);
+            let previous = SelectObject(dc, bitmap);
             {
                 let c = Canvas::new(dc, a.dpi);
-                let mut bounds: RECT = zeroed();
-                GetClientRect(hwnd, &mut bounds);
                 let height = a.logical(bounds.bottom);
                 let count = REGISTRY.len() + a.snapshot.system_devices.len();
                 let hids = REGISTRY.len();
@@ -190,7 +228,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     scroll_metrics(a, height);
                 let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
                 let mut y = list_top - scroll;
-                c.rect(R::new(0, 0, 360, height), PANEL);
+                windows_sys::Win32::Graphics::GdiPlus::GdipGraphicsClear(c.graphics, PANEL);
                 c.text("外设盒", R::new(20, 13, 205, 25), 17, 600, TEXT, DT_LEFT);
                 c.text(
                     &format!("{count} 台设备"),
@@ -227,8 +265,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 }
                 for (i, spec) in REGISTRY.iter().enumerate() {
                     let s = &a.snapshot.devices[i];
-                    let key = 0x2000 + i as u64;
-                    if a.fx.widget.hover(key) {
+                    if a.fx.flyout.hovered == Some(HoverTarget::Row(i)) {
                         c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.image(a.images.images[i], R::new(19, y + 7, 40, 44), s.fresh);
@@ -282,7 +319,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 for (i, device) in a.snapshot.system_devices.iter().enumerate() {
                     let index = REGISTRY.len() + i;
                     let key = 0x2000 + index as u64;
-                    if a.fx.widget.hover(key) {
+                    if a.fx.flyout.hovered == Some(HoverTarget::Row(index)) {
                         c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.text(
@@ -368,7 +405,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     let key = 0x2100 + i as u64;
                     let color = if a.fx.widget.pressed(key) {
                         PRESSED
-                    } else if a.fx.widget.hover(key) {
+                    } else if a.fx.flyout.hovered == Some(HoverTarget::Footer(i)) {
                         HOVER
                     } else {
                         PANEL
@@ -385,6 +422,10 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     x += widths[i] + 4;
                 }
             }
+            BitBlt(dest, 0, 0, bounds.right, bounds.bottom, dc, 0, 0, SRCCOPY);
+            SelectObject(dc, previous);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
             EndPaint(hwnd, &ps);
             0
         }
@@ -508,59 +549,63 @@ pub(super) unsafe extern "system" fn flyout_proc(
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
             let height = a.logical(rc.bottom);
-            let (list_top, footer, max_offset, track_top, thumb_height) = scroll_metrics(a, height);
+            let (_, footer, max_offset, track_top, thumb_height) = scroll_metrics(a, height);
             if let Some((start_y, start_offset)) = a.fx.flyout.scroll_drag {
                 let track_height = footer - 18 - track_top;
                 let travel = track_height - thumb_height;
                 let delta = (y - start_y) * max_offset / travel;
-                a.fx.flyout.scroll_offset = (start_offset + delta).clamp(0, max_offset);
-                InvalidateRect(hwnd, null(), 0);
+                let offset = (start_offset + delta).clamp(0, max_offset);
+                if a.fx.flyout.scroll_offset != offset {
+                    a.fx.flyout.scroll_offset = offset;
+                    InvalidateRect(hwnd, null(), 0);
+                }
                 return 0;
             }
             let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
-            let mut row_y = 80 - scroll;
-            for i in 0..REGISTRY.len() + a.snapshot.system_devices.len() {
-                let key = 0x2000 + i as u64;
-                a.fx.widget.set_hover(
-                    key,
-                    (9..=335).contains(&x)
-                        && (list_top..footer).contains(&y)
-                        && y >= row_y
-                        && y < row_y + 60,
-                );
-                row_y += 64;
-                if i + 1 == REGISTRY.len() && !a.snapshot.system_devices.is_empty() {
-                    row_y += 22;
-                }
+            let hovered = hover_target(
+                x,
+                y,
+                footer,
+                scroll,
+                REGISTRY.len(),
+                a.snapshot.system_devices.len(),
+            );
+            if a.fx.flyout.hovered != hovered {
+                a.fx.flyout.hovered = hovered;
+                InvalidateRect(hwnd, null(), 0);
             }
-            for i in 0..3 {
-                let left = 12 + i * 116;
-                a.fx.widget.set_hover(
-                    0x2100 + i as u64,
-                    x >= left && x < left + 112 && y >= footer + 8 && y < footer + 40,
-                );
-            }
-            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_MOUSEWHEEL => {
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
             let height = a.logical(rc.bottom);
-            let (_, _, max_offset, _, _) = scroll_metrics(a, height);
+            let (_, footer, max_offset, _, _) = scroll_metrics(a, height);
             let delta = ((w >> 16) as i16 as i32) * 64 / WHEEL_DELTA as i32;
-            a.fx.flyout.scroll_offset = (a.fx.flyout.scroll_offset - delta).clamp(0, max_offset);
-            InvalidateRect(hwnd, null(), 0);
+            let offset = (a.fx.flyout.scroll_offset - delta).clamp(0, max_offset);
+            if offset != a.fx.flyout.scroll_offset {
+                a.fx.flyout.scroll_offset = offset;
+                let mut cursor = POINT {
+                    x: l as i16 as i32,
+                    y: (l >> 16) as i16 as i32,
+                };
+                ScreenToClient(hwnd, &mut cursor);
+                a.fx.flyout.hovered = hover_target(
+                    a.logical(cursor.x),
+                    a.logical(cursor.y),
+                    footer,
+                    offset,
+                    REGISTRY.len(),
+                    a.snapshot.system_devices.len(),
+                );
+                InvalidateRect(hwnd, null(), 0);
+            }
             0
         }
-        0x02a3 => {
-            for i in 0..REGISTRY.len() + a.snapshot.system_devices.len() {
-                a.fx.widget.set_hover(0x2000 + i as u64, false);
+        windows_sys::Win32::UI::Controls::WM_MOUSELEAVE => {
+            if a.fx.flyout.hovered.take().is_some() {
+                InvalidateRect(hwnd, null(), 0);
             }
-            for i in 0..3 {
-                a.fx.widget.set_hover(0x2100 + i as u64, false);
-            }
-            InvalidateRect(hwnd, null(), 0);
             0
         }
         WM_KEYDOWN if w == VK_ESCAPE as usize => {
@@ -786,6 +831,7 @@ impl App {
         self.fx.flyout.rings_started = 0;
         self.fx.flyout.scroll_offset = 0;
         self.fx.flyout.scroll_drag = None;
+        self.fx.flyout.hovered = None;
         for row in 0..count {
             self.fx.widget.ring_target(0x2000 + row as u64, Some(0));
         }

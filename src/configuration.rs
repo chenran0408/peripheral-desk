@@ -446,10 +446,10 @@ struct Plan {
     undo: Vec<Value>,
 }
 fn binding_request(control: u16, layer: u8, action: BindingAction) -> Value {
-    json!({"op":"controls-apply","action":ControlAction::Bind{control,layer,action}})
+    json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Bind{control,layer,action}})
 }
 fn macro_request(control: u16, definition: crate::controls::MacroDefinition) -> Value {
-    json!({"op":"controls-apply","action":ControlAction::Macro{control,definition}})
+    json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Macro{control,definition}})
 }
 fn control_state(value: Value) -> Result<ControlState> {
     let mut complete = serde_json::to_value(ControlState::default()).map_err(|e| e.to_string())?;
@@ -536,7 +536,10 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                 .skipped
                 .push("键位配置含有当前版本无法识别的内容，仅保存在本地。".into()),
             Ok(wanted) => {
-                let baseline = control_state(call(key, json!({"op":"controls-read"}))?)?;
+                let baseline = control_state(call(
+                    key,
+                    json!({"op":"controls-read","extended_modes":true}),
+                )?)?;
                 for binding in wanted.bindings {
                     let Some(original) = baseline
                         .bindings
@@ -592,6 +595,12 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                                 .push("宏只有槽位编号，没有本工具的完整事件，已跳过。".into());
                             continue;
                         };
+                        if let Some(reason) = baseline.macro_limit_error(definition) {
+                            report
+                                .skipped
+                                .push(format!("{} 的宏已跳过：{reason}", binding.label));
+                            continue;
+                        }
                         let identical = baseline.macros.get(&binding.control).is_some_and(|old| {
                             serde_json::to_value(old).ok() == serde_json::to_value(definition).ok()
                         });
@@ -640,12 +649,12 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                         })
                     {
                         let mut undo = vec![
-                            json!({"op":"controls-apply","action":ControlAction::Colors(old)}),
+                            json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Colors(old)}),
                         ];
                         if state.light != Some(19) {
                             undo.push(json!({"op":"apply-setting","action":Action::Light(state.light.unwrap())}));
                         }
-                        plans.push(Plan{request:json!({"op":"controls-apply","action":ControlAction::Colors(desired)}),undo});
+                        plans.push(Plan{request:json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Colors(desired)}),undo});
                     } else {
                         report
                             .skipped
@@ -834,6 +843,51 @@ pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationRep
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn board_macro_archive_preserves_extended_mode_and_device_capacity() {
+        use crate::controls::{ControlState, MacroDefinition, MacroEvent, MacroMode};
+        let mut hardware = ControlState {
+            macro_supported: true,
+            macro_max_events: 1008,
+            macro_modes: vec![MacroMode::Once, MacroMode::UntilOtherKey],
+            macro_name_max_bytes: Some(54),
+            macro_event_types: ["mouse", "wheel", "delay"].map(String::from).to_vec(),
+            ..ControlState::default()
+        };
+        let definition = MacroDefinition {
+            name: "滚轮循环".into(),
+            mode: MacroMode::UntilOtherKey,
+            events: vec![
+                MacroEvent::Mouse {
+                    button: 2,
+                    pressed: true,
+                },
+                MacroEvent::Delay(48),
+                MacroEvent::Mouse {
+                    button: 2,
+                    pressed: false,
+                },
+                MacroEvent::Wheel(-1),
+            ],
+        };
+        hardware.macros.insert(3, definition);
+        let decoded =
+            super::control_state(super::portable(serde_json::to_value(&hardware).unwrap()))
+                .unwrap();
+        let definition = &decoded.macros[&3];
+        assert_eq!(decoded.macro_limit_error(definition), None);
+        let request = super::macro_request(3, definition.clone());
+        assert_eq!(request["extended_modes"], true);
+        assert_eq!(
+            request["action"]["Macro"]["definition"]["mode"],
+            "UntilOtherKey"
+        );
+        hardware.macro_max_events = 3;
+        assert!(hardware.macro_limit_error(definition).is_some());
+        hardware.macro_modes.clear();
+        assert_eq!(hardware.modes(), &[MacroMode::Once]);
+        assert!(!super::valid_a5_macro(definition));
+    }
     use super::*;
     #[test]
     fn merge_preserves_future_fields_but_empty_arrays_replace_old_lists() {

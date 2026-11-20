@@ -1,0 +1,9 @@
+/* 外设盒 · M HUB 个人样式。修改并保存后，在窗口菜单选择「重新应用样式」。
+   这个文件独立于下载的网页版本。以下示例可以取消注释。 */
+/*
+:root {
+  --el-color-primary: #e95c63;
+  --el-border-radius-base: 8px;
+}
+:focus-visible { outline: 2px solid #fa805f; outline-offset: 2px; }
+*/
