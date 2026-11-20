@@ -5,7 +5,7 @@
 - 迈从 M HUB 直接显示在主窗口右侧。左侧可以随时返回电量页，右上角的「M HUB 菜单」保留缩放、外观和本地版本选择。
 - 更新对应的预览插件后，罗技 G304、G305、G502 LIGHTSPEED 和 G502 X PLUS 可切换板载模式、已有配置及 DPI 档位。三款炼狱蝰蛇 V3 系列插件支持分别调节每档横向、纵向 DPI。
 
-[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.17/PeripheralDesk-0.4.11-preview.17-windows-x64-setup.exe) · [查看设备插件](https://github.com/chenran0408/peripheral-desk-drivers/releases/tag/v0.4.13-preview.46)
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.17/PeripheralDesk-0.4.11-preview.17-windows-x64-setup.exe) · [查看设备插件](https://github.com/chenran0408/peripheral-desk-drivers/releases/tag/v0.4.13-preview.47)
 
 ## 0.4.11-preview.16
 
