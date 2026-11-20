@@ -16,7 +16,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
-      - run: cargo build --release --locked
+      - run: ./scripts/build-desktop.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: PeripheralDesk-core-windows-x64

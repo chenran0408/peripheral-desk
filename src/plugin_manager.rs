@@ -19,6 +19,13 @@ use windows_sys::Win32::{
 };
 pub const ABI_VERSION: u32 = 1;
 const REPOSITORY: &str = "https://github.com/chenran0408/peripheral-desk-drivers";
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CatalogBrowse {
+    pub vendor_aliases: Vec<String>,
+    pub family: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DriverPackage {
     pub id: String,
@@ -41,6 +48,8 @@ pub struct DriverPackage {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub changelog: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browse: Option<CatalogBrowse>,
     pub device: Value,
 }
 fn abi_one() -> u32 {
@@ -1075,7 +1084,22 @@ pub fn worker_main(key: &str) {
         let _ = std::io::stdout().write_all(&bytes);
     }
 }
+// Browser sessions own their HID interfaces until the user returns control.
+static WEB_DRIVER_DEVICES: std::sync::RwLock<Vec<&'static str>> =
+    std::sync::RwLock::new(Vec::new());
+pub fn set_web_driver_devices(keys: Vec<&'static str>) {
+    *WEB_DRIVER_DEVICES.write().expect("web driver device list") = keys;
+}
+pub fn web_driver_owns(key: &str) -> bool {
+    WEB_DRIVER_DEVICES
+        .read()
+        .expect("web driver device list")
+        .contains(&key)
+}
 pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
+    if web_driver_owns(key) {
+        return Err("正在使用 M HUB，请先恢复本地控制".into());
+    }
     safe_id(key)?;
     if !is_installed(key) {
         return Err("尚未安装此设备驱动，请打开驱动仓库下载".into());

@@ -94,3 +94,5 @@ Additional current lockfile entries:
 - simd-adler32-0.3.10: MIT
 - zip-2.6.1: MIT
 - zopfli-0.8.4: Apache-2.0
+
+M HUB uses WebView2 on Windows. The Rust bindings and callback macros use the MIT license from their upstream workspace. The pinned sources are listed in MANIFEST.json. The Microsoft loader included in the Windows executable is covered by the license and notices in `webview2-loader-1.0.3650.58`. [Microsoft WebView2 SDK 1.0.3650.58](https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3650.58)

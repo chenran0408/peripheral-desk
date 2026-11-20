@@ -24,7 +24,10 @@ pub struct DeviceSpec {
     pub brand: &'static str,
     pub kind: Kind,
     pub adapter: Adapter,
+    capabilities: Vec<String>,
+    pub plugin_version: String,
     pub validation: &'static str,
+    pub evidence: serde_json::Value,
     pub dpi_range: Option<(u16, u16)>,
     pub dpi_step: u16,
     pub rates: &'static [u16],
@@ -65,14 +68,23 @@ pub static REGISTRY: std::sync::LazyLock<Vec<DeviceSpec>> = std::sync::LazyLock:
     }
     #[cfg(all(not(feature = "driver-runtime"), not(test)))]
     {
-        host_registry_from_descriptors(
+        let mut capabilities = std::collections::HashMap::new();
+        let mut registry = host_registry_from_descriptors(
             crate::plugin_manager::installed_descriptors(),
             |key| {
-                crate::plugin_manager::installed(key)
-                    .map(|driver| driver.map(|driver| (driver.version, driver.manifest.device)))
+                crate::plugin_manager::installed(key).map(|driver| {
+                    driver.map(|driver| {
+                        capabilities.insert(driver.id, driver.manifest.capabilities);
+                        (driver.version, driver.manifest.device)
+                    })
+                })
             },
             crate::plugin_manager::is_claimed,
-        )
+        );
+        for spec in &mut registry {
+            spec.capabilities = capabilities.remove(spec.key).unwrap_or_default();
+        }
+        registry
     }
 });
 
@@ -83,7 +95,10 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             name: "炼狱蝰蛇 V3 专业版",
             brand: "RAZER",
             kind: Kind::Mouse,
+            capabilities: Vec::new(),
+            plugin_version: String::new(),
             adapter: Adapter::Razer,
+            evidence: serde_json::Value::Null,
             validation: "已实机验证 · 功能范围见兼容表",
             extra_matchers: &[],
             dpi_range: Some((100, 30000)),
@@ -107,7 +122,10 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             name: "迈从 A5 Ultra",
             brand: "MCHOSE",
             kind: Kind::Mouse,
+            capabilities: Vec::new(),
+            plugin_version: String::new(),
             adapter: Adapter::MchoseMouse,
+            evidence: serde_json::Value::Null,
             validation: "已实机验证 · 功能范围见兼容表",
             extra_matchers: &[],
             dpi_range: Some((50, 26000)),
@@ -132,7 +150,10 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             name: "迈从 G75 Pro",
             brand: "MCHOSE",
             kind: Kind::Keyboard,
+            capabilities: Vec::new(),
+            plugin_version: String::new(),
             adapter: Adapter::CompxKeyboard,
+            evidence: serde_json::Value::Null,
             validation: "已实机验证 · 功能范围见兼容表",
             extra_matchers: &[],
             dpi_range: None,
@@ -156,7 +177,10 @@ fn legacy_specs() -> Vec<DeviceSpec> {
             name: "漫步者 G2 Pro",
             brand: "HECATE",
             kind: Kind::Headset,
+            capabilities: Vec::new(),
+            plugin_version: String::new(),
             adapter: Adapter::HecateAudio,
+            evidence: serde_json::Value::Null,
             validation: "已实机验证 · 功能范围见兼容表",
             extra_matchers: &[],
             dpi_range: None,
@@ -249,6 +273,7 @@ pub(crate) fn host_registry_from_installed(
                 }
             }
         }
+        spec.plugin_version = version;
         devices.push(spec);
     }
     devices.sort_by_key(|spec| spec.key);
@@ -256,12 +281,23 @@ pub(crate) fn host_registry_from_installed(
 }
 
 impl DeviceSpec {
-    #[cfg(feature = "desktop")]
     pub fn supports(&self, capability: &str) -> bool {
-        crate::plugin_manager::installed(self.key)
-            .ok()
-            .flatten()
-            .is_some_and(|driver| driver.manifest.capabilities.iter().any(|c| c == capability))
+        self.capabilities.iter().any(|entry| entry == capability)
+    }
+    pub fn lighting_only(&self) -> bool {
+        self.supports("lighting-switch")
+            && !self.supports("battery")
+            && !self.supports("settings")
+            && self.key != "hecate-g2-pro"
+    }
+    pub fn switch_only(&self) -> bool {
+        self.lighting_only() && !self.supports("lighting-editor")
+    }
+    pub fn has_g2_audio(&self) -> bool {
+        self.key == "hecate-g2-pro"
+    }
+    pub fn mchose(&self) -> bool {
+        self.brand.eq_ignore_ascii_case("MCHOSE") || self.brand == "迈从"
     }
     pub fn read_only(&self) -> bool {
         self.adapter == Adapter::External
@@ -441,7 +477,11 @@ impl DeviceSpec {
             Action::Rate(v) => self.rates_for(state.wired).contains(&v),
             Action::Sleep(v) => self.sleeps.contains(&v),
             Action::Light(v) => {
-                self.kind == Kind::Keyboard && LIGHTS.iter().any(|(id, _)| *id == v)
+                if self.switch_only() {
+                    v <= 1 && state.light.is_some()
+                } else {
+                    self.key == "mchose-g75-pro" && LIGHTS.iter().any(|(id, _)| *id == v)
+                }
             }
             Action::Stage(v) => (v as usize) < state.dpi_stages.len(),
             Action::Tune(key, v) => {
@@ -854,6 +894,8 @@ impl DeviceManifest {
                 "accessory" => Kind::Accessory,
                 _ => Kind::Mouse,
             },
+            capabilities: Vec::new(),
+            plugin_version: String::new(),
             adapter: Adapter::External,
             validation: match self
                 .validation
@@ -861,12 +903,15 @@ impl DeviceManifest {
                 .and_then(serde_json::Value::as_str)
             {
                 Some("hardware-verified") => "已实机验证 · 功能范围见兼容表",
+                Some("upstream-verified") => "上游已验证 · 适用范围见验证记录",
                 Some("upstream-hardware-verified-project-untested") => {
                     "上游已实测 · 本项目尚未复测"
                 }
                 Some("public-implementation-untested") => "依据公开实现适配 · 尚未实机验证",
-                _ => "仅识别设备 · 尚未确认功能",
+                Some("code-adapter-only") => "已完成代码适配 · 尚未实机验证",
+                _ => "验证范围见插件说明",
             },
+            evidence: self.validation,
             dpi_range: self.dpi_range,
             dpi_step: self.dpi_step.unwrap_or(50),
             rates: Box::leak(self.rates.into_boxed_slice()),
@@ -998,6 +1043,28 @@ mod manifest_tests {
         assert!(serde_json::from_value::<DeviceManifest>(invalid)
             .unwrap()
             .validate()
+            .is_err());
+    }
+    #[test]
+    fn backlight_switch_does_not_inherit_g75_modes() {
+        let value = serde_json::json!({"key":"keyboard-test","name":"Keyboard","brand":"RAZER","kind":"keyboard","matches":[{"vid":1,"pid":2}]});
+        let mut spec = serde_json::from_value::<DeviceManifest>(value)
+            .unwrap()
+            .into_spec()
+            .unwrap();
+        let state = crate::model::State {
+            light: Some(0),
+            ..Default::default()
+        };
+        assert!(spec
+            .validate(crate::model::Action::Light(1), &state)
+            .is_err());
+        spec.capabilities.push("lighting-switch".into());
+        assert!(spec
+            .validate(crate::model::Action::Light(1), &state)
+            .is_ok());
+        assert!(spec
+            .validate(crate::model::Action::Light(2), &state)
             .is_err());
     }
     #[test]

@@ -51,8 +51,18 @@ fn widget_key(command: Command) -> u64 {
     }
 }
 type WorkResult = (Snapshot, Result<(), String>);
+#[derive(serde::Deserialize)]
+struct PointerSample {
+    #[serde(flatten)]
+    state: backend::State,
+    #[serde(default)]
+    dpi_stages_y: Option<Vec<u16>>,
+    #[serde(default)]
+    rate_indices: Option<[u8; 2]>,
+}
 enum WorkUpdate {
     Device(usize, backend::State),
+    Pointer(usize, Result<Box<PointerSample>, String>),
     Finished(WorkResult),
 }
 fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
@@ -79,6 +89,7 @@ enum Command {
     Device(usize),
     System(usize),
     Refresh,
+    ReadPointer,
     Close,
     Minimize,
     Quit,
@@ -95,6 +106,8 @@ enum Command {
     Configuration,
     CoreUpdate,
     PresetLibrary,
+    MHub,
+    Evidence,
     HeadsetLighting,
     GenericLighting,
     ExportAudio,
@@ -127,6 +140,10 @@ struct App {
     controls: Vec<Button>,
     pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
+    hub_open: bool,
+    show_evidence: bool,
+    pointer_sample: Option<(usize, Box<PointerSample>)>,
+    pointer_requested: bool,
     queued: std::collections::VecDeque<(usize, Action)>,
     inflight: Option<(usize, Action)>,
     profile_notice: Option<&'static str>,
@@ -210,6 +227,10 @@ pub fn run(hidden: bool, battery: bool) {
             controls: vec![],
             pending: None,
             modal_open: false,
+            hub_open: false,
+            show_evidence: false,
+            pointer_sample: None,
+            pointer_requested: false,
             queued: std::collections::VecDeque::new(),
             inflight: None,
             profile_notice: None,
@@ -398,6 +419,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         WM_TIMER if w == 3 => {
             if a.tick_fx(hwnd) {
                 InvalidateRect(hwnd, null(), 0);
+            }
+            0
+        }
+        crate::mhub::CLOSED_MESSAGE => {
+            if !crate::mhub::active() {
+                a.hub_open = false;
+                a.pointer_requested = matches!(a.page,Page::Device(m) if REGISTRY[m].supports("polling-rate-read") || REGISTRY[m].supports("dpi-stages-read"));
+                crate::plugin_manager::set_web_driver_devices(Vec::new());
+                a.layout(hwnd);
+                a.begin(hwnd, None);
             }
             0
         }
@@ -709,6 +740,15 @@ impl App {
                 Command::HomePage(1),
             );
         }
+        if self.hub_open && !matches!(self.page, Page::Device(m) if self.hub_controls(m)) {
+            self.add(
+                hwnd,
+                "返回 M HUB",
+                R::new(12, self.height - 114, SIDEBAR - 24, 36),
+                GHOST,
+                Command::MHub,
+            );
+        }
         match self.page {
             Page::Home => {
                 let total = REGISTRY.len() + self.snapshot.system_devices.len();
@@ -717,14 +757,14 @@ impl App {
                     self.add(
                         hwnd,
                         "＋  添加设备驱动",
-                        R::new(w / 2 - 132, center_y + 8, 264, 48),
+                        R::new((w + SIDEBAR) / 2 - 132, center_y + 8, 264, 48),
                         CHIP,
                         Command::AddDevice,
                     );
                 }
-                let cols = if w - SIDEBAR > 1040 { 3 } else { 2 };
+                let cols = 2;
                 let cw = ((w - SIDEBAR - 52 - 18 * (cols - 1)) / cols).max(250);
-                let card_h = ((h - HOME_CONTENT_Y - 110) / 2).clamp(250, 360);
+                let card_h = ((h - HOME_CONTENT_Y - 100) / 2).min(360);
                 for (slot, index) in (self.home_page * 4..total).take(4).enumerate() {
                     let x = SIDEBAR + 24 + (slot as i32 % cols) * (cw + 18);
                     let y = HOME_CONTENT_Y + slot as i32 / cols * (card_h + 16);
@@ -776,264 +816,291 @@ impl App {
                 let rx = 394;
                 let rw = w - rx - 28;
                 let cx = rx + 30;
-                if REGISTRY[m].kind == Kind::Headset {
-                    for (i, label) in crate::audio_fx::PAGES.iter().enumerate() {
+                let spec = &REGISTRY[m];
+                self.add(
+                    hwnd,
+                    if self.show_evidence {
+                        "返回设备概览"
+                    } else {
+                        "适配信息"
+                    },
+                    R::new(SIDEBAR + 23, h - 196, 144, 36),
+                    GHOST,
+                    Command::Evidence,
+                );
+                if spec.mchose() || self.hub_controls(m) {
+                    self.add(
+                        hwnd,
+                        if self.hub_controls(m) {
+                            "返回 M HUB"
+                        } else {
+                            "打开官方 M HUB"
+                        },
+                        R::new(SIDEBAR + 23, h - 148, 144, 38),
+                        CHIP,
+                        Command::MHub,
+                    );
+                }
+                if !self.hub_controls(m) && !self.show_evidence {
+                    if spec.supports("polling-rate-read") || spec.supports("dpi-stages-read") {
+                        self.add(
+                            hwnd,
+                            "读取指针参数",
+                            R::new(rx + rw - 170, 173, 140, 38),
+                            GHOST,
+                            Command::ReadPointer,
+                        );
+                    }
+                    let mut tabs = Vec::new();
+                    if spec.has_g2_audio() {
+                        for (i, label) in crate::audio_fx::PAGES.iter().enumerate() {
+                            tabs.push((*label, Command::AudioPage(i as u8)));
+                        }
+                        tabs.extend([
+                            ("EQ 预设", Command::PresetLibrary),
+                            ("灯光", Command::HeadsetLighting),
+                        ]);
+                        self.add(
+                            hwnd,
+                            "导入音效组件",
+                            R::new(SIDEBAR + 16, h - 62, 148, 38),
+                            GHOST,
+                            Command::ConnectAudio,
+                        );
+                        self.add(
+                            hwnd,
+                            "导出音效",
+                            R::new(SIDEBAR + 176, h - 62, 96, 38),
+                            GHOST,
+                            Command::ExportAudio,
+                        );
+                        self.add(
+                            hwnd,
+                            "导入音效",
+                            R::new(SIDEBAR + 284, h - 62, 96, 38),
+                            GHOST,
+                            Command::ImportAudio,
+                        );
+                    }
+                    if !spec.has_g2_audio() && !spec.advanced.is_empty() {
+                        tabs.extend([
+                            ("基础设置", Command::Advanced(false)),
+                            ("高级设置", Command::Advanced(true)),
+                        ]);
+                    }
+                    if spec.supports("lighting-editor") {
+                        tabs.push(("灯效设置", Command::GenericLighting));
+                    }
+                    if spec.supports("bindings") || spec.supports("key-colors") {
+                        tabs.push(("按键与板载设置", Command::ControlsEditor));
+                    }
+                    if spec.supports("software-macro-trigger")
+                        || matches!(
+                            spec.key,
+                            "razer-deathadder-v3-pro" | "mchose-a5-ultra" | "mchose-g75-pro"
+                        )
+                    {
+                        tabs.push(("软件宏", Command::ResidentMacros));
+                    }
+                    let tab_w = ((w - SIDEBAR - 132) / tabs.len().max(1) as i32).min(126);
+                    for (i, (label, command)) in tabs.into_iter().enumerate() {
                         self.add(
                             hwnd,
                             label,
-                            R::new(rx + i as i32 * 86, 17, 80, 34),
+                            R::new(SIDEBAR + 18 + i as i32 * tab_w, 16, tab_w - 6, 34),
                             GHOST,
-                            Command::AudioPage(i as u8),
+                            command,
                         );
                     }
-                    self.add(
-                        hwnd,
-                        "EQ 预设",
-                        R::new(rx + 444, 17, 96, 34),
-                        GHOST,
-                        Command::PresetLibrary,
-                    );
-                    self.add(
-                        hwnd,
-                        "灯光",
-                        R::new(294, 17, 76, 34),
-                        GHOST,
-                        Command::HeadsetLighting,
-                    );
-                    self.add(
-                        hwnd,
-                        "导入音效组件",
-                        R::new(SIDEBAR + 16, h - 62, 148, 38),
-                        GHOST,
-                        Command::ConnectAudio,
-                    );
-                    self.add(
-                        hwnd,
-                        "导出音效",
-                        R::new(SIDEBAR + 176, h - 62, 96, 38),
-                        GHOST,
-                        Command::ExportAudio,
-                    );
-                    self.add(
-                        hwnd,
-                        "导入音效",
-                        R::new(SIDEBAR + 284, h - 62, 96, 38),
-                        GHOST,
-                        Command::ImportAudio,
-                    );
-                }
-                if REGISTRY[m].kind != Kind::Headset && !REGISTRY[m].advanced.is_empty() {
-                    self.add(
-                        hwnd,
-                        "基础设置",
-                        R::new(rx + 10, 17, 112, 34),
-                        GHOST,
-                        Command::Advanced(false),
-                    );
-                    self.add(
-                        hwnd,
-                        "高级设置",
-                        R::new(rx + 132, 17, 112, 34),
-                        GHOST,
-                        Command::Advanced(true),
-                    );
-                }
-                if REGISTRY[m].supports("lighting-editor") {
-                    self.add(
-                        hwnd,
-                        "灯效设置",
-                        R::new(294, 17, 96, 34),
-                        GHOST,
-                        Command::GenericLighting,
-                    );
-                }
-                if REGISTRY[m].supports("software-macro-trigger")
-                    || matches!(
-                        REGISTRY[m].key,
-                        "razer-deathadder-v3-pro" | "mchose-a5-ultra" | "mchose-g75-pro"
-                    )
-                {
-                    self.add(
-                        hwnd,
-                        "软件宏",
-                        R::new(rx + 442, 17, 112, 34),
-                        GHOST,
-                        Command::ResidentMacros,
-                    );
-                }
-                if REGISTRY[m].supports("bindings") || REGISTRY[m].supports("key-colors") {
-                    self.add(
-                        hwnd,
-                        "按键与板载设置",
-                        R::new(rx + 254, 17, 178, 34),
-                        GHOST,
-                        Command::ControlsEditor,
-                    );
-                }
-                if (self.advanced || REGISTRY[m].kind == Kind::Headset)
-                    && !REGISTRY[m].advanced.is_empty()
-                {
-                    if REGISTRY[m].kind != Kind::Headset && self.settings_pages(m) > 1 {
+                    if spec.switch_only() {
                         self.add(
                             hwnd,
-                            "上一页",
-                            R::new(rx + rw - 240, detail_y(101), 64, 34),
-                            GHOST,
-                            Command::SettingsPage(-1),
+                            "关闭背光",
+                            R::new(cx, 432, 124, 38),
+                            CHIP,
+                            Command::Setting(Action::Light(0)),
                         );
                         self.add(
                             hwnd,
-                            "下一页",
-                            R::new(rx + rw - 94, detail_y(101), 64, 34),
-                            GHOST,
-                            Command::SettingsPage(1),
+                            "开启背光",
+                            R::new(cx + 136, 432, 124, 38),
+                            CHIP,
+                            Command::Setting(Action::Light(1)),
                         );
                     }
-                    for (row, setting) in self.visible_settings(m).iter().enumerate() {
-                        let y = detail_y(172 + row as i32 * 78);
-                        let volume = is_volume(setting.key);
-                        let slots = setting.choices.len() as i32 + if volume { 2 } else { 0 };
-                        let bw = ((rw - 280 - 6 * (slots - 1)) / slots).clamp(28, 88);
-                        let x = rx + rw - 30 - (bw + 6) * slots + 6;
-                        if volume {
+                    if (self.advanced || REGISTRY[m].has_g2_audio())
+                        && !REGISTRY[m].advanced.is_empty()
+                    {
+                        if !REGISTRY[m].has_g2_audio() && self.settings_pages(m) > 1 {
                             self.add(
                                 hwnd,
-                                "−",
-                                R::new(x, y, bw, 35),
-                                CHIP,
-                                Command::AudioStep(setting.key, -1),
+                                "上一页",
+                                R::new(rx + rw - 240, detail_y(101), 64, 34),
+                                GHOST,
+                                Command::SettingsPage(-1),
                             );
                             self.add(
                                 hwnd,
-                                "+",
-                                R::new(x + (slots - 1) * (bw + 6), y, bw, 35),
-                                CHIP,
-                                Command::AudioStep(setting.key, 1),
+                                "下一页",
+                                R::new(rx + rw - 94, detail_y(101), 64, 34),
+                                GHOST,
+                                Command::SettingsPage(1),
                             );
                         }
-                        for (i, (value, label)) in setting.choices.iter().enumerate() {
+                        for (row, setting) in self.visible_settings(m).iter().enumerate() {
+                            let y = detail_y(172 + row as i32 * 78);
+                            let volume = is_volume(setting.key);
+                            let slots = setting.choices.len() as i32 + if volume { 2 } else { 0 };
+                            let bw = ((rw - 280 - 6 * (slots - 1)) / slots).clamp(28, 88);
+                            let x = rx + rw - 30 - (bw + 6) * slots + 6;
+                            if volume {
+                                self.add(
+                                    hwnd,
+                                    "−",
+                                    R::new(x, y, bw, 35),
+                                    CHIP,
+                                    Command::AudioStep(setting.key, -1),
+                                );
+                                self.add(
+                                    hwnd,
+                                    "+",
+                                    R::new(x + (slots - 1) * (bw + 6), y, bw, 35),
+                                    CHIP,
+                                    Command::AudioStep(setting.key, 1),
+                                );
+                            }
+                            for (i, (value, label)) in setting.choices.iter().enumerate() {
+                                self.add(
+                                    hwnd,
+                                    label,
+                                    R::new(
+                                        x + (i as i32 + i32::from(volume)) * (bw + 6),
+                                        y,
+                                        bw,
+                                        35,
+                                    ),
+                                    CHIP,
+                                    Command::Setting(Action::Tune(setting.key, *value)),
+                                );
+                            }
+                        }
+                        if REGISTRY[m].has_g2_audio() && self.audio_page == 1 {
+                            let bw = (rw - 72) / 10;
+                            for (i, (key, _)) in crate::audio_fx::EQ_BANDS.iter().enumerate() {
+                                let x = cx + 6 + i as i32 * bw;
+                                self.add(
+                                    hwnd,
+                                    "+",
+                                    R::new(x, detail_y(272), bw - 10, 30),
+                                    CHIP,
+                                    Command::AudioStep(*key, 1),
+                                );
+                                self.add(
+                                    hwnd,
+                                    "−",
+                                    R::new(x, detail_y(522), bw - 10, 30),
+                                    CHIP,
+                                    Command::AudioStep(*key, -1),
+                                );
+                            }
+                            self.add(
+                                hwnd,
+                                "所有频段归零",
+                                R::new(cx, detail_y(586), 156, 36),
+                                GHOST,
+                                Command::FlatEq,
+                            );
+                        }
+                    } else if let Some((min, max)) = REGISTRY[m].dpi_range {
+                        let stages = self.snapshot.devices[m].dpi_stages.clone();
+                        let count = if stages.is_empty() { 5 } else { stages.len() };
+                        let bw = (rw - 60 - 10 * (count as i32 - 1)) / count as i32;
+                        for i in 0..count {
+                            let (label, action) = if stages.is_empty() {
+                                let v = [400, 800, 1200, 1600, 3200][i];
+                                (format!("{v}"), Action::Dpi(v))
+                            } else {
+                                (format!("{} · {}", i + 1, stages[i]), Action::Stage(i as u8))
+                            };
+                            self.add(
+                                hwnd,
+                                &label,
+                                R::new(cx + i as i32 * (bw + 10), detail_y(178), bw, 38),
+                                CHIP,
+                                Command::Setting(action),
+                            );
+                        }
+                        self.slider = R::new(cx, detail_y(239), rw - 158, 24);
+                        self.add(
+                            hwnd,
+                            "−",
+                            R::new(rx + rw - 112, detail_y(232), 34, 34),
+                            GHOST,
+                            Command::Step(-50),
+                        );
+                        self.add(
+                            hwnd,
+                            "+",
+                            R::new(rx + rw - 68, detail_y(232), 34, 34),
+                            GHOST,
+                            Command::Step(50),
+                        );
+                        let _ = (min, max);
+                    } else if REGISTRY[m].key == "mchose-g75-pro"
+                        && REGISTRY[m].supports("settings")
+                    {
+                        let bw = (rw - 60 - 40) / 5;
+                        for (i, (value, label)) in LIGHTS.iter().enumerate() {
                             self.add(
                                 hwnd,
                                 label,
-                                R::new(x + (i as i32 + i32::from(volume)) * (bw + 6), y, bw, 35),
+                                R::new(
+                                    cx + (i % 5) as i32 * (bw + 10),
+                                    detail_y(172 + (i / 5) as i32 * 48),
+                                    bw,
+                                    36,
+                                ),
                                 CHIP,
-                                Command::Setting(Action::Tune(setting.key, *value)),
+                                Command::Setting(Action::Light(*value)),
                             );
                         }
                     }
-                    if REGISTRY[m].kind == Kind::Headset && self.audio_page == 1 {
-                        let bw = (rw - 72) / 10;
-                        for (i, (key, _)) in crate::audio_fx::EQ_BANDS.iter().enumerate() {
-                            let x = cx + 6 + i as i32 * bw;
+                    if !REGISTRY[m].has_g2_audio()
+                        && (!self.advanced || REGISTRY[m].advanced.is_empty())
+                    {
+                        let rates = REGISTRY[m].rates_for(self.snapshot.devices[m].wired);
+                        let gap = 8;
+                        let bw = ((rw - 200 - gap * (rates.len() as i32 - 1))
+                            / rates.len().max(1) as i32)
+                            .min(100);
+                        let x = rx + rw - 30 - (bw + gap) * rates.len() as i32 + gap;
+                        for (i, rate) in rates.iter().enumerate() {
                             self.add(
                                 hwnd,
-                                "+",
-                                R::new(x, detail_y(272), bw - 10, 30),
+                                &format!("{rate} Hz"),
+                                R::new(x + i as i32 * (bw + gap), detail_y(358), bw, 37),
                                 CHIP,
-                                Command::AudioStep(*key, 1),
-                            );
-                            self.add(
-                                hwnd,
-                                "−",
-                                R::new(x, detail_y(522), bw - 10, 30),
-                                CHIP,
-                                Command::AudioStep(*key, -1),
+                                Command::Setting(Action::Rate(*rate)),
                             );
                         }
-                        self.add(
-                            hwnd,
-                            "所有频段归零",
-                            R::new(cx, detail_y(586), 156, 36),
-                            GHOST,
-                            Command::FlatEq,
-                        );
-                    }
-                } else if let Some((min, max)) = REGISTRY[m].dpi_range {
-                    let stages = self.snapshot.devices[m].dpi_stages.clone();
-                    let count = if stages.is_empty() { 5 } else { stages.len() };
-                    let bw = (rw - 60 - 10 * (count as i32 - 1)) / count as i32;
-                    for i in 0..count {
-                        let (label, action) = if stages.is_empty() {
-                            let v = [400, 800, 1200, 1600, 3200][i];
-                            (format!("{v}"), Action::Dpi(v))
-                        } else {
-                            (format!("{} · {}", i + 1, stages[i]), Action::Stage(i as u8))
-                        };
-                        self.add(
-                            hwnd,
-                            &label,
-                            R::new(cx + i as i32 * (bw + 10), detail_y(178), bw, 38),
-                            CHIP,
-                            Command::Setting(action),
-                        );
-                    }
-                    self.slider = R::new(cx, detail_y(239), rw - 158, 24);
-                    self.add(
-                        hwnd,
-                        "−",
-                        R::new(rx + rw - 112, detail_y(232), 34, 34),
-                        GHOST,
-                        Command::Step(-50),
-                    );
-                    self.add(
-                        hwnd,
-                        "+",
-                        R::new(rx + rw - 68, detail_y(232), 34, 34),
-                        GHOST,
-                        Command::Step(50),
-                    );
-                    let _ = (min, max);
-                } else if REGISTRY[m].kind == Kind::Keyboard && REGISTRY[m].supports("settings") {
-                    let bw = (rw - 60 - 40) / 5;
-                    for (i, (value, label)) in LIGHTS.iter().enumerate() {
-                        self.add(
-                            hwnd,
-                            label,
-                            R::new(
-                                cx + (i % 5) as i32 * (bw + 10),
-                                detail_y(172 + (i / 5) as i32 * 48),
-                                bw,
-                                36,
-                            ),
-                            CHIP,
-                            Command::Setting(Action::Light(*value)),
-                        );
-                    }
-                }
-                if REGISTRY[m].kind != Kind::Headset
-                    && (!self.advanced || REGISTRY[m].advanced.is_empty())
-                {
-                    let rates = REGISTRY[m].rates_for(self.snapshot.devices[m].wired);
-                    let gap = 8;
-                    let bw = ((rw - 200 - gap * (rates.len() as i32 - 1))
-                        / rates.len().max(1) as i32)
-                        .min(100);
-                    let x = rx + rw - 30 - (bw + gap) * rates.len() as i32 + gap;
-                    for (i, rate) in rates.iter().enumerate() {
-                        self.add(
-                            hwnd,
-                            &format!("{rate} Hz"),
-                            R::new(x + i as i32 * (bw + gap), detail_y(358), bw, 37),
-                            CHIP,
-                            Command::Setting(Action::Rate(*rate)),
-                        );
-                    }
-                    let sleeps = REGISTRY[m].sleeps;
-                    let zero_extra = if sleeps.contains(&0) { 18 } else { 0 };
-                    let bw = ((rw - 200 - 6 * (sleeps.len() as i32 - 1) - zero_extra)
-                        / sleeps.len().max(1) as i32)
-                        .min(85);
-                    let mut x = rx + rw - 30 - ((bw + 6) * sleeps.len() as i32 - 6 + zero_extra);
-                    for sec in sleeps {
-                        let width = bw + if *sec == 0 { zero_extra } else { 0 };
-                        self.add(
-                            hwnd,
-                            &sleep_label(*sec, false),
-                            R::new(x, detail_y(425), width, 35),
-                            CHIP,
-                            Command::Setting(Action::Sleep(*sec)),
-                        );
-                        x += width + 6;
+                        let sleeps = REGISTRY[m].sleeps;
+                        let zero_extra = if sleeps.contains(&0) { 18 } else { 0 };
+                        let bw = ((rw - 200 - 6 * (sleeps.len() as i32 - 1) - zero_extra)
+                            / sleeps.len().max(1) as i32)
+                            .min(85);
+                        let mut x =
+                            rx + rw - 30 - ((bw + 6) * sleeps.len() as i32 - 6 + zero_extra);
+                        for sec in sleeps {
+                            let width = bw + if *sec == 0 { zero_extra } else { 0 };
+                            self.add(
+                                hwnd,
+                                &sleep_label(*sec, false),
+                                R::new(x, detail_y(425), width, 35),
+                                CHIP,
+                                Command::Setting(Action::Sleep(*sec)),
+                            );
+                            x += width + 6;
+                        }
                     }
                 }
                 self.add(
@@ -1133,6 +1200,9 @@ impl App {
             Page::Home | Page::Preferences => {}
         }
         self.page = page;
+        self.show_evidence = false;
+        self.pointer_sample = None;
+        self.pointer_requested = matches!(page,Page::Device(m) if REGISTRY[m].supports("polling-rate-read") || REGISTRY[m].supports("dpi-stages-read"));
         self.advanced = false;
         self.settings_page = 0;
         self.audio_page = 0;
@@ -1140,10 +1210,103 @@ impl App {
         self.fx.nav.start();
         self.fx_wake(hwnd);
         self.layout(hwnd);
+        self.poll_detail_on_entry(hwnd);
         InvalidateRect(hwnd, null(), 0);
     }
+    unsafe fn open_mhub(&mut self, hwnd: HWND) {
+        if self.hub_open {
+            if let Err(error) = crate::mhub::open(hwnd) {
+                self.set_status(&error, true);
+                self.render(hwnd);
+            }
+            return;
+        }
+        if self.pending.is_some() || self.modal_open || !self.queued.is_empty() {
+            return;
+        }
+        // A second installed model may describe another collection on the same receiver.
+        let mut receivers = std::collections::HashSet::new();
+        for spec in REGISTRY.iter().filter(|spec| spec.mchose()) {
+            receivers.extend(spec.extra_matchers.iter().map(|id| (id.vid, id.pid)));
+        }
+        if let Ok(catalog) = crate::plugin_manager::catalog() {
+            for package in catalog {
+                if package.device["brand"]
+                    .as_str()
+                    .is_some_and(|brand| brand.eq_ignore_ascii_case("MCHOSE") || brand == "迈从")
+                {
+                    if let Ok(ids) = serde_json::from_value::<Vec<crate::devices::DeviceMatch>>(
+                        package.device["matches"].clone(),
+                    ) {
+                        receivers.extend(ids.into_iter().map(|id| (id.vid, id.pid)));
+                    }
+                }
+            }
+        }
+        let peers: Vec<_> = REGISTRY
+            .iter()
+            .filter(|spec| {
+                spec.mchose()
+                    || spec
+                        .extra_matchers
+                        .iter()
+                        .any(|id| receivers.contains(&(id.vid, id.pid)))
+            })
+            .collect();
+        // Keep active software bindings intact. Opening the web driver while a macro is
+        // mapped could let the two editors change the same binding.
+        for spec in &peers {
+            if spec.supports("software-macro-trigger")
+                || matches!(
+                    spec.key,
+                    "mchose-a5-ultra" | "mchose-g75-pro" | "razer-deathadder-v3-pro"
+                )
+            {
+                match peripheral_desk::resident_macros::list(spec.key) {
+                    Ok(state) if !state.active.is_empty() || !state.library.recovery.is_empty() => {
+                        message(&format!(
+                            "{} 正在使用软件宏。请在「软件宏」中停用并恢复按键后打开 M HUB。",
+                            spec.name
+                        ));
+                        return;
+                    }
+                    Err(error) => {
+                        message(&format!("无法确认 {} 的宏状态：{error}", spec.name));
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        crate::plugin_manager::set_web_driver_devices(
+            peers.into_iter().map(|spec| spec.key).collect(),
+        );
+        match crate::mhub::open(hwnd) {
+            Ok(()) => {
+                self.hub_open = true;
+                self.pointer_sample = None;
+                for state in &mut self.snapshot.devices {
+                    if crate::plugin_manager::web_driver_owns(&state.key) {
+                        state.fresh = false;
+                        state.charging = None;
+                    }
+                }
+                self.set_status("已打开官方 M HUB，关闭其窗口后恢复本地控制", false);
+                self.tray(hwnd);
+            }
+            Err(error) => {
+                crate::plugin_manager::set_web_driver_devices(Vec::new());
+                self.set_status(&error, true);
+            }
+        }
+        self.layout(hwnd);
+    }
+    fn hub_controls(&self, m: usize) -> bool {
+        self.hub_open && crate::plugin_manager::web_driver_owns(REGISTRY[m].key)
+    }
     fn can_adjust(&self) -> bool {
-        matches!(self.page,Page::Device(m)if self.snapshot.devices[m].fresh)
+        !self.show_evidence
+            && matches!(self.page,Page::Device(m)if self.snapshot.devices[m].fresh && !self.hub_controls(m))
             && self.pending.is_none()
             && !self.modal_open
     }
@@ -1208,45 +1371,47 @@ impl App {
                 self.audio_page = value;
                 self.layout(hwnd);
             }
-            Command::Configuration | Command::CoreUpdate => {
+            Command::Configuration
+            | Command::CoreUpdate
+            | Command::DriverManager
+            | Command::AddDevice => {
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
                     return;
                 }
                 self.modal_open = true;
-                let restarting = if command == Command::CoreUpdate {
-                    crate::update_ui::open(hwnd)
-                } else {
-                    let model = if let Page::Device(m) = self.page {
-                        Some(m)
-                    } else {
-                        None
-                    };
-                    crate::configuration_ui::open(hwnd, model);
-                    false
+                let outcome = match command {
+                    Command::Configuration => {
+                        let model = if let Page::Device(m) = self.page {
+                            Some(m)
+                        } else {
+                            None
+                        };
+                        crate::configuration_ui::open(hwnd, model);
+                        crate::plugin_ui::StoreExit::Close
+                    }
+                    Command::CoreUpdate => crate::update_ui::open(hwnd),
+                    _ => crate::plugin_ui::open(hwnd),
                 };
                 self.modal_open = false;
-                if restarting {
-                    DestroyWindow(hwnd);
-                    return;
+                match outcome {
+                    crate::plugin_ui::StoreExit::Restart => {
+                        DestroyWindow(hwnd);
+                        return;
+                    }
+                    crate::plugin_ui::StoreExit::MHub => {
+                        self.open_mhub(hwnd);
+                        return;
+                    }
+                    crate::plugin_ui::StoreExit::Close => {}
                 }
                 self.images = Images::load();
                 self.layout(hwnd);
                 self.begin(hwnd, None);
             }
-            Command::DriverManager | Command::AddDevice => {
-                if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
-                    return;
-                }
-                self.modal_open = true;
-                let restarting = crate::plugin_ui::open(hwnd);
-                self.modal_open = false;
-                if restarting {
-                    DestroyWindow(hwnd);
-                    return;
-                }
-                self.images = Images::load();
+            Command::MHub => self.open_mhub(hwnd),
+            Command::Evidence => {
+                self.show_evidence = !self.show_evidence;
                 self.layout(hwnd);
-                self.begin(hwnd, None);
             }
             Command::ControlsEditor
             | Command::ResidentMacros
@@ -1313,6 +1478,7 @@ impl App {
                 ShowWindow(hwnd, SW_HIDE);
             }
             Command::Quit => self.quit(hwnd),
+            Command::ReadPointer => self.read_pointer(hwnd),
             Command::Refresh => self.begin(hwnd, None),
             Command::Setting(a) => self.schedule(hwnd, a),
             Command::Step(n) => self.step(hwnd, n),
@@ -1391,6 +1557,53 @@ impl App {
             DestroyWindow(hwnd);
         }
     }
+    unsafe fn poll_detail_on_entry(&mut self, hwnd: HWND) {
+        if self.pointer_requested {
+            self.read_pointer(hwnd);
+        }
+    }
+    unsafe fn read_pointer(&mut self, hwnd: HWND) {
+        let Page::Device(model) = self.page else {
+            return;
+        };
+        let spec = &REGISTRY[model];
+        if self.pending.is_some()
+            || self.modal_open
+            || !self.queued.is_empty()
+            || self.hub_controls(model)
+            || !self.snapshot.devices[model].present
+            || !(spec.supports("polling-rate-read") || spec.supports("dpi-stages-read"))
+        {
+            return;
+        }
+        self.pointer_requested = false;
+        self.pointer_sample = None;
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        self.set_status("正在读取所选鼠标的指针参数…", false);
+        self.render(hwnd);
+        let window = hwnd as usize;
+        thread::spawn(move || {
+            let response = crate::plugin_manager::invoke(
+                spec.key,
+                serde_json::json!({"op":"read-state","read_pointer":true}),
+            )
+            .and_then(|value| {
+                serde_json::from_value::<Box<PointerSample>>(value)
+                    .map_err(|error| error.to_string())
+            })
+            .and_then(|state| {
+                if state.state.fresh && state.state.key == spec.key {
+                    Ok(state)
+                } else {
+                    Err("所选设备未返回当前指针参数".into())
+                }
+            });
+            if tx.send(WorkUpdate::Pointer(model, response)).is_ok() {
+                PostMessageW(window as HWND, DONE, 0, 0);
+            }
+        });
+    }
     unsafe fn begin(&mut self, hwnd: HWND, action: Option<(usize, Action)>) {
         if self.pending.is_some() || self.modal_open {
             return;
@@ -1443,6 +1656,35 @@ impl App {
                     self.snapshot.devices[model] = state;
                     changed = true;
                 }
+                WorkUpdate::Pointer(model, result) => {
+                    self.pending = None;
+                    if self.page == Page::Device(model) {
+                        match result {
+                            Ok(sample) => {
+                                let state = &sample.state;
+                                self.set_status(
+                                    if !state.settings_error.is_empty() {
+                                        &state.settings_error
+                                    } else if state.rate.is_some()
+                                        || state.active_stage.is_some()
+                                        || !state.dpi_stages.is_empty()
+                                        || sample.rate_indices.is_some()
+                                    {
+                                        "已读取指针参数"
+                                    } else {
+                                        "设备未报告指针参数"
+                                    },
+                                    false,
+                                );
+                                self.pointer_sample = Some((model, sample));
+                            }
+                            Err(e) => self.set_status(&format!("读取指针参数失败：{e}"), true),
+                        }
+                    }
+                    self.render(hwnd);
+                    self.poll_detail_on_entry(hwnd);
+                    return;
+                }
                 WorkUpdate::Finished(result) => finished = Some(result),
             }
         }
@@ -1487,6 +1729,13 @@ impl App {
             _ => None,
         };
         self.snapshot = s;
+        if self
+            .pointer_sample
+            .as_ref()
+            .is_some_and(|(model, _)| !self.snapshot.devices[*model].fresh)
+        {
+            self.pointer_sample = None;
+        }
         if let Some(key) = selected_system {
             self.page = self
                 .snapshot
@@ -1547,12 +1796,13 @@ impl App {
         if !self.queued.is_empty() {
             SetTimer(hwnd, 2, 100, None);
         }
+        self.poll_detail_on_entry(hwnd);
     }
     fn setting_rows(&self) -> usize {
         ((self.height - 351) / 78).max(1) as usize
     }
     fn settings_pages(&self, m: usize) -> usize {
-        if REGISTRY[m].kind == Kind::Headset {
+        if REGISTRY[m].has_g2_audio() {
             1
         } else {
             REGISTRY[m]
@@ -1563,12 +1813,12 @@ impl App {
         }
     }
     fn visible_settings(&self, m: usize) -> Vec<&'static crate::devices::SettingSpec> {
-        let audio = REGISTRY[m].kind == Kind::Headset;
+        let audio = REGISTRY[m].has_g2_audio();
         REGISTRY[m]
             .advanced
             .iter()
             .filter(|s| {
-                REGISTRY[m].kind != Kind::Headset
+                !REGISTRY[m].has_g2_audio()
                     || (crate::audio_fx::page(s.key) == self.audio_page
                         && !(self.audio_page == 1 && s.key != Tuning::EqEnabled))
             })
@@ -1789,7 +2039,8 @@ impl App {
                             false
                         }
                 }
-                Command::ConnectAudio
+                Command::MHub
+                | Command::ConnectAudio
                 | Command::DriverManager
                 | Command::AddDevice
                 | Command::Configuration
@@ -1820,6 +2071,11 @@ impl App {
                     } else {
                         (self.home_page + 1) * page_size < total
                     }
+                }
+                Command::ReadPointer => {
+                    matches!(self.page, Page::Device(m) if self.snapshot.devices[m].present && !self.hub_controls(m))
+                        && self.pending.is_none()
+                        && self.queued.is_empty()
                 }
                 Command::Refresh => self.pending.is_none() && self.queued.is_empty(),
                 _ => true,
@@ -1852,7 +2108,7 @@ impl App {
             self.sidebar_overlay(&c);
             c.text(
                 &self.status,
-                if matches!(self.page,Page::Device(m) if REGISTRY[m].kind==Kind::Headset) {
+                if matches!(self.page,Page::Device(m) if REGISTRY[m].has_g2_audio()) {
                     R::new(562, self.height - 58, self.width - 880, 32)
                 } else if matches!(self.page, Page::Device(_)) {
                     R::new(
@@ -1940,6 +2196,21 @@ mod tests {
     use super::*;
     use crate::ui::pages::format_number;
 
+    #[test]
+    fn pointer_snapshot_accepts_independent_axes_and_raw_rate_indices() {
+        let state = backend::State {
+            dpi_stages: vec![400, 800],
+            ..Default::default()
+        };
+        let mut message = serde_json::to_value(state).unwrap();
+        message["dpi_stages_y"] = serde_json::json!([600, 1200]);
+        message["rate_indices"] = serde_json::json!([2, 3]);
+        let sample: PointerSample = serde_json::from_value(message).unwrap();
+        assert_eq!(sample.state.dpi_stages, [400, 800]);
+        assert_eq!(sample.dpi_stages_y.unwrap(), [600, 1200]);
+        assert_eq!(sample.rate_indices, Some([2, 3]));
+        assert!(sample.state.rate.is_none());
+    }
     #[test]
     fn work_update_drain_coalesces_ready_devices_without_waiting() {
         let (tx, rx) = mpsc::channel();

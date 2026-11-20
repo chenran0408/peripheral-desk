@@ -1,11 +1,11 @@
 //! Tray icon, right-click menu and the battery flyout window.
 use super::{
-    pages::{connection, system_reading},
+    pages::{connection, reading, system_reading},
     widgets::{HOVER, PRESSED, WARN},
     App, Command, Page, OPEN, TRAY,
 };
 use crate::{
-    devices::{Kind, REGISTRY},
+    devices::REGISTRY,
     hid::wide,
     paint::{Canvas, R, *},
 };
@@ -248,8 +248,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         DIM,
                         DT_LEFT,
                     );
-                    if s.fresh && !matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                        let percent = a.fx.widget.ring_value(key).unwrap_or(0.).round() as u8;
+                    if let Some(percent) = s.percent.filter(|_| s.fresh) {
                         c.battery_icon(
                             R::new(288, y + 10, 34, 34),
                             percent,
@@ -264,18 +263,9 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             TEXT,
                             DT_CENTER,
                         );
-                    } else if s.fresh {
-                        c.text(
-                            "USB",
-                            R::new(265, y + 10, 78, 30),
-                            14,
-                            500,
-                            SUCCESS,
-                            DT_RIGHT,
-                        );
                     } else {
                         c.text(
-                            "未连接",
+                            &reading(s, spec),
                             R::new(260, y + 12, 82, 26),
                             11,
                             400,
@@ -324,7 +314,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             if shown < 20 { WARN } else { GREEN },
                         );
                         c.text(
-                            &format!("{shown}%"),
+                            &format!("{percent}%"),
                             R::new(260, y + 40, 90, 16),
                             10,
                             500,
@@ -640,21 +630,7 @@ impl App {
             .devices
             .iter()
             .zip(REGISTRY.iter())
-            .map(|(s, spec)| {
-                format!(
-                    "{} {}",
-                    spec.name,
-                    if s.fresh && matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                        "USB 供电".into()
-                    } else if s.fresh {
-                        s.percent
-                            .map(|p| format!("{p}%"))
-                            .unwrap_or_else(|| "未知".into())
-                    } else {
-                        "未连接/待唤醒".into()
-                    }
-                )
-            })
+            .map(|(s, spec)| format!("{} {}", spec.name, reading(s, spec)))
             .collect::<Vec<_>>()
             .into_iter()
             .chain(
@@ -697,16 +673,7 @@ impl App {
         let menu = CreatePopupMenu();
         for (i, spec) in REGISTRY.iter().enumerate() {
             let state = &self.snapshot.devices[i];
-            let reading = if state.fresh && matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                "USB 供电".to_string()
-            } else if state.fresh {
-                state
-                    .percent
-                    .map(|p| format!("{p}%"))
-                    .unwrap_or_else(|| "电量未知".into())
-            } else {
-                "未连接".into()
-            };
+            let reading = reading(state, spec);
             AppendMenuW(
                 menu,
                 MF_GRAYED | MF_STRING,

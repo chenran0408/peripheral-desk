@@ -75,27 +75,56 @@ pub(super) fn format_number(v: u32) -> String {
         v.to_string()
     }
 }
-pub(super) fn connection(s: &backend::State, installed: bool) -> &'static str {
+pub(super) fn connection(s: &backend::State, installed: bool) -> &str {
     if !installed {
-        return "请从驱动仓库安装插件";
+        return "尚未安装插件";
     }
-    if s.fresh {
-        if s.wired {
+    if crate::plugin_manager::web_driver_owns(&s.key) {
+        return "M HUB 控制中";
+    }
+    if !s.fresh {
+        return if s.present {
+            "接口在线 · 数据待更新"
+        } else {
+            "设备未连接"
+        };
+    }
+    s.connection_path
+        .as_deref()
+        .filter(|path| !path.is_empty())
+        .unwrap_or(if s.wired {
             "USB 有线连接"
         } else {
-            "2.4 GHz 无线连接"
-        }
-    } else if s.present {
-        if REGISTRY
-            .iter()
-            .any(|spec| spec.key == s.key && matches!(spec.kind, Kind::Headset | Kind::Accessory))
-        {
-            "USB 已连接 · 状态未就绪"
-        } else {
-            "接收器在线 · 待唤醒"
-        }
-    } else {
-        "设备未连接"
+            "已连接"
+        })
+}
+pub(super) fn reading(s: &backend::State, spec: &crate::devices::DeviceSpec) -> String {
+    if crate::plugin_manager::web_driver_owns(&s.key) && s.percent.is_none() {
+        return "M HUB 控制中".into();
+    }
+    match (s.fresh, s.percent) {
+        (true, Some(p)) => format!("{p}%"),
+        (false, Some(p)) => format!("上次 {p}%"),
+        (true, None) if spec.has_g2_audio() => "USB 供电".into(),
+        (true, None) if spec.supports("battery") => "电量未知".into(),
+        (true, None) => "已连接".into(),
+        (false, None) if s.present => "待更新".into(),
+        _ => "未连接".into(),
+    }
+}
+fn stage_values(values: &[u16]) -> String {
+    values
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join("  /  ")
+}
+fn kind_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Mouse => "鼠标",
+        Kind::Keyboard => "键盘",
+        Kind::Headset => "耳机",
+        Kind::Accessory => "其他外设",
     }
 }
 pub(super) fn connection_color(s: &backend::State) -> u32 {
@@ -156,6 +185,9 @@ impl App {
         let panel = R::new(SIDEBAR + 16, 88, 158, (self.height - 172).max(400));
         c.soft_shadow(panel, 12);
         c.round(panel, RADIUS_MD, PANEL, Some(BORDER));
+        if s.fresh {
+            c.glow(panel.x + panel.w / 2, panel.y + 68, 56);
+        }
         c.image(
             self.images.images[m],
             R::new(panel.x + 18, panel.y + 22, 122, 98),
@@ -189,20 +221,52 @@ impl App {
             MUTED,
             DT_LEFT,
         );
-        let ring = R::new(panel.x + 29, panel.y + 270, 100, 100);
-        c.ring(ring, s.percent.filter(|_| s.fresh), s.fresh);
-        c.text(
-            if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                "USB 供电"
-            } else {
-                power(s)
-            },
-            R::new(panel.x + 12, panel.y + 386, 134, 24),
-            11,
-            400,
-            DIM,
-            DT_CENTER,
+        c.line(
+            panel.x + 14,
+            panel.y + 248,
+            panel.x + panel.w - 14,
+            panel.y + 248,
+            BORDER,
+            1.,
         );
+        if spec.supports("battery") || s.percent.is_some() {
+            c.ring(
+                R::new(panel.x + 29, panel.y + 272, 100, 100),
+                s.percent,
+                s.fresh,
+            );
+            c.text(
+                if !s.fresh && s.percent.is_some() {
+                    "上次读数"
+                } else {
+                    power(s)
+                },
+                R::new(panel.x + 8, panel.y + 386, panel.w - 16, 24),
+                11,
+                400,
+                MUTED,
+                DT_CENTER,
+            );
+        } else {
+            c.text(
+                kind_name(spec.kind),
+                R::new(panel.x + 12, panel.y + 266, panel.w - 24, 24),
+                14,
+                500,
+                TEXT,
+                DT_CENTER,
+            );
+            if spec.has_g2_audio() {
+                c.text(
+                    "USB 供电",
+                    R::new(panel.x + 12, panel.y + 298, panel.w - 24, 24),
+                    12,
+                    400,
+                    MUTED,
+                    DT_CENTER,
+                );
+            }
+        }
     }
 
     pub(super) fn eq_hit(&self, x: i32, y: i32) -> Option<(Tuning, R)> {
@@ -212,7 +276,7 @@ impl App {
         let Page::Device(m) = self.page else {
             return None;
         };
-        if REGISTRY[m].kind != Kind::Headset {
+        if !REGISTRY[m].has_g2_audio() {
             return None;
         }
         let bw = (self.width - 394 - 28 - 72) / 10;
@@ -371,7 +435,7 @@ impl App {
                 DT_CENTER,
             );
             c.text(
-                "安装新设备驱动后，请退出并重新打开主程序。",
+                "安装完成后，按提示重启即可使用。",
                 R::new(SIDEBAR + 64, center_y + 76, self.width - SIDEBAR - 128, 26),
                 13,
                 400,
@@ -459,247 +523,183 @@ impl App {
         let rx = 394;
         let rw = self.width - rx - 28;
         let cx = rx + 30;
-        c.round(
-            R::new(28, 145, 344, h - 227),
-            RADIUS_LG,
-            PANEL,
-            Some(BORDER),
-        );
-        c.round(R::new(rx, 145, rw, h - 227), RADIUS_LG, PANEL, Some(BORDER));
-        if s.fresh {
-            c.glow(200, 225, 116);
-        }
-        c.image(
-            self.images.images[m],
-            R::new(60, detail_y(100), 280, 162),
-            s.fresh,
-        );
+        c.text(spec.name, R::new(rx, 78, rw, 34), 23, 600, TEXT, DT_LEFT);
         c.text(
-            spec.name,
-            R::new(54, detail_y(308), 300, 32),
-            20,
-            600,
-            if s.fresh { TEXT } else { MUTED },
-            DT_LEFT,
-        );
-        c.ellipse(R::new(56, detail_y(354), 7, 7), connection_color(s));
-        c.text(
-            connection(s, self.images.installed[m]),
-            R::new(74, detail_y(340), 272, 32),
-            13,
+            spec.validation,
+            R::new(rx + 1, 113, rw, 22),
+            12,
             400,
             MUTED,
             DT_LEFT,
         );
-        c.text(
-            spec.validation,
-            R::new(54, detail_y(370), 292, 17),
-            10,
-            400,
-            DIM,
-            DT_LEFT,
-        );
-        c.line(54, detail_y(393), 346, detail_y(393), BORDER, 1.);
-        if spec.kind == Kind::Accessory {
+        c.round(R::new(rx, 145, rw, h - 227), RADIUS_LG, PANEL, Some(BORDER));
+        if self.show_evidence {
             c.text(
-                "USB 供电 · 无电池",
-                R::new(54, detail_y(415), 292, 30),
-                18,
-                500,
-                MUTED,
+                "适配信息",
+                R::new(cx, 175, rw - 60, 36),
+                22,
+                600,
+                TEXT,
                 DT_LEFT,
             );
+            let links = &spec.evidence["connections"];
+            let connections = match links {
+                serde_json::Value::String(text) => text.clone(),
+                serde_json::Value::Array(items) => items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" / "),
+                _ => String::new(),
+            };
+            let firmware = spec.evidence["firmware"]
+                .as_str()
+                .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("unknown"))
+                .unwrap_or("未记录");
+            let report = spec.evidence["project_validation"]
+                .as_str()
+                .filter(|text| !text.is_empty())
+                .unwrap_or(spec.validation);
+            for (label, value, y, height) in [
+                ("型号插件", spec.key, 235, 36),
+                ("安装版本", &spec.plugin_version, 288, 36),
+                (
+                    "适用连接",
+                    if connections.is_empty() {
+                        "见插件说明"
+                    } else {
+                        &connections
+                    },
+                    342,
+                    78,
+                ),
+                ("验证固件", firmware, 438, 42),
+                ("验证记录", report, 508, (h - 610).max(92)),
+            ] {
+                c.line(cx, y - 12, rx + rw - 30, y - 12, BORDER, 1.);
+                c.text(label, R::new(cx, y, 92, 26), 13, 400, MUTED, DT_LEFT);
+                c.text(
+                    value,
+                    R::new(cx + 100, y + 4, rw - 160, height),
+                    14,
+                    500,
+                    TEXT,
+                    DT_LEFT | DT_WORDBREAK,
+                );
+            }
+            return;
+        }
+        if self.hub_controls(m) {
             c.text(
-                "灯效控制",
-                R::new(424, detail_y(101), rw - 60, 32),
+                "正在使用 M HUB",
+                R::new(cx, 179, rw - 60, 38),
                 22,
                 600,
                 TEXT,
                 DT_LEFT,
             );
             c.text(
-                "点击顶部“灯效设置”读取并编辑设备灯光。",
-                R::new(424, detail_y(150), rw - 60, 30),
-                15,
+                "在官方窗口选择设备并完成设置。关闭 M HUB 窗口后，外设盒会自动恢复读取。",
+                R::new(cx, 237, rw - 60, 72),
+                14,
                 400,
                 MUTED,
-                DT_LEFT,
-            );
-            c.text(
-                "仅开放插件声明的模式、颜色与调节范围。",
-                R::new(424, detail_y(194), rw - 60, 30),
-                13,
-                400,
-                DIM,
-                DT_LEFT,
+                DT_LEFT | DT_WORDBREAK,
             );
             return;
         }
-        if spec.kind == Kind::Headset {
-            for (i, (label, key)) in [
-                ("GAMING", Tuning::GameVolume),
-                ("CHAT", Tuning::ChatVolume),
-                ("麦克风", Tuning::MicVolume),
-            ]
-            .iter()
-            .enumerate()
-            {
-                let y = detail_y(404 + i as i32 * 34);
-                c.text(label, R::new(54, y, 150, 25), 13, 400, DIM, DT_LEFT);
-                c.text(
-                    &self
-                        .tuning_value(m, *key)
-                        .map(|v| format!("{v}%"))
-                        .unwrap_or_else(|| "不可用".into()),
-                    R::new(210, y, 136, 25),
-                    13,
-                    400,
-                    MUTED,
-                    DT_RIGHT,
-                );
-            }
-            let y = (h - 312).max(520);
-            c.round(R::new(112, y, 176, 112), RADIUS_LG, FIELD, Some(BORDER));
-            c.text(
-                "USB",
-                R::new(112, y + 13, 176, 48),
-                34,
-                300,
-                if s.fresh { TEXT } else { DIM },
-                DT_CENTER,
-            );
-            c.text(
-                "有线供电 · 无电池",
-                R::new(90, y + 72, 220, 24),
-                13,
-                400,
-                MUTED,
-                DT_CENTER,
-            );
+        if spec.has_g2_audio() {
             self.advanced_panel(c, m);
             return;
         }
-        let pairs = [
-            (
-                "当前 DPI",
-                s.dpi
-                    .map(|v| format_number(v as u32))
-                    .unwrap_or_else(|| "—".into()),
-            ),
-            (
-                "回报率",
-                s.rate
-                    .map(|v| format!("{v} Hz"))
-                    .unwrap_or_else(|| "—".into()),
-            ),
-            (
-                "自动休眠",
-                s.sleep_seconds
-                    .map(|v| sleep_label(v, true))
-                    .unwrap_or_else(|| "—".into()),
-            ),
-            ("供电状态", power(s).into()),
-        ];
-        for (i, (label, value)) in pairs.iter().enumerate() {
-            if spec.kind == Kind::Keyboard && i == 0 {
-                continue;
-            }
-            let y = detail_y(400 + i as i32 * 31);
-            c.text(label, R::new(54, y, 120, 25), 13, 400, DIM, DT_LEFT);
-            c.text(value, R::new(168, y, 178, 25), 13, 400, MUTED, DT_RIGHT);
-        }
-        let compact_ring = h < 800;
-        let ring_y = if compact_ring {
-            526
-        } else {
-            (h - 303).max(538)
-        };
-        c.ring(
-            R::new(
-                if compact_ring { 140 } else { 133 },
-                ring_y,
-                if compact_ring { 120 } else { 134 },
-                if compact_ring { 120 } else { 134 },
-            ),
-            s.percent.filter(|_| s.fresh),
-            s.fresh,
-        );
-        c.text(
-            if s.fresh {
-                if s.charging == Some(true) {
-                    "正在充电"
-                } else if s.percent.is_some_and(|p| p < 20) {
-                    "电量偏低"
-                } else {
-                    "电量充足"
-                }
-            } else {
-                "等待设备连接"
-            },
-            R::new(60, ring_y + if compact_ring { 136 } else { 150 }, 280, 24),
-            13,
-            400,
-            MUTED,
-            DT_CENTER,
-        );
         if spec.read_only() {
             c.text(
-                "只读设备状态",
-                R::new(cx, detail_y(104), rw - 60, 34),
-                23,
+                "设备概览",
+                R::new(cx, 175, rw - 60, 36),
+                22,
                 600,
                 TEXT,
                 DT_LEFT,
             );
-            c.text(
-                spec.validation,
-                R::new(cx, detail_y(152), rw - 60, 25),
-                13,
-                400,
-                AMBER,
-                DT_LEFT,
-            );
-            c.round(
-                R::new(cx, detail_y(205), rw - 60, 134),
-                16,
-                FIELD,
-                Some(BORDER),
-            );
-            c.text(
-                "此插件提供设备识别与电量读取。",
-                R::new(cx + 22, detail_y(225), rw - 104, 28),
-                16,
-                500,
-                TEXT,
-                DT_LEFT,
-            );
-            c.text(
-                "DPI、改键、宏和灯效写入未开放。",
-                R::new(cx + 22, detail_y(268), rw - 104, 26),
-                13,
-                400,
-                MUTED,
-                DT_LEFT,
-            );
-            c.text(
-                if s.fresh {
-                    "当前读数已更新"
-                } else {
-                    &s.error
-                },
-                R::new(cx, detail_y(365), rw - 60, 70),
-                13,
-                400,
-                if s.fresh { GREEN } else { DIM },
-                DT_LEFT,
-            );
+            let mut rows = vec![("连接", connection(s, self.images.installed[m]).to_owned())];
+            if spec.supports("battery") || s.percent.is_some() {
+                rows.push(("电量", reading(s, spec)));
+                if s.fresh && s.charging.is_some() {
+                    rows.push(("充电状态", power(s).into()));
+                }
+            }
+            if s.fresh {
+                if let Some(dpi) = s.dpi {
+                    rows.push(("当前 DPI", format_number(dpi.into())));
+                }
+                if let Some(stage) = s.active_stage {
+                    rows.push(("当前档位", format!("第 {} 档", u16::from(stage) + 1)));
+                }
+                if let Some(rate) = s.rate {
+                    rows.push(("配置回报率", format!("{rate} Hz")));
+                }
+            }
+            if spec.switch_only() {
+                rows.push((
+                    "背光",
+                    if s.fresh {
+                        match s.light {
+                            Some(0) => "关闭",
+                            Some(1) => "开启",
+                            _ => "未知",
+                        }
+                    } else {
+                        "未知"
+                    }
+                    .into(),
+                ));
+            }
+            if let Some((_, sample)) = self
+                .pointer_sample
+                .as_ref()
+                .filter(|(model, _)| *model == m)
+            {
+                let state = &sample.state;
+                if !state.dpi_stages.is_empty() {
+                    rows.push(("DPI 档位（X）", stage_values(&state.dpi_stages)));
+                }
+                if let Some(y) = sample.dpi_stages_y.as_deref().filter(|v| !v.is_empty()) {
+                    rows.push(("DPI 档位（Y）", stage_values(y)));
+                }
+                if let Some(rate) = state.rate {
+                    rows.push(("配置回报率", format!("{rate} Hz")));
+                } else if let Some([usb, wireless]) = sample.rate_indices {
+                    rows.push(("回报率索引", format!("USB {usb} · 2.4G {wireless}")));
+                }
+                if let Some(stage) = state.active_stage {
+                    rows.push(("设备上报档位", format!("第 {} 档", u16::from(stage) + 1)));
+                }
+                if !state.settings_error.is_empty() {
+                    rows.push(("读取说明", state.settings_error.clone()));
+                }
+            }
+            rows.push(("插件版本", spec.plugin_version.clone()));
+            let spacing = ((h - 340) / rows.len() as i32).clamp(39, 52);
+            for (i, (label, value)) in rows.iter().enumerate() {
+                let y = 230 + i as i32 * spacing;
+                c.line(cx, y - 6, rx + rw - 30, y - 6, BORDER, 1.);
+                c.text(label, R::new(cx, y, 110, 36), 13, 400, MUTED, DT_LEFT);
+                c.text(
+                    value,
+                    R::new(cx + 126, y, rw - 188, 36),
+                    15,
+                    500,
+                    TEXT,
+                    DT_LEFT,
+                );
+            }
             return;
         }
         if self.advanced && !spec.advanced.is_empty() {
             self.advanced_panel(c, m);
             return;
         }
-        if spec.kind == Kind::Mouse {
+        if spec.dpi_range.is_some() {
             c.text(
                 "DPI 灵敏度",
                 R::new(cx, detail_y(101), 300, 30),
@@ -761,7 +761,7 @@ impl App {
                 DIM,
                 DT_LEFT,
             );
-        } else {
+        } else if spec.key == "mchose-g75-pro" {
             c.text(
                 "键盘灯效",
                 R::new(cx, detail_y(101), 300, 32),
@@ -780,38 +780,42 @@ impl App {
             );
         }
         c.line(cx, detail_y(337), rx + rw - 30, detail_y(337), BORDER, 1.);
-        c.text(
-            "回报率",
-            R::new(cx, detail_y(354), 135, 29),
-            15,
-            500,
-            MUTED,
-            DT_LEFT,
-        );
-        c.text(
-            "决定输入上报频率",
-            R::new(cx, detail_y(382), 135, 22),
-            11,
-            400,
-            DIM,
-            DT_LEFT,
-        );
-        c.text(
-            "自动休眠",
-            R::new(cx, detail_y(421), 135, 29),
-            15,
-            500,
-            MUTED,
-            DT_LEFT,
-        );
-        c.text(
-            "空闲后进入省电状态",
-            R::new(cx, detail_y(451), 135, 22),
-            11,
-            400,
-            DIM,
-            DT_LEFT,
-        );
+        if !spec.rates_for(s.wired).is_empty() {
+            c.text(
+                "回报率",
+                R::new(cx, detail_y(354), 135, 29),
+                15,
+                500,
+                MUTED,
+                DT_LEFT,
+            );
+            c.text(
+                "决定输入上报频率",
+                R::new(cx, detail_y(382), 135, 22),
+                11,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+        }
+        if !spec.sleeps.is_empty() {
+            c.text(
+                "自动休眠",
+                R::new(cx, detail_y(421), 135, 29),
+                15,
+                500,
+                MUTED,
+                DT_LEFT,
+            );
+            c.text(
+                "空闲后进入省电状态",
+                R::new(cx, detail_y(451), 135, 22),
+                11,
+                400,
+                DIM,
+                DT_LEFT,
+            );
+        }
         let lower_section = (h - 804).clamp(-22, 0);
         c.line(
             cx,
@@ -822,7 +826,7 @@ impl App {
             1.,
         );
         c.text(
-            "更多设备设置",
+            "插件信息",
             R::new(cx, detail_y(513) + lower_section, 200, 23),
             15,
             500,
@@ -830,11 +834,12 @@ impl App {
             DT_LEFT,
         );
         c.text(
-            if spec.advanced.is_empty() {
-                "更多原驱动功能将逐步接入"
-            } else {
-                "点击上方「高级设置」，调整更多设备参数"
-            },
+            &format!(
+                "{}  ·  {}  ·  {}",
+                spec.brand,
+                kind_name(spec.kind),
+                spec.plugin_version
+            ),
             R::new(cx, detail_y(542) + lower_section, rw - 70, 22),
             13,
             400,
@@ -886,7 +891,7 @@ impl App {
         let rw = self.width - rx - 28;
         let cx = rx + 30;
         let h = self.height;
-        let audio = REGISTRY[m].kind == Kind::Headset;
+        let audio = REGISTRY[m].has_g2_audio();
         c.text(
             if audio {
                 match self.audio_page {
@@ -1309,204 +1314,61 @@ impl App {
             },
             Some(if active { 0xff39313a } else { 0xff222229 }),
         );
+        let margin = 22;
         c.text(
-            spec.brand,
-            R::new(24, 20, r.w - 110, 22),
+            &format!("{}  ·  {}", spec.brand, kind_name(spec.kind)),
+            R::new(margin, 16, r.w - 132, 24),
             12,
             500,
-            if active { MUTED } else { DIM },
+            MUTED,
             DT_LEFT,
         );
-        c.ellipse(R::new(r.w - 72, 27, 6, 6), connection_color(s));
+        c.ellipse(R::new(r.w - 88, 25, 7, 7), connection_color(s));
         c.text(
             if active {
                 "已连接"
-            } else if !self.images.installed[m] {
-                "未安装"
             } else if s.present {
-                if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                    "未就绪"
-                } else {
-                    "待唤醒"
-                }
+                "待更新"
             } else {
                 "未连接"
             },
-            R::new(r.w - 62, 18, 56, 24),
+            R::new(r.w - 76, 16, 56, 24),
             11,
-            400,
-            connection_color(s),
-            DT_LEFT,
-        );
-        if r.h < 400 {
-            let short = r.h < 280;
-            if active {
-                c.glow(120, r.h / 2 + 12, 83);
-            }
-            let image_area = match spec.kind {
-                Kind::Keyboard => R::new(18, 62, 196, r.h - 92),
-                Kind::Mouse => R::new(36, 58, 160, r.h - 86),
-                Kind::Headset | Kind::Accessory => R::new(26, 58, 180, r.h - 86),
-            };
-            c.image(self.images.images[m], image_area, active);
-            c.text(
-                spec.name,
-                R::new(222, if short { 65 } else { 72 }, r.w - 244, 34),
-                if short { 17 } else { 22 },
-                600,
-                if active { TEXT } else { DIM },
-                DT_LEFT,
-            );
-            c.text(
-                match spec.kind {
-                    Kind::Mouse => "无线游戏鼠标",
-                    Kind::Keyboard => "无线机械键盘",
-                    Kind::Headset => "USB 双声卡耳机",
-                    Kind::Accessory => "USB 外设",
-                },
-                R::new(224, if short { 102 } else { 115 }, r.w - 248, 24),
-                13,
-                400,
-                if active { MUTED } else { DIM },
-                DT_LEFT,
-            );
-            c.text(
-                spec.validation,
-                R::new(224, if short { 130 } else { 145 }, r.w - 248, 22),
-                11,
-                400,
-                DIM,
-                DT_LEFT,
-            );
-            let divider = if short { 155 } else { r.h - 110 };
-            c.line(224, divider, r.w - 24, divider, BORDER, 1.);
-            c.text(
-                if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                    "USB 有线供电"
-                } else if !s.fresh && s.percent.is_some() {
-                    "上次电量"
-                } else {
-                    "设备电量"
-                },
-                R::new(224, if short { 161 } else { r.h - 99 }, 180, 22),
-                12,
-                400,
-                DIM,
-                DT_LEFT,
-            );
-            c.text(
-                &if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                    "USB".into()
-                } else {
-                    s.percent
-                        .map(|p| format!("{p}%"))
-                        .unwrap_or_else(|| "—".into())
-                },
-                R::new(
-                    222,
-                    if short { 183 } else { r.h - 72 },
-                    150,
-                    if short { 34 } else { 43 },
-                ),
-                if short { 27 } else { 32 },
-                300,
-                if active { TEXT } else { DIM },
-                DT_LEFT,
-            );
-            c.text(
-                "设备设置  ›",
-                R::new(r.w - 150, r.h - if short { 43 } else { 65 }, 124, 32),
-                13,
-                500,
-                if active { RED } else { DIM },
-                DT_RIGHT,
-            );
-            let ring = R::new(r.w - 60, r.h - 76, 40, 40);
-            c.arc(ring, -90., 359.9, BORDER, 3.);
-            if let Some(percent) = self.fx.widget.ring_value(0x1000 + m as u64) {
-                c.arc(ring, -90., 360. * percent.clamp(0., 100.) / 100., RED, 3.);
-            }
-            return;
-        }
-        if active {
-            c.glow(r.w / 2, 170, 110);
-        }
-        c.image(self.images.images[m], R::new(34, 60, r.w - 68, 222), active);
-        c.text(
-            spec.name,
-            R::new(24, 309, r.w - 48, 34),
-            20,
-            600,
-            if active { TEXT } else { DIM },
-            DT_LEFT,
-        );
-        c.text(
-            match spec.kind {
-                Kind::Mouse => "无线游戏鼠标",
-                Kind::Keyboard => "无线机械键盘",
-                Kind::Headset => "USB 双声卡耳机",
-                Kind::Accessory => "USB 外设",
-            },
-            R::new(24, 349, r.w - 48, 24),
-            12,
-            400,
-            if active { MUTED } else { DIM },
-            DT_LEFT,
-        );
-        c.line(24, r.h - 116, r.w - 24, r.h - 116, BORDER, 1.);
-        c.text(
-            if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                "供电方式"
-            } else if !s.fresh && s.percent.is_some() {
-                "上次电量"
-            } else {
-                "电量"
-            },
-            R::new(24, r.h - 102, 100, 25),
-            12,
-            400,
-            DIM,
-            DT_LEFT,
-        );
-        c.text(
-            &if matches!(spec.kind, Kind::Headset | Kind::Accessory) {
-                "USB".into()
-            } else {
-                s.percent
-                    .map(|p| format!("{p}%"))
-                    .unwrap_or_else(|| "—".into())
-            },
-            R::new(24, r.h - 77, 140, 46),
-            32,
-            300,
-            if active { TEXT } else { DIM },
-            DT_LEFT,
-        );
-        c.text(
-            if active {
-                "设备设置  ›"
-            } else {
-                "查看设备  ›"
-            },
-            R::new(r.w - 145, r.h - 72, 120, 36),
-            13,
             500,
-            if active { RED } else { DIM },
+            connection_color(s),
             DT_RIGHT,
         );
-        if let Some(percent) = self.fx.widget.ring_value(0x1000 + m as u64) {
-            let ring = R::new(r.w - 72, r.h - 82, 46, 46);
-            c.arc(ring, -90., 359.9, BORDER, 4.);
-            c.arc(ring, -90., 360. * percent.clamp(0., 100.) / 100., RED, 4.);
-            c.text(
-                &format!("{}%", percent.round() as u8),
-                R::new(r.w - 88, r.h - 66, 78, 18),
-                11,
-                500,
-                MUTED,
-                DT_CENTER,
-            );
-        }
+        let image_h = (r.h - 143).max(70);
+        c.image(
+            self.images.images[m],
+            R::new(margin, 44, r.w - 2 * margin, image_h),
+            active,
+        );
+        c.text(
+            spec.name,
+            R::new(margin, r.h - 93, r.w - 2 * margin, 29),
+            18,
+            600,
+            if active { TEXT } else { MUTED },
+            DT_LEFT,
+        );
+        c.line(margin, r.h - 55, r.w - margin, r.h - 55, BORDER, 1.);
+        c.text(
+            &reading(s, spec),
+            R::new(margin, r.h - 46, r.w - 145, 30),
+            15,
+            500,
+            if active { TEXT } else { DIM },
+            DT_LEFT,
+        );
+        c.text(
+            "查看设备  ›",
+            R::new(r.w - 118, r.h - 46, 96, 30),
+            12,
+            500,
+            MUTED,
+            DT_RIGHT,
+        );
     }
 }
 
@@ -1520,5 +1382,37 @@ unsafe fn mini_ring(c: &Canvas, r: R, percent: Option<u8>, active: bool) {
             if active { RED } else { DIM },
             2.5,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn device_readings_keep_missing_and_cached_values_distinct() {
+        let descriptor = |key: &str, kind: &str| {
+            serde_json::from_value::<crate::devices::DeviceManifest>(serde_json::json!({
+                "key":key,"name":"Test device","kind":kind,"brand":"Test","matches":[{"vid":1,"pid":1}]
+            })).unwrap().into_spec().unwrap()
+        };
+        let spec = &descriptor("test-keyboard", "keyboard");
+        let mut state = backend::State {
+            fresh: true,
+            present: true,
+            connection_path: Some("蓝牙".into()),
+            ..Default::default()
+        };
+        assert_eq!(connection(&state, true), "蓝牙");
+        assert!(!reading(&state, spec).contains('%'));
+        state.percent = Some(0);
+        assert_eq!(reading(&state, spec), "0%");
+        state.fresh = false;
+        assert_eq!(reading(&state, spec), "上次 0%");
+        let audio = &descriptor("hecate-g2-pro", "headset");
+        state.fresh = true;
+        state.percent = Some(72);
+        assert_eq!(reading(&state, audio), "72%");
+        state.percent = None;
+        assert_eq!(reading(&state, audio), "USB 供电");
     }
 }

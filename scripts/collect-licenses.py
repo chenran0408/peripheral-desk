@@ -15,6 +15,12 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PREFIXES = ("license", "licence", "copying", "copyright", "notice", "unlicense")
+# These crate archives omit their workspace-level MIT license.
+WEBVIEW2_COMMITS = {
+    "webview2-com-0.38.2": "b74dc5e2b394044bea5191052868ce7a106c202c",
+    "webview2-com-sys-0.38.2": "b74dc5e2b394044bea5191052868ce7a106c202c",
+    "webview2-com-macros-0.8.1": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+}
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -44,10 +50,19 @@ def main():
             if not explicit.is_relative_to(source.resolve()) or not explicit.is_file():
                 raise ValueError("Invalid license-file path: " + identifier)
             files.add(explicit)
-        if not files:
-            raise ValueError("No license text found: " + identifier)
         checksum_path = source / ".cargo-checksum.json"
-        if checksum_path.is_file():
+        upstream = None
+        if not files and identifier in WEBVIEW2_COMMITS:
+            commit = WEBVIEW2_COMMITS[identifier]
+            if json.loads((source / ".cargo_vcs_info.json").read_text())["git"]["sha1"] != commit:
+                raise ValueError("Unexpected WebView2 source revision: " + identifier)
+            upstream = f"https://github.com/wravery/webview2-rs/blob/{commit}/LICENSE"
+            source = ROOT / "THIRD_PARTY_LICENSES" / "webview2-com-0.38.2"
+            files = {source / "LICENSE"}
+            expected = {"LICENSE": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"}
+        elif not files:
+            raise ValueError("No license text found: " + identifier)
+        elif checksum_path.is_file():
             checksums = json.loads(checksum_path.read_text(encoding="utf-8"))
             if checksums["package"] != package["checksum"]:
                 raise ValueError("Source checksum disagrees with lockfile: " + identifier)
@@ -83,6 +98,8 @@ def main():
             planned.append((destination, data))
             records.append({"file": relative, "sha256": checksum})
         inventory.append({"name": package["name"], "version": package["version"], "license": metadata.get("license"), "registry_source": package["source"], "registry_checksum": package["checksum"], "files": records})
+        if upstream:
+            inventory[-1]["license_source"] = upstream
     manifest = {"schema": 1, "scope": "Complete Cargo.lock registry package superset, including optional/build/target-specific crates; not every listed crate is linked into each binary.", "packages": inventory}
     encoded = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     manifest_path = args.out / "MANIFEST.json"

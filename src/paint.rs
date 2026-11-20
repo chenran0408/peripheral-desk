@@ -403,7 +403,13 @@ impl Canvas {
                 text.as_ptr(),
                 (text.len() - 1) as i32,
                 &mut area,
-                DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX | align,
+                (if align & DT_WORDBREAK == 0 {
+                    DT_SINGLELINE | DT_VCENTER
+                } else {
+                    0
+                }) | DT_END_ELLIPSIS
+                    | DT_NOPREFIX
+                    | align,
             );
             SetTextColor(dc, previous_color);
             SetBkMode(dc, previous_mode);

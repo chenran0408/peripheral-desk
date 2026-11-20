@@ -14,6 +14,8 @@ pub mod hid;
 pub mod keyboard;
 #[cfg(feature = "driver-runtime")]
 pub mod keyboard_controls;
+#[cfg(feature = "desktop")]
+pub mod mhub;
 pub mod model;
 #[cfg(feature = "driver-runtime")]
 pub mod plugin_entry;

@@ -55,27 +55,47 @@ pub fn open(model: usize, interface: &Interface) -> Result<Box<dyn DeviceSession
 
 #[cfg(not(feature = "driver-runtime"))]
 struct PluginSession {
-    key: &'static str,
+    spec: &'static crate::devices::DeviceSpec,
 }
 #[cfg(not(feature = "driver-runtime"))]
 impl DeviceSession for PluginSession {
     fn read(&self) -> Result<State> {
+        if self.spec.switch_only() {
+            let reply = crate::plugin_manager::invoke(
+                self.spec.key,
+                serde_json::json!({"op":"lighting-read"}),
+            )?;
+            let enabled = reply
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .ok_or("插件未返回灯光开关状态")?;
+            return Ok(State {
+                key: self.spec.key.into(),
+                present: true,
+                fresh: true,
+                light: Some(u8::from(enabled)),
+                updated: crate::backend::now(),
+                ..State::default()
+            });
+        }
         serde_json::from_value(crate::plugin_manager::invoke(
-            self.key,
+            self.spec.key,
             serde_json::json!({"op":"read-state"}),
         )?)
         .map_err(|e| format!("驱动返回状态格式错误：{e}"))
     }
     fn apply(&self, action: Action) -> Result<()> {
-        crate::plugin_manager::invoke(
-            self.key,
-            serde_json::json!({"op":"apply-setting","action":action}),
-        )
-        .map(|_| ())
+        let request = match action {
+            Action::Light(enabled @ 0..=1) if self.spec.switch_only() => {
+                serde_json::json!({"op":"lighting-switch","enabled":enabled == 1})
+            }
+            _ => serde_json::json!({"op":"apply-setting","action":action}),
+        };
+        crate::plugin_manager::invoke(self.spec.key, request).map(|_| ())
     }
 }
 #[cfg(not(feature = "driver-runtime"))]
 pub fn open(model: usize, _interface: &Interface) -> Result<Box<dyn DeviceSession>> {
     let spec = REGISTRY.get(model).ok_or("设备编号无效")?;
-    Ok(Box::new(PluginSession { key: spec.key }))
+    Ok(Box::new(PluginSession { spec }))
 }

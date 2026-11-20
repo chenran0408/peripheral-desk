@@ -5,7 +5,7 @@ try {
     $version = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
     $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $projectRoot 'target' }
     $binary = Join-Path $targetDir 'release/peripheral-desk.exe'
-    if (-not (Test-Path -LiteralPath $binary)) { throw 'Run cargo build --release first.' }
+    if (-not (Test-Path -LiteralPath $binary)) { throw 'Run scripts/build-desktop.ps1 first.' }
     $dist = Join-Path $projectRoot 'dist'
     $bundle = Join-Path $dist "PeripheralDesk-$version-windows-x64"
     New-Item -ItemType Directory -Force -Path $bundle | Out-Null

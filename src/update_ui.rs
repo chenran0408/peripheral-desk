@@ -2,6 +2,7 @@
 use crate::{
     hid::wide,
     paint::{self, blend, Canvas, BG, BORDER, DIM, FIELD, MUTED, PANEL, R, RED, TEXT},
+    plugin_ui::StoreExit,
     ui::widgets::{DANGER, HOVER, PRESSED, RADIUS_LG, RADIUS_MD, SPACE_2, SUCCESS},
 };
 use peripheral_desk::{
@@ -59,7 +60,7 @@ struct Updater {
     pending: Option<Receiver<Result<Outcome, String>>>,
     status: String,
     error: bool,
-    restart: bool,
+    exit: StoreExit,
 }
 impl Drop for Updater {
     fn drop(&mut self) {
@@ -374,7 +375,7 @@ impl Updater {
                 }
             }
             Ok(Ok(Outcome::Restart)) => {
-                self.restart = true;
+                self.exit = StoreExit::Restart;
                 DestroyWindow(hwnd);
                 return;
             }
@@ -393,8 +394,9 @@ impl Updater {
         }
         match id {
             PLUGINS => {
-                if crate::plugin_ui::open_updates(hwnd) {
-                    self.restart = true;
+                let exit = crate::plugin_ui::open_updates(hwnd);
+                if exit != StoreExit::Close {
+                    self.exit = exit;
                     DestroyWindow(hwnd);
                     return;
                 }
@@ -682,7 +684,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
     }
 }
 /// Returns true only after the verified helper is ready and the main app must exit.
-pub unsafe fn open(owner: HWND) -> bool {
+pub(crate) unsafe fn open(owner: HWND) -> StoreExit {
     let dpi = GetDpiForWindow(owner).max(96);
     let instance = GetModuleHandleW(null());
     let class_name = wide("PeripheralDeskCoreUpdate");
@@ -721,7 +723,7 @@ pub unsafe fn open(owner: HWND) -> bool {
         pending: None,
         status: "正在准备检查更新…".into(),
         error: false,
-        restart: false,
+        exit: StoreExit::Close,
     });
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     let mut frame = RECT {
@@ -780,5 +782,5 @@ pub unsafe fn open(owner: HWND) -> bool {
     }
     EnableWindow(owner, 1);
     SetForegroundWindow(owner);
-    updater.restart
+    updater.exit
 }

@@ -75,7 +75,7 @@ jobs:
           }
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
-        run: cargo build --release --locked --no-default-features --features desktop
+        run: ./scripts/build-desktop.ps1
       - name: Check the update handshake without accessing devices
         shell: pwsh
         run: |
