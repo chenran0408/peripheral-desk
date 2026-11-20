@@ -1,7 +1,7 @@
 //! G75 Pro structured controls derived from the official MCHOSE HUB schemas.
 //! Unknown mappings, matrix holes and trailing bytes are preserved verbatim.
 use crate::{
-    controls::{Binding, BindingAction, ControlAction, ControlState, KeyColor},
+    controls::{Binding, BindingAction, ControlAction, ControlSection, ControlState, KeyColor},
     keyboard::Keyboard,
     protocol::Result,
 };
@@ -184,6 +184,11 @@ fn edit_colors(bytes: &mut [u8], colors: &[KeyColor]) -> Result<()> {
     Ok(())
 }
 pub fn read(keyboard: &Keyboard) -> Result<ControlState> {
+    read_sections(keyboard, None)
+}
+/// The selected layer is a separate block in the keyboard's firmware. Read it on
+/// its own so opening the default layer does not wait on two more layers and RGB.
+pub fn read_sections(keyboard: &Keyboard, section: Option<ControlSection>) -> Result<ControlState> {
     keyboard.verify_model()?;
     let mut state = ControlState {
         binding_types: ["mouse", "keyboard", "consumer", "disabled"]
@@ -192,8 +197,14 @@ pub fn read(keyboard: &Keyboard) -> Result<ControlState> {
         notice: MACRO_NOTICE.into(),
         ..ControlState::default()
     };
+    let layers: &[u8] = match &section {
+        Some(ControlSection::Layer(n @ 0..=2)) => std::slice::from_ref(n),
+        Some(ControlSection::Layer(_)) => return Err("键位层超出范围".into()),
+        Some(ControlSection::Colors) => &[],
+        None => &[0, 1, 2],
+    };
     let mut errors = Vec::new();
-    for layer in 0..=2 {
+    for &layer in layers {
         match keyboard.read_block_layer(0x41, layer).and_then(|bytes| {
             validate_bindings(&bytes)?;
             Ok(bytes)
@@ -216,23 +227,28 @@ pub fn read(keyboard: &Keyboard) -> Result<ControlState> {
             Err(error) => errors.push(format!("第{layer}层键位：{error}")),
         }
     }
-    match keyboard.read_block_layer(0x42, 0).and_then(|bytes| {
-        validate_colors(&bytes)?;
-        Ok(bytes)
-    }) {
-        Ok(bytes) => {
-            for index in 0..KEYS.len() {
-                if real_key(index) {
-                    state.colors.push(KeyColor {
-                        control: index as u16,
-                        rgb: [bytes[index], bytes[126 + index], bytes[252 + index]],
-                    });
+    if section.is_none() || section == Some(ControlSection::Colors) {
+        match keyboard.read_block_layer(0x42, 0).and_then(|bytes| {
+            validate_colors(&bytes)?;
+            Ok(bytes)
+        }) {
+            Ok(bytes) => {
+                for index in 0..KEYS.len() {
+                    if real_key(index) {
+                        state.colors.push(KeyColor {
+                            control: index as u16,
+                            rgb: [bytes[index], bytes[126 + index], bytes[252 + index]],
+                        });
+                    }
                 }
             }
+            Err(error) => errors.push(format!("逐键灯：{error}")),
         }
-        Err(error) => errors.push(format!("逐键灯：{error}")),
     }
     if !errors.is_empty() {
+        if section.is_some() {
+            return Err(errors.join("；"));
+        }
         state.notice = format!("{} {}", errors.join("；"), MACRO_NOTICE);
     }
     Ok(state)

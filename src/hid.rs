@@ -70,7 +70,8 @@ impl Interface {
                     && kind == DEVPROP_TYPE_GUID
                     && size == 16
                     && container != [0; 16]
-                    && container != [0xff; 16]
+                    // Windows assigns 00000000-0000-0000-ffff-ffffffffffff to the whole PC.
+                    && !(container[..8] == [0; 8] && container[8..] == [0xff; 8])
                 {
                     hash.update(container);
                     return format!("{:x}", hash.finalize());

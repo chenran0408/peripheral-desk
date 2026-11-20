@@ -44,6 +44,13 @@ pub struct KeyColor {
     pub control: u16,
     pub rgb: [u8; 3],
 }
+/// Optional projection of a controls reply. Older plugins return the full snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ControlSection {
+    Layer(u8),
+    Colors,
+}
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlState {
     #[serde(default, skip_serializing_if = "Option::is_none")]

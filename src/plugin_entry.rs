@@ -2,7 +2,7 @@
 //! Keep protocol callbacks out of shared dispatch: one DLL must not root other brands.
 use crate::{
     adapters::{mouse::Channel, DeviceSession},
-    controls::{ControlAction, ControlState},
+    controls::{ControlAction, ControlSection, ControlState},
     devices::{DeviceSpec, REGISTRY},
     hid::Interface,
     model::{Action, State},
@@ -19,35 +19,41 @@ type Open = fn(Option<&str>) -> Result<Box<dyn DeviceSession>>;
 type ControlsRead = fn(Option<&str>) -> Result<ControlState>;
 type ControlsApply = fn(Option<&str>, &ControlAction) -> Result<ControlState>;
 type Extra = fn(&str, &Value) -> Result<Value>;
+type SectionRead = fn(Option<&str>, Option<&ControlAction>, ControlSection) -> Result<ControlState>;
 struct Endpoint {
     key: &'static str,
     open: Open,
     controls: Option<(ControlsRead, ControlsApply)>,
     extra: Option<Extra>,
+    section: Option<SectionRead>,
 }
 const RAZER_ENDPOINT: Endpoint = Endpoint {
     key: RAZER,
     open: open_razer,
     controls: Some((read_razer_controls, apply_razer_controls)),
     extra: None,
+    section: None,
 };
 const MCHOSE_ENDPOINT: Endpoint = Endpoint {
     key: MCHOSE,
     open: open_mchose,
     controls: Some((read_mchose_controls, apply_mchose_controls)),
     extra: None,
+    section: None,
 };
 const G75_ENDPOINT: Endpoint = Endpoint {
     key: G75,
     open: open_g75,
     controls: Some((read_g75_controls, apply_g75_controls)),
     extra: None,
+    section: Some(section_g75_controls),
 };
 const HECATE_ENDPOINT: Endpoint = Endpoint {
     key: HECATE,
     open: open_hecate,
     controls: None,
     extra: Some(hecate_extra),
+    section: None,
 };
 
 fn field<T: DeserializeOwned>(request: &Value, name: &str) -> Result<T> {
@@ -201,6 +207,19 @@ fn apply_g75_controls(instance: Option<&str>, action: &ControlAction) -> Result<
     crate::keyboard_controls::apply(&connect(G75, instance, keyboard, false)?, action)?;
     refreshed(read_g75_controls, instance)
 }
+fn section_g75_controls(
+    instance: Option<&str>,
+    action: Option<&ControlAction>,
+    section: ControlSection,
+) -> Result<ControlState> {
+    let device = connect(G75, instance, keyboard, false)?;
+    if let Some(action) = action {
+        crate::keyboard_controls::apply(&device, action)?;
+        return crate::keyboard_controls::read_sections(&device, Some(section))
+            .map_err(|e| format!("设置已写入并核对，但刷新失败，请重新读取设备：{e}"));
+    }
+    crate::keyboard_controls::read_sections(&device, Some(section))
+}
 fn dispatch(endpoint: &Endpoint, device_key: &str, input: &str) -> Result<Value> {
     let request = parse(input)?;
     if device_key != endpoint.key {
@@ -231,6 +250,12 @@ fn dispatch(endpoint: &Endpoint, device_key: &str, input: &str) -> Result<Value>
             } else {
                 None
             };
+            if let (Some(read), Some(section)) = (endpoint.section, request.get("control_section"))
+            {
+                let section = serde_json::from_value(section.clone())
+                    .map_err(|e| format!("读取区域无效：{e}"))?;
+                return value(read(instance, action.as_ref(), section)?);
+            }
             let Some((read, apply)) = endpoint.controls else {
                 connect(endpoint.key, instance, |_, _| Ok(()), false)?;
                 return Err("该设备没有键位或逐键灯设置".into());
@@ -379,7 +404,7 @@ mod tests {
             Ok(())
         }
     }
-    fn fake_open() -> Result<Box<dyn DeviceSession>> {
+    fn fake_open(_: Option<&str>) -> Result<Box<dyn DeviceSession>> {
         CALLS.lock().unwrap().push("open");
         Ok(Box::new(Fake))
     }
@@ -390,6 +415,7 @@ mod tests {
             open: fake_open,
             controls: None,
             extra: None,
+            section: None,
         };
         CALLS.lock().unwrap().clear();
         assert!(dispatch(
