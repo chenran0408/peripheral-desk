@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.4.11-preview.18
+
+- 从电量详情可以直接打开迈从 M HUB，在主窗口点「切换设备」就能返回熟悉的设备选择页。改键、板载配置、灯效预览仍使用原来的 M HUB 页面。
+- 「设备调节」新增雷蛇和罗技驱动中心，可在品牌内找插件、选设备。支持的雷蛇型号可以在主窗口调指针、改键和灯光，罗技可以切换插件支持的板载配置。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.18/PeripheralDesk-0.4.11-preview.18-windows-x64-setup.exe) · [查看对应设备插件](https://github.com/chenran0408/peripheral-desk-drivers/releases/tag/v0.4.13-preview.47)
+
 ## 0.4.11-preview.17
 
 - 迈从 M HUB 直接显示在主窗口右侧。左侧可以随时返回电量页，右上角的「M HUB 菜单」保留缩放、外观和本地版本选择。

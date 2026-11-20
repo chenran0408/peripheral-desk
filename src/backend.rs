@@ -161,7 +161,18 @@ fn with_system_battery(next: Snapshot) -> Snapshot {
     }
 }
 
-pub fn refresh_progress<F>(previous: &Snapshot, mut progress: F) -> (Snapshot, Result<()>)
+pub fn refresh_progress<F>(previous: &Snapshot, progress: F) -> (Snapshot, Result<()>)
+where
+    F: FnMut(usize, State),
+{
+    refresh_progress_except(previous, None, progress)
+}
+
+pub fn refresh_progress_except<F>(
+    previous: &Snapshot,
+    editing: Option<usize>,
+    mut progress: F,
+) -> (Snapshot, Result<()>)
 where
     F: FnMut(usize, State),
 {
@@ -173,14 +184,20 @@ where
             return (with_system_battery(next), result);
         }
     };
-    let (next, result) =
-        refresh_parallel(previous, interfaces, crate::adapters::open, &mut progress);
+    let (next, result) = refresh_parallel(
+        previous,
+        interfaces,
+        editing,
+        crate::adapters::open,
+        &mut progress,
+    );
     (with_system_battery(next), result)
 }
 
 fn refresh_parallel<F, P>(
     previous: &Snapshot,
     interfaces: Vec<Interface>,
+    editing: Option<usize>,
     open: F,
     progress: &mut P,
 ) -> (Snapshot, Result<()>)
@@ -257,7 +274,17 @@ where
                     let Some(models) = groups.get(group) else {
                         break;
                     };
+                    let editor_owns_group = editing.is_some_and(|model| models.contains(&model));
                     for &model in models {
+                        if editor_owns_group {
+                            let mut cached = prior_devices[model].clone();
+                            cached.fresh = false;
+                            cached.charging = None;
+                            if tx.send((model, cached)).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         let state =
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 refresh_scoped(
@@ -667,12 +694,8 @@ mod tests {
             }
         }
     }
-    #[test]
-    fn parallel_refresh_reports_fast_device_before_slow_device_and_keeps_all_states() {
-        let mut previous = Snapshot::default();
-        previous.devices[2].percent = Some(43);
-        previous.devices[2].updated = 99;
-        let interfaces = vec![
+    fn mouse_test_interfaces() -> Vec<Interface> {
+        vec![
             Interface {
                 path: "mi_00-deathadder".into(),
                 vid: 0x1532,
@@ -695,7 +718,48 @@ mod tests {
                 output_len: 65,
                 product: "A5 ultra".into(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn editor_owns_its_receiver_while_other_devices_refresh() {
+        let mut previous = Snapshot::default();
+        previous.devices[0].percent = Some(53);
+        previous.devices[0].updated = 123;
+        let (next, result) = refresh_parallel(
+            &previous,
+            mouse_test_interfaces(),
+            Some(0),
+            |model, _| {
+                assert_eq!(model, 1, "the open editor exclusively owns model 0");
+                Ok(Box::new(FakeSession {
+                    state: State {
+                        present: true,
+                        fresh: true,
+                        percent: Some(78),
+                        ..State::default()
+                    },
+                    writes: Default::default(),
+                    fail: false,
+                }))
+            },
+            &mut |_, _| {},
+        );
+        assert!(result.is_ok());
+        assert_eq!(next.devices[0].percent, Some(53));
+        assert_eq!(next.devices[0].updated, 123);
+        assert!(!next.devices[0].fresh);
+        assert!(next.devices[0].error.is_empty());
+        assert_eq!(next.devices[1].percent, Some(78));
+        assert!(next.devices[1].fresh);
+    }
+
+    #[test]
+    fn parallel_refresh_reports_fast_device_before_slow_device_and_keeps_all_states() {
+        let mut previous = Snapshot::default();
+        previous.devices[2].percent = Some(43);
+        previous.devices[2].updated = 99;
+        let interfaces = mouse_test_interfaces();
         let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counter = writes.clone();
         let fast_reported = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -706,6 +770,7 @@ mod tests {
         let (next, result) = refresh_parallel(
             &previous,
             interfaces,
+            None,
             move |model, _| {
                 if model == 0 {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);

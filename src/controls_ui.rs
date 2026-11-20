@@ -1,4 +1,6 @@
 //! Native structured control editor. The device adapters own all wire formats.
+mod embedded;
+pub(crate) mod viewport;
 use crate::{
     controls::{
         self, BindingAction, ControlAction, ControlState, KeyColor, MacroDefinition, MacroEvent,
@@ -8,6 +10,7 @@ use crate::{
     hid::wide,
     paint::{self, Canvas, BG, BORDER, DIM, FIELD, MUTED, ORANGE, PANEL, R, RED, TEXT},
 };
+pub(crate) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
 use std::{
     collections::BTreeMap,
     mem::{size_of, zeroed},
@@ -58,6 +61,7 @@ struct Child {
 }
 struct Editor {
     model: usize,
+    embedded: bool,
     dpi: u32,
     font: HFONT,
     brush: HBRUSH,
@@ -329,6 +333,11 @@ impl Editor {
         EnableWindow(self.child(id), value as i32);
     }
     unsafe fn add(&mut self, hwnd: HWND, id: i32, class: &str, text: &str, r: R, style: u32) {
+        let r = if self.embedded {
+            embedded::control_rect(id, r)
+        } else {
+            r
+        };
         let h = CreateWindowExW(
             0,
             wide(class).as_ptr(),
@@ -344,6 +353,9 @@ impl Editor {
             null(),
         );
         SendMessageW(h, WM_SETFONT, self.font as usize, 0);
+        if self.embedded {
+            viewport::follow_focus(h, hwnd);
+        }
         if matches!(class, "EDIT" | "LISTBOX" | "COMBOBOX") {
             paint::theme_native_control(h, class, self.dpi);
         }
@@ -431,13 +443,15 @@ impl Editor {
         for child in self.children.drain(..) {
             DestroyWindow(child.hwnd);
         }
-        for (i, label) in ["按键设置", "宏编辑器", "逐键灯光"].iter().enumerate() {
-            self.button(
-                hwnd,
-                10 + i as i32,
-                label,
-                R::new(28 + i as i32 * 148, 88, 136, 38),
-            );
+        if !self.embedded {
+            for (i, label) in ["按键设置", "宏编辑器", "逐键灯光"].iter().enumerate() {
+                self.button(
+                    hwnd,
+                    10 + i as i32,
+                    label,
+                    R::new(28 + i as i32 * 148, 88, 136, 38),
+                );
+            }
         }
         self.button(hwnd, RELOAD, "重新读取", R::new(866, 88, 146, 38));
         self.add(
@@ -882,10 +896,15 @@ impl Editor {
         });
     }
     unsafe fn finish(&mut self, hwnd: HWND) {
-        let Some(rx) = self.pending.take() else {
+        let Some(rx) = self.pending.as_ref() else {
             return;
         };
-        match rx.try_recv() {
+        let result = rx.try_recv();
+        if matches!(result, Err(mpsc::TryRecvError::Empty)) {
+            return;
+        }
+        self.pending = None;
+        match result {
             Ok(Ok(state)) => {
                 if self.saving && self.page == 1 {
                     if let Some(control) = self.macro_control.take() {
@@ -1112,7 +1131,7 @@ impl Editor {
             return;
         }
         match id {
-            10..=12 => {
+            10..=12 if !self.embedded => {
                 let page = (id - 10) as usize;
                 if self.page == 2 || page == 2 {
                     self.selected = 0;
@@ -1195,7 +1214,10 @@ impl Editor {
         let dc = CreateCompatibleDC(dest);
         let bitmap = CreateCompatibleBitmap(dest, rect.right.max(1), rect.bottom.max(1));
         let previous = SelectObject(dc, bitmap);
-        {
+        if self.embedded {
+            let c = Canvas::new(dc, self.dpi);
+            self.paint_embedded(&c);
+        } else {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
             c.gradient(R::new(0, 0, WIDTH, 76), 0xff201017, BG);
@@ -1443,6 +1465,11 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     if ptr.is_null() {
         return DefWindowProcW(hwnd, msg, w, l);
     }
+    if msg == WM_NCDESTROY {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        embedded::destroyed(hwnd, ptr);
+        return DefWindowProcW(hwnd, msg, w, l);
+    }
     let editor = &mut *ptr;
     match msg {
         WM_CREATE => {
@@ -1483,6 +1510,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             editor.brush as isize
         }
         WM_CLOSE => {
+            if editor.embedded {
+                return 0;
+            }
             if editor.pending.is_some() || editor.color_open {
                 editor.status(
                     hwnd,
@@ -1500,10 +1530,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     }
 }
 
-/// Main App keeps its own modal flag set until this function returns.
-pub unsafe fn open(owner: HWND, model: usize) {
+unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box<Editor>), String> {
     if model >= REGISTRY.len() {
-        return;
+        return Err("设备不存在。".into());
     }
     let dpi = GetDpiForWindow(owner).max(96);
     let instance = GetModuleHandleW(null());
@@ -1535,6 +1564,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
     );
     let mut editor = Box::new(Editor {
         model,
+        embedded,
         dpi,
         font,
         brush: CreateSolidBrush(colorref(FIELD)),
@@ -1556,34 +1586,59 @@ pub unsafe fn open(owner: HWND, model: usize) {
         picked: false,
         color_open: false,
     });
-    let mut frame = RECT {
-        left: 0,
-        top: 0,
-        right: editor.px(WIDTH),
-        bottom: editor.px(HEIGHT),
+    let (style, ex_style, x, y, width, height) = if embedded {
+        (
+            WS_CHILD | WS_CLIPCHILDREN,
+            WS_EX_CONTROLPARENT,
+            0,
+            0,
+            editor.px(embedded::WIDTH),
+            editor.px(embedded::HEIGHT),
+        )
+    } else {
+        let mut frame = RECT {
+            left: 0,
+            top: 0,
+            right: editor.px(WIDTH),
+            bottom: editor.px(HEIGHT),
+        };
+        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
+        AdjustWindowRectExForDpi(&mut frame, style, 0, 0, dpi);
+        let mut parent = zeroed();
+        GetWindowRect(owner, &mut parent);
+        let x =
+            (parent.left + (parent.right - parent.left - (frame.right - frame.left)) / 2).max(0);
+        let y = (parent.top + (parent.bottom - parent.top - (frame.bottom - frame.top)) / 2).max(0);
+        (
+            style,
+            WS_EX_DLGMODALFRAME,
+            x,
+            y,
+            frame.right - frame.left,
+            frame.bottom - frame.top,
+        )
     };
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    AdjustWindowRectExForDpi(&mut frame, style, 0, 0, dpi);
-    let mut parent = zeroed();
-    GetWindowRect(owner, &mut parent);
-    let x = (parent.left + (parent.right - parent.left - (frame.right - frame.left)) / 2).max(0);
-    let y = (parent.top + (parent.bottom - parent.top - (frame.bottom - frame.top)) / 2).max(0);
-    EnableWindow(owner, 0);
     let hwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        ex_style,
         name.as_ptr(),
         wide(&format!("{} · 设备自定义", REGISTRY[model].name)).as_ptr(),
         style,
         x,
         y,
-        frame.right - frame.left,
-        frame.bottom - frame.top,
+        width,
+        height,
         owner,
         null_mut(),
         instance,
         editor.as_mut() as *mut Editor as _,
     );
-    if !hwnd.is_null() {
+    if hwnd.is_null() {
+        return Err(format!(
+            "无法打开按键编辑器：{}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    if !embedded {
         let dark = 1i32;
         DwmSetWindowAttribute(
             hwnd,
@@ -1591,6 +1646,14 @@ pub unsafe fn open(owner: HWND, model: usize) {
             &dark as *const _ as _,
             size_of::<i32>() as u32,
         );
+    }
+    Ok((hwnd, editor))
+}
+
+/// Main App keeps its own modal flag set until this function returns.
+pub unsafe fn open(owner: HWND, model: usize) {
+    if let Ok((hwnd, _editor)) = create(owner, model, false) {
+        EnableWindow(owner, 0);
         ShowWindow(hwnd, SW_SHOW);
         UpdateWindow(hwnd);
         let mut message = zeroed();
@@ -1610,7 +1673,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         if IsWindow(hwnd) != 0 {
             DestroyWindow(hwnd);
         }
+        EnableWindow(owner, 1);
+        SetForegroundWindow(owner);
     }
-    EnableWindow(owner, 1);
-    SetForegroundWindow(owner);
 }

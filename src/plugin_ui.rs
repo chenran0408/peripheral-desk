@@ -235,10 +235,13 @@ impl Browser {
                     .or_insert_with(|| row.brand().to_owned());
             }
         }
-        self.brand = self
-            .brand
-            .as_ref()
-            .and_then(|b| names.get(&b.to_ascii_uppercase()).cloned());
+        if let Some(brand) = &mut self.brand {
+            // Keep the active choice when the current channel has no matching packages.
+            *brand = names
+                .entry(brand.to_ascii_uppercase())
+                .or_insert_with(|| brand.clone())
+                .clone();
+        }
         self.brands = names.into_values().collect();
     }
 
@@ -565,6 +568,15 @@ impl Manager {
     fn selected(&self) -> Option<DriverRow<'_>> {
         self.inventory.as_ref()?.row(self.selected)
     }
+    fn empty_list_message(&self) -> &'static str {
+        if self.inventory.is_none() {
+            "驱动目录尚未载入。"
+        } else if self.browser.brand.is_some() || !self.browser.query.is_empty() {
+            "无匹配型号，试试其他厂商或搜索词。"
+        } else {
+            "暂无可用驱动，检查更新或切换通道。"
+        }
+    }
     fn installation(&self) -> &Installation {
         static MISSING: Installation = Installation::Missing;
         self.selected()
@@ -835,14 +847,12 @@ impl Manager {
             SendMessageW(list, LB_SETCARETINDEX, position, 0);
         } else {
             self.selected = usize::MAX;
-            let message = if self.inventory.is_some()
-                && (self.browser.brand.is_some() || !self.browser.query.is_empty())
-            {
-                "无匹配型号，试试其他厂商或搜索词。"
-            } else {
-                "暂无可用驱动，检查更新或切换通道。"
-            };
-            SendMessageW(list, LB_ADDSTRING, 0, wide(message).as_ptr() as isize);
+            SendMessageW(
+                list,
+                LB_ADDSTRING,
+                0,
+                wide(self.empty_list_message()).as_ptr() as isize,
+            );
         }
         SendMessageW(list, WM_SETREDRAW, 1, 0);
     }
@@ -905,9 +915,14 @@ impl Manager {
         EnableWindow(self.child(RESTART), (ready && self.changed) as i32);
         EnableWindow(self.child(REFRESH), ready as i32);
         EnableWindow(self.child(LIST), ready as i32);
-        for id in [SEARCH, BRAND] {
-            EnableWindow(self.child(id), (ready && self.inventory.is_some()) as i32);
-        }
+        EnableWindow(
+            self.child(SEARCH),
+            (ready && self.inventory.is_some()) as i32,
+        );
+        EnableWindow(
+            self.child(BRAND),
+            (!self.dialog_open && !self.browser.brands.is_empty()) as i32,
+        );
         EnableWindow(self.child(OFFLINE), ready as i32);
         EnableWindow(self.child(CHANNEL), ready as i32);
         EnableWindow(self.child(PREVIEW), ready as i32);
@@ -1201,7 +1216,7 @@ impl Manager {
         }
     }
     unsafe fn command(&mut self, hwnd: HWND, id: i32, event: u32) {
-        if self.pending.is_some() || self.dialog_open {
+        if self.dialog_open || (self.pending.is_some() && id != BRAND) {
             return;
         }
         if matches!(id, REMOVE | ROLLBACK | CHANGELOG) {
@@ -1355,14 +1370,12 @@ impl Manager {
                 DT_RIGHT,
             );
             c.round(R::new(24, 88, 584, 428), RADIUS_LG, PANEL, Some(BORDER));
-            c.text(
-                &format!("设备型号  ·  {} 个结果", self.browser.visible.len()),
-                R::new(48, 211, 280, 23),
-                13,
-                500,
-                TEXT,
-                DT_LEFT,
-            );
+            let results = if self.inventory.is_some() {
+                format!("设备型号  ·  {} 个结果", self.browser.visible.len())
+            } else {
+                "设备型号".into()
+            };
+            c.text(&results, R::new(48, 211, 280, 23), 13, 500, TEXT, DT_LEFT);
             c.text(
                 "安装状态",
                 R::new(431, 211, 145, 23),
@@ -1640,11 +1653,7 @@ impl Manager {
                 );
             } else {
                 c.text(
-                    if self.browser.brand.is_some() || !self.browser.query.is_empty() {
-                        "无匹配型号，试试其他厂商或搜索词。"
-                    } else {
-                        "暂无可用驱动，检查更新或切换通道。"
-                    },
+                    self.empty_list_message(),
                     R::new(12, 4, width - 24, height - 8),
                     13,
                     400,
@@ -1786,16 +1795,20 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
 }
 /// The caller keeps the main application's modal flag set until this returns.
 pub(crate) unsafe fn open(owner: HWND) -> StoreExit {
-    open_inner(owner, false)
+    open_inner(owner, false, None)
+}
+
+pub(crate) unsafe fn open_for_brand(owner: HWND, brand: &str) -> StoreExit {
+    open_inner(owner, false, Some(brand))
 }
 
 /// Opens the manager, refreshes the catalog, and selects installed packages
 /// whose catalog version is strictly newer than the installed version.
 pub(crate) unsafe fn open_updates(owner: HWND) -> StoreExit {
-    open_inner(owner, true)
+    open_inner(owner, true, None)
 }
 
-unsafe fn open_inner(owner: HWND, check_updates: bool) -> StoreExit {
+unsafe fn open_inner(owner: HWND, check_updates: bool, brand: Option<&str>) -> StoreExit {
     let monitor_dpi = GetDpiForWindow(owner).max(96);
     let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
     let ex_style = WS_EX_DLGMODALFRAME;
@@ -1851,7 +1864,10 @@ unsafe fn open_inner(owner: HWND, check_updates: bool) -> StoreExit {
         children: Vec::new(),
         inventory: None,
         selected: 0,
-        browser: Browser::default(),
+        browser: Browser {
+            brand: brand.map(str::to_owned),
+            ..Browser::default()
+        },
         checked: BTreeSet::new(),
         pending: None,
         status: if check_updates {
@@ -2202,8 +2218,39 @@ mod tests {
                 null(),
             );
             assert!(!window.is_null());
+            let mut catalog = manager.inventory.take().unwrap();
+            manager.browser.brand = Some("razer".into());
+            manager.layout(window);
+            assert_eq!(manager.browser.brands, ["razer"]);
+            assert_eq!(SendMessageW(manager.child(BRAND), CB_GETCURSEL, 0, 0), 1);
+            assert_eq!(manager.empty_list_message(), "驱动目录尚未载入。");
+
+            let razer = catalog.packages.pop().unwrap();
+            manager.inventory = Some(catalog);
+            manager.layout(window);
+            assert!(manager.browser.visible.is_empty());
+            assert!(manager.selected().is_none());
+            assert_eq!(manager.browser.brand.as_deref(), Some("razer"));
+            assert_eq!(SendMessageW(manager.child(BRAND), CB_GETCURSEL, 0, 0), 2);
+
+            manager.inventory.as_mut().unwrap().packages.push(razer);
             manager.layout(window);
             assert_eq!(manager.browser.brands, ["MCHOSE", "Razer"]);
+            assert_eq!(manager.browser.brand.as_deref(), Some("Razer"));
+            assert_eq!(manager.browser.visible, [2]);
+            assert!(manager.checked.is_empty());
+
+            let (_sender, receiver) = mpsc::channel();
+            manager.pending = Some(receiver);
+            manager.availability();
+            assert_ne!(IsWindowEnabled(manager.child(BRAND)), 0);
+            SendMessageW(manager.child(BRAND), CB_SETCURSEL, 0, 0);
+            manager.command(window, BRAND, CBN_SELCHANGE);
+            manager.pending = None;
+            manager.layout(window);
+            assert_eq!(manager.browser.brand, None);
+            assert_eq!(manager.browser.visible, [0, 1, 2]);
+
             SendMessageW(manager.child(BRAND), CB_SETCURSEL, 1, 0);
             manager.command(window, BRAND, CBN_SELCHANGE);
             manager.command(window, SELECT_DETECTED, 0);

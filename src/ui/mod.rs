@@ -19,7 +19,11 @@ use windows_sys::Win32::{
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
+mod brand;
 pub(crate) mod fx;
+mod workspace;
+use brand::Brand;
+use workspace::Tool;
 mod navigation;
 mod onboard;
 mod pages;
@@ -50,6 +54,8 @@ fn widget_key(command: Command) -> u64 {
         Command::Prefs => 0x103,
         Command::Drivers => 0x104,
         Command::MHub => 0x105,
+        Command::Brand(Brand::Razer) => 0x106,
+        Command::Brand(Brand::Logitech) => 0x107,
         Command::Battery(model) => 0x4000 + model as u64,
         Command::Device(model) => 0x1000 + model as u64,
         Command::System(model) => 0x8000 + model as u64,
@@ -87,6 +93,8 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 enum Page {
     Home,
     Drivers,
+    Brand(Brand),
+    Tool(usize, Tool),
     MHub,
     Onboard(usize),
     Battery(usize),
@@ -122,6 +130,10 @@ enum Command {
     PresetLibrary,
     MHub,
     HubMenu,
+    SwitchHubDevice,
+    Brand(Brand),
+    BrandPlugins(Brand),
+    Back,
     OpenBoard(usize),
     Board(onboard::Op),
     Evidence,
@@ -155,10 +167,12 @@ struct App {
     eq_drag: Option<(Tuning, R)>,
     home_page: usize,
     drivers_page: usize,
+    brand_page: usize,
     controls: Vec<Button>,
     pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
     hub_open: bool,
+    hub_source: Page,
     hub_requested: bool,
     board: onboard::Board,
     board_requested: bool,
@@ -246,10 +260,12 @@ pub fn run(hidden: bool, battery: bool) {
             eq_drag: None,
             home_page: 0,
             drivers_page: 0,
+            brand_page: 0,
             controls: vec![],
             pending: None,
             modal_open: false,
             hub_open: false,
+            hub_source: Page::Drivers,
             hub_requested: false,
             board: onboard::Board::default(),
             board_requested: false,
@@ -459,7 +475,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 crate::plugin_manager::set_web_driver_devices(Vec::new());
                 let error = crate::mhub::take_error();
                 if a.page == Page::MHub {
-                    a.navigate(hwnd, Page::Drivers);
+                    a.navigate(hwnd, a.hub_source);
                 }
                 a.begin(hwnd, None);
                 if let Some(error) = error {
@@ -578,11 +594,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_KEYDOWN if w == VK_ESCAPE as usize => {
             if !a.modal_open {
-                let parent = if matches!(a.page, Page::Device(_) | Page::MHub | Page::Onboard(_)) {
-                    Page::Drivers
-                } else {
-                    Page::Home
-                };
+                let parent = a.parent_page();
                 a.navigate(hwnd, parent);
             }
             0
@@ -597,6 +609,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_QUERYENDSESSION => i32::from(
             !a.modal_open
+                && !a.tool_busy()
                 && !a.board.saving
                 && a.inflight.is_none()
                 && a.profile_notice.is_none()
@@ -613,12 +626,15 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 a.set_status("待保存的设置将在后台完成", false);
             }
             if a.page == Page::MHub {
-                a.navigate(hwnd, Page::Drivers);
+                a.navigate(hwnd, a.hub_source);
             }
             ShowWindow(hwnd, SW_HIDE);
             0
         }
         WM_DESTROY => {
+            if let Page::Tool(_, tool) = a.page {
+                tool.close();
+            }
             crate::mhub::close();
             KillTimer(hwnd, 1);
             KillTimer(hwnd, 2);
@@ -746,13 +762,34 @@ impl App {
             );
         }
         match self.page {
+            Page::Tool(_, tool) => {
+                self.add(
+                    hwnd,
+                    "‹  设备设置",
+                    R::new(SIDEBAR + 16, 16, 115, 34),
+                    GHOST,
+                    Command::Back,
+                );
+                tool.resize(self.hub_bounds(hwnd));
+            }
             Page::MHub => {
                 self.add(
                     hwnd,
-                    "‹  设备调节",
+                    "切换设备",
+                    R::new(w - 350, 16, 94, 34),
+                    GHOST,
+                    Command::SwitchHubDevice,
+                );
+                self.add(
+                    hwnd,
+                    if matches!(self.hub_source, Page::Battery(_)) {
+                        "‹  电量详情"
+                    } else {
+                        "‹  设备调节"
+                    },
                     R::new(SIDEBAR + 16, 16, 110, 34),
                     GHOST,
-                    Command::Drivers,
+                    Command::Back,
                 );
                 self.add(
                     hwnd,
@@ -766,28 +803,40 @@ impl App {
             Page::Onboard(m) => {
                 self.add(
                     hwnd,
-                    "‹  设备调节",
+                    if self.parent_page() == Page::Brand(Brand::Logitech) {
+                        "‹  罗技"
+                    } else {
+                        "‹  设备设置"
+                    },
                     R::new(SIDEBAR + 16, 16, 110, 34),
                     GHOST,
-                    Command::Drivers,
+                    Command::Back,
                 );
                 self.board_layout(hwnd, m);
             }
-            Page::Home | Page::Drivers => {
+            Page::Home | Page::Drivers | Page::Brand(_) => {
                 let power = self.page == Page::Home;
-                let entries = if power {
-                    self.battery_entries()
-                } else {
-                    self.driver_entries()
-                };
+                let entries = self.grid_entries();
                 let pages = entries.len().div_ceil(4).max(1);
-                let index = if power {
-                    &mut self.home_page
-                } else {
-                    &mut self.drivers_page
-                };
+                let index = self.grid_page_mut();
                 *index = (*index).min(pages - 1);
                 let page = *index;
+                if let Page::Brand(brand) = self.page {
+                    self.add(
+                        hwnd,
+                        "‹  设备调节",
+                        R::new(SIDEBAR + 16, 16, 110, 34),
+                        GHOST,
+                        Command::Back,
+                    );
+                    self.add(
+                        hwnd,
+                        "选择设备插件",
+                        R::new(w - 202, 86, 166, 38),
+                        CHIP,
+                        Command::BrandPlugins(brand),
+                    );
+                }
                 if power {
                     self.add(
                         hwnd,
@@ -814,6 +863,7 @@ impl App {
                         Command::Battery(m) | Command::Device(m) => REGISTRY[m].name.to_owned(),
                         Command::System(i) => self.snapshot.system_devices[i].name.clone(),
                         Command::MHub => "迈从 M HUB".into(),
+                        Command::Brand(b) => format!("{}驱动中心", b.name()),
                         _ => unreachable!(),
                     };
                     let x = SIDEBAR + 24 + (slot as i32 % 2) * (cw + 18);
@@ -860,6 +910,9 @@ impl App {
                         );
                     }
                     let mut tabs = Vec::new();
+                    if let Some(brand) = Brand::for_device(spec) {
+                        tabs.push((brand.back_label(), Command::Back));
+                    }
                     if spec.supports("onboard-profiles") {
                         tabs.push(("板载配置", Command::OpenBoard(m)));
                     }
@@ -1125,6 +1178,23 @@ impl App {
                 );
             }
             Page::Battery(_) | Page::System(_) => {
+                if let Page::Battery(model) = self.page {
+                    let spec = &REGISTRY[model];
+                    if spec.mchose() || navigation::has_native_controls(spec) {
+                        let label = if spec.mchose() {
+                            "打开迈从 M HUB"
+                        } else {
+                            "打开设备设置"
+                        };
+                        self.add(
+                            hwnd,
+                            label,
+                            R::new(w - 342, h - 61, 176, 39),
+                            GHOST,
+                            Command::Device(model),
+                        );
+                    }
+                }
                 self.add(
                     hwnd,
                     "刷新电量",
@@ -1235,6 +1305,19 @@ impl App {
         }
     }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
+        if self.page != page {
+            if let Page::Tool(_, tool) = self.page {
+                if !tool.close() {
+                    self.set_status("当前设备操作完成后即可离开", false);
+                    self.render(hwnd);
+                    return;
+                }
+            }
+            if matches!(page, Page::Brand(b) if !matches!(self.page, Page::Device(m) | Page::Onboard(m) if Brand::for_device(&REGISTRY[m]) == Some(b)))
+            {
+                self.brand_page = 0;
+            }
+        }
         self.hub_requested = false;
         if self.page == Page::MHub && page != Page::MHub {
             crate::mhub::close();
@@ -1389,6 +1472,7 @@ impl App {
         );
         match crate::mhub::open(hwnd, self.hub_bounds(hwnd)) {
             Ok(()) => {
+                self.hub_source = self.page;
                 self.hub_open = true;
                 self.pointer_sample = None;
                 for state in &mut self.snapshot.devices {
@@ -1479,10 +1563,14 @@ impl App {
                 self.layout(hwnd);
             }
             Command::Configuration
+            | Command::BrandPlugins(_)
             | Command::CoreUpdate
             | Command::DriverManager
             | Command::AddDevice => {
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
+                    return;
+                }
+                if self.tool_busy() {
                     return;
                 }
                 self.modal_open = true;
@@ -1496,6 +1584,7 @@ impl App {
                         crate::configuration_ui::open(hwnd, model);
                         crate::plugin_ui::StoreExit::Close
                     }
+                    Command::BrandPlugins(b) => crate::plugin_ui::open_for_brand(hwnd, b.vendor()),
                     Command::CoreUpdate => crate::update_ui::open(hwnd),
                     _ => crate::plugin_ui::open(hwnd),
                 };
@@ -1512,6 +1601,14 @@ impl App {
                 self.begin(hwnd, None);
             }
             Command::MHub => self.open_mhub(hwnd),
+            Command::SwitchHubDevice => {
+                if let Err(e) = crate::mhub::choose_device() {
+                    self.set_status(&e, true);
+                    self.render(hwnd);
+                }
+            }
+            Command::Back => self.navigate(hwnd, self.parent_page()),
+            Command::Brand(b) => self.navigate(hwnd, Page::Brand(b)),
             Command::HubMenu => {
                 if let Some(b) = self.controls.iter().find(|b| b.command == Command::HubMenu) {
                     let mut rect: RECT = zeroed();
@@ -1537,6 +1634,10 @@ impl App {
                         && !self.hub_controls(model)
                         && pointer_editor::available(&REGISTRY[model])
                     {
+                        if Brand::for_device(&REGISTRY[model]) == Some(Brand::Razer) {
+                            self.open_tool(hwnd, model, Tool::Pointer);
+                            return;
+                        }
                         self.modal_open = true;
                         self.pointer_sample = pointer_editor::open(hwnd, &REGISTRY[model])
                             .map(|sample| (model, sample));
@@ -1554,6 +1655,17 @@ impl App {
                     return;
                 }
                 if let Page::Device(model) = self.page {
+                    if Brand::for_device(&REGISTRY[model]) == Some(Brand::Razer) {
+                        let tool = match command {
+                            Command::ControlsEditor => Some(Tool::Bindings),
+                            Command::GenericLighting => Some(Tool::Lighting),
+                            _ => None,
+                        };
+                        if let Some(tool) = tool {
+                            self.open_tool(hwnd, model, tool);
+                            return;
+                        }
+                    }
                     self.modal_open = true;
                     match command {
                         Command::ControlsEditor => crate::controls_ui::open(hwnd, model),
@@ -1591,11 +1703,7 @@ impl App {
                 self.layout(hwnd);
             }
             Command::HomePage(delta) => {
-                let page = if self.page == Page::Drivers {
-                    &mut self.drivers_page
-                } else {
-                    &mut self.home_page
-                };
+                let page = self.grid_page_mut();
                 *page = page.saturating_add_signed(delta as isize);
                 self.layout(hwnd);
             }
@@ -1691,7 +1799,8 @@ impl App {
         if self.modal_open {
             return;
         }
-        if self.board.saving
+        if self.tool_busy()
+            || self.board.saving
             || self.inflight.is_some()
             || self.profile_notice.is_some()
             || !self.queued.is_empty()
@@ -1703,7 +1812,7 @@ impl App {
     }
     unsafe fn poll_detail_on_entry(&mut self, hwnd: HWND) {
         if self.pending.is_none() && self.queued.is_empty() {
-            if self.hub_requested && self.page == Page::Drivers {
+            if self.hub_requested {
                 self.open_mhub(hwnd);
             } else if self.board_requested {
                 if let Page::Onboard(m) = self.page {
@@ -1764,6 +1873,11 @@ impl App {
         let snapshot = self.snapshot.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
+        let editing = if let Page::Tool(m, _) = self.page {
+            Some(m)
+        } else {
+            None
+        };
         self.inflight = action;
         self.profile_notice = None;
         self.set_status(
@@ -1782,7 +1896,7 @@ impl App {
             let result = if let Some(action) = action {
                 backend::refresh(&snapshot, Some(action))
             } else {
-                backend::refresh_progress(&snapshot, |model, state| {
+                backend::refresh_progress_except(&snapshot, editing, |model, state| {
                     if tx.send(WorkUpdate::Device(model, state)).is_ok() {
                         PostMessageW(window as HWND, DONE, 0, 0);
                     }
@@ -2201,6 +2315,7 @@ impl App {
                         && !self.modal_open
                 }
                 Command::ConnectAudio
+                | Command::BrandPlugins(_)
                 | Command::DriverManager
                 | Command::AddDevice
                 | Command::Configuration
@@ -2224,10 +2339,11 @@ impl App {
                     }
                 }
                 Command::HomePage(delta) => {
-                    let (page, count) = if self.page == Page::Drivers {
-                        (self.drivers_page, self.driver_entries().len())
-                    } else {
-                        (self.home_page, self.battery_entries().len())
+                    let count = self.grid_entries().len();
+                    let page = match self.page {
+                        Page::Drivers => self.drivers_page,
+                        Page::Brand(_) => self.brand_page,
+                        _ => self.home_page,
                     };
                     if delta < 0 {
                         page > 0
@@ -2262,9 +2378,18 @@ impl App {
             match self.page {
                 Page::Home => self.home(&c),
                 Page::Drivers => self.drivers(&c),
+                Page::Brand(b) => self.brand_heading(&c, b),
+                Page::Tool(m, tool) => c.text(
+                    &format!("{}  ·  {}", REGISTRY[m].name, tool.title()),
+                    R::new(SIDEBAR + 146, 16, self.width - SIDEBAR - 260, 34),
+                    17,
+                    600,
+                    TEXT,
+                    DT_LEFT,
+                ),
                 Page::MHub => c.text(
                     "迈从 M HUB",
-                    R::new(SIDEBAR + 144, 16, 240, 34),
+                    R::new(SIDEBAR + 144, 16, self.width - SIDEBAR - 510, 34),
                     17,
                     600,
                     TEXT,

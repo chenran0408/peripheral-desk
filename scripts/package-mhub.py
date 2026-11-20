@@ -92,6 +92,25 @@ def localize_magnetic_html(html, refs):
     return localize_cdn(html, refs).replace(frame, f":T{new_size:x},".encode(), 1)
 
 
+def integrate_device_connection(module, hub):
+    # Attach to the published home component's actual scan lifecycle and card
+    # action. The user can still use the complete vendor gallery and editors.
+    source = module.read_text(encoding="utf-8")
+    binding = (hub / "device-binding.js").read_text(encoding="utf-8-sig").strip()
+    factory = (hub / "device-connection.js").read_text(encoding="utf-8-sig")
+    anchors = (
+        ("cl=ref(0);watch(()=>Ga.chargeStatus", binding + ",cl=ref(0);watch(()=>Ga.chargeStatus"),
+        ("const ko=ir=sa.beginLegacyRefresh();Ja.abort()",
+         "const ko=ir=sa.beginLegacyRefresh();pdConnection.begin(ko);Ja.abort()"),
+        ("markListInit({success:_o})", "pdConnection.finish(ko,_o),markListInit({success:_o})"),
+    )
+    for before, after in anchors:
+        if source.count(before) != 1:
+            raise ValueError("M HUB device connection anchor changed: " + before[:80])
+        source = source.replace(before, after, 1)
+    module.write_text(source + "\n" + factory, encoding="utf-8", newline="\n")
+
+
 def fork_site(originals, directory, rustc):
     """Generate project edits from the published sources in a separate build tree."""
     site = directory / "site"
@@ -111,6 +130,7 @@ def fork_site(originals, directory, rustc):
     subprocess.run([rustc, "--edition=2021", str(PROJECT / "src/mhub/fixes/patch-site.rs"), "-o", str(tool)], check=True)
     subprocess.run([str(tool), str(site)], check=True)
     hub = PROJECT / "src/mhub/hub"
+    integrate_device_connection(site / "assets/main-DIt5vAcV.js", hub)
     head = (hub / "head.html").read_bytes().strip()
     index = site / "index.html"
     html = index.read_bytes()
@@ -140,7 +160,7 @@ def fork_site(originals, directory, rustc):
     cache_key = "cz@keyboardConfig@v2@https://cdn.mchose.com.cn/configCenter"
     script = f"localStorage.setItem({json.dumps(cache_key)}, {json.dumps(json.dumps(models, ensure_ascii=False, separators=(',', ':')))});\n"
     (assets / "magnetic-models.js").write_text(script, encoding="utf-8", newline="\n")
-    for name in ["desk.css", "desk.js", "magnetic.css", "magnetic.js"]:
+    for name in ["desk.css", "desk.js", "switch-device.js", "magnetic.css", "magnetic.js"]:
         shutil.copyfile(hub / name, assets / name)
     built = {}
     for child in site.iterdir():

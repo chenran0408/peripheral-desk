@@ -4,6 +4,10 @@ use crate::{devices::DeviceSpec, plugin_manager};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+#[path = "razer_pointer.rs"]
+mod embedded;
+pub(super) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
+
 const FIELDS: usize = 101;
 const INPUT: usize = 102;
 const CHOICES: usize = 103;
@@ -217,8 +221,77 @@ struct Editor {
     status: String,
     error: bool,
     close_after: bool,
+    embedded: bool,
+    writing: bool,
+}
+struct Frame {
+    w: i32,
+    h: i32,
+    panel_x: i32,
+    content_h: i32,
+}
+impl Frame {
+    fn new(w: i32, h: i32) -> Self {
+        Self {
+            w,
+            h,
+            panel_x: 42 + (w * 32 / 100).clamp(168, 320),
+            content_h: (h - 250).max(212),
+        }
+    }
+    fn control(&self, id: usize) -> R {
+        match id {
+            FIELDS => R::new(24, 120, self.panel_x - 42, self.content_h),
+            INPUT | CHOICES => R::new(
+                self.panel_x + 22,
+                250,
+                self.w - self.panel_x - 70,
+                if id == INPUT { 35 } else { 240 },
+            ),
+            RELOAD => R::new(24, self.h - 56, 108, 36),
+            CLOSE => R::new(self.w - 256, self.h - 56, 96, 36),
+            APPLY => R::new(self.w - 148, self.h - 56, 124, 36),
+            _ => unreachable!(),
+        }
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteObject(self.font);
+            DeleteObject(self.brush);
+        }
+    }
 }
 impl Editor {
+    unsafe fn frame(&self, hwnd: HWND) -> Frame {
+        let mut bounds = RECT::default();
+        GetClientRect(hwnd, &mut bounds);
+        Frame::new(
+            bounds.right * 96 / self.dpi as i32,
+            bounds.bottom * 96 / self.dpi as i32,
+        )
+    }
+    unsafe fn resize_controls(&self, hwnd: HWND) {
+        let frame = self.frame(hwnd);
+        for id in [FIELDS, INPUT, CHOICES, RELOAD, CLOSE, APPLY] {
+            let control = GetDlgItem(hwnd, id as i32);
+            if !control.is_null() {
+                let r = frame.control(id);
+                SetWindowPos(
+                    control,
+                    null_mut(),
+                    self.px(r.x),
+                    self.px(r.y),
+                    self.px(r.w),
+                    self.px(r.h),
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                );
+            }
+        }
+        InvalidateRect(hwnd, null(), 0);
+    }
     fn entry(&self) -> Option<&Entry> {
         self.profile.as_ref()?.entries.get(self.selected)
     }
@@ -250,6 +323,7 @@ impl Editor {
             return;
         }
         let writing = request.is_some();
+        self.writing = writing;
         let spec = self.spec;
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
@@ -325,7 +399,7 @@ impl Editor {
                 })
             })();
             if tx.send(work).is_ok() {
-                PostMessageW(dest as HWND, RESULT, usize::from(writing), 0);
+                PostMessageW(dest as HWND, RESULT, 0, 0);
             }
         });
     }
@@ -425,13 +499,17 @@ impl Editor {
             self.begin(hwnd, Some(entry.setting.request(profile.index, value)));
         }
     }
-    unsafe fn finish(&mut self, hwnd: HWND, written: bool) {
-        let Some(rx) = self.pending.take() else {
+    unsafe fn finish(&mut self, hwnd: HWND) {
+        let Some(rx) = self.pending.as_ref() else {
             return;
         };
-        let result = rx
-            .try_recv()
-            .unwrap_or_else(|_| Err("驱动任务已中断。".into()));
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err("驱动任务已中断。".into()),
+        };
+        self.pending = None;
+        let written = std::mem::take(&mut self.writing);
         let previous = self.entry().map(|entry| entry.setting.clone());
         self.error = result.is_err();
         self.profile = match result {
@@ -471,7 +549,7 @@ impl Editor {
         }
         self.select(hwnd);
         if self.close_after {
-            DestroyWindow(hwnd);
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
     }
     unsafe fn paint(&self, hwnd: HWND) {
@@ -479,7 +557,10 @@ impl Editor {
         let dc = BeginPaint(hwnd, &mut ps);
         {
             let c = Canvas::new(dc, self.dpi);
-            c.rect(R::new(0, 0, 720, 482), BG);
+            let f = self.frame(hwnd);
+            let field_x = f.panel_x + 22;
+            let field_width = f.w - field_x - 46;
+            c.rect(R::new(0, 0, f.w, f.h), BG);
             c.text(
                 "指针与性能",
                 R::new(24, 14, 400, 39),
@@ -499,7 +580,7 @@ impl Editor {
             if let Some(profile) = &self.profile {
                 c.text(
                     &format!("板载配置 {}", u16::from(profile.index) + 1),
-                    R::new(506, 38, 188, 28),
+                    R::new(f.w - 214, 38, 188, 28),
                     13,
                     500,
                     MUTED,
@@ -507,11 +588,16 @@ impl Editor {
                 );
             }
             c.text("设备参数", R::new(24, 90, 200, 26), 14, 600, TEXT, DT_LEFT);
-            c.round(R::new(272, 120, 424, 232), 12, PANEL, Some(BORDER));
+            c.round(
+                R::new(f.panel_x, 120, f.w - f.panel_x - 24, f.content_h),
+                12,
+                PANEL,
+                Some(BORDER),
+            );
             if let Some(entry) = self.entry() {
                 c.text(
                     &entry.title,
-                    R::new(294, 137, 380, 33),
+                    R::new(field_x, 137, field_width, 33),
                     19,
                     600,
                     TEXT,
@@ -519,20 +605,34 @@ impl Editor {
                 );
                 c.text(
                     &format!("设备读值   {}", entry.display_value()),
-                    R::new(294, 179, 378, 27),
+                    R::new(field_x, 179, field_width, 27),
                     14,
                     400,
                     MUTED,
                     DT_LEFT,
                 );
-                c.text("设置为", R::new(294, 220, 380, 22), 13, 500, TEXT, DT_LEFT);
+                c.text(
+                    "设置为",
+                    R::new(field_x, 220, field_width, 22),
+                    13,
+                    500,
+                    TEXT,
+                    DT_LEFT,
+                );
                 let hint = match &entry.input {
                     InputKind::Number { min, max, step } => {
                         format!("{min}–{max} {}   ·   步长 {step}", entry.unit)
                     }
                     InputKind::Choices(_) | InputKind::Name(_) => String::new(),
                 };
-                c.text(&hint, R::new(294, 301, 378, 27), 12, 400, MUTED, DT_LEFT);
+                c.text(
+                    &hint,
+                    R::new(field_x, 301, field_width, 27),
+                    12,
+                    400,
+                    MUTED,
+                    DT_LEFT,
+                );
             } else {
                 c.text(
                     if self.pending.is_some() {
@@ -540,7 +640,7 @@ impl Editor {
                     } else {
                         "暂无可编辑参数"
                     },
-                    R::new(294, 165, 380, 55),
+                    R::new(field_x, 165, field_width, 55),
                     19,
                     500,
                     MUTED,
@@ -549,7 +649,7 @@ impl Editor {
             }
             c.text(
                 &self.status,
-                R::new(25, 365, 668, 57),
+                R::new(25, f.h - 117, f.w - 50, 57),
                 13,
                 400,
                 if self.error { RED } else { MUTED },
@@ -569,10 +669,36 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         );
         return DefWindowProcW(hwnd, msg, w, l);
     }
+    if msg == WM_NCDESTROY {
+        let data = SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        embedded::destroyed(hwnd, data as *mut Editor);
+        return DefWindowProcW(hwnd, msg, w, l);
+    }
     let Some(editor) = (GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Editor).as_mut() else {
         return DefWindowProcW(hwnd, msg, w, l);
     };
     match msg {
+        WM_SIZE => {
+            editor.resize_controls(hwnd);
+            0
+        }
+        WM_DPICHANGED_AFTERPARENT if editor.embedded => {
+            let next = GetDpiForWindow(hwnd).max(96);
+            if next != editor.dpi {
+                let old = editor.font;
+                editor.dpi = next;
+                editor.font = font(next);
+                for id in [FIELDS, INPUT, CHOICES, RELOAD, APPLY] {
+                    let child = GetDlgItem(hwnd, id as i32);
+                    if !child.is_null() {
+                        SendMessageW(child, WM_SETFONT, editor.font as usize, 1);
+                    }
+                }
+                DeleteObject(old);
+                editor.resize_controls(hwnd);
+            }
+            0
+        }
         WM_PAINT => {
             editor.paint(hwnd);
             0
@@ -649,10 +775,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             0
         }
         RESULT => {
-            editor.finish(hwnd, w != 0);
+            editor.finish(hwnd);
             0
         }
         WM_CLOSE => {
+            if editor.embedded {
+                // The main window owns navigation and the child lifetime.
+                return 0;
+            }
             if editor.pending.is_some() {
                 editor.close_after = true;
                 editor.status = "当前设备操作完成后将关闭。".into();
@@ -666,19 +796,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
     }
 }
 
-pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<PointerSample>> {
-    let dpi = GetDpiForWindow(owner).max(96);
-    let instance = GetModuleHandleW(null());
-    let class = wide("PeripheralDeskPointerEditor");
-    RegisterClassExW(&WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(procedure),
-        hInstance: instance,
-        hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-        lpszClassName: class.as_ptr(),
-        ..zeroed()
-    });
-    let font = CreateFontW(
+unsafe fn font(dpi: u32) -> HFONT {
+    CreateFontW(
         -((14 * dpi / 96) as i32),
         0,
         0,
@@ -693,7 +812,26 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
         CLEARTYPE_QUALITY as u32,
         DEFAULT_PITCH as u32,
         wide("Microsoft YaHei UI").as_ptr(),
-    );
+    )
+}
+
+unsafe fn create(
+    owner: HWND,
+    spec: &'static DeviceSpec,
+    embedded_bounds: Option<RECT>,
+) -> Result<(HWND, Box<Editor>), String> {
+    let dpi = GetDpiForWindow(owner).max(96);
+    let instance = GetModuleHandleW(null());
+    let class = wide("PeripheralDeskPointerEditor");
+    RegisterClassExW(&WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(procedure),
+        hInstance: instance,
+        hCursor: LoadCursorW(null_mut(), IDC_ARROW),
+        lpszClassName: class.as_ptr(),
+        ..zeroed()
+    });
+    let font = font(dpi);
     let brush = CreateSolidBrush(0x00241c1c);
     let mut editor = Box::new(Editor {
         spec,
@@ -707,26 +845,47 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
         status: String::new(),
         error: false,
         close_after: false,
+        writing: false,
+        embedded: embedded_bounds.is_some(),
     });
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-    let mut bounds = RECT {
-        left: 0,
-        top: 0,
-        right: editor.px(720),
-        bottom: editor.px(482),
+    let (style, ex_style, x, y, width, height) = if let Some(r) = embedded_bounds {
+        (
+            WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            WS_EX_CONTROLPARENT,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
+        )
+    } else {
+        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: editor.px(720),
+            bottom: editor.px(482),
+        };
+        AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
+        let mut owner_rect = zeroed();
+        GetWindowRect(owner, &mut owner_rect);
+        (
+            style,
+            WS_EX_DLGMODALFRAME,
+            owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
+            owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),
+            width,
+            height,
+        )
     };
-    AdjustWindowRectExForDpi(&mut bounds, style, 0, WS_EX_DLGMODALFRAME, dpi);
-    let width = bounds.right - bounds.left;
-    let height = bounds.bottom - bounds.top;
-    let mut owner_rect = zeroed();
-    GetWindowRect(owner, &mut owner_rect);
     let hwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        ex_style,
         class.as_ptr(),
         wide(&format!("{} · 指针与性能", spec.name)).as_ptr(),
         style,
-        owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
-        owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),
+        x,
+        y,
         width,
         height,
         owner,
@@ -735,19 +894,22 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
         (&mut *editor as *mut Editor).cast(),
     );
     if hwnd.is_null() {
-        DeleteObject(font);
-        DeleteObject(brush);
-        message("无法打开指针编辑器");
-        return None;
+        return Err(format!(
+            "无法打开指针编辑器：{}",
+            std::io::Error::last_os_error()
+        ));
     }
-    let dark = 1i32;
-    DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
+    if !editor.embedded {
+        let dark = 1i32;
+        DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
+    }
+    let frame = editor.frame(hwnd);
     editor.control(
         hwnd,
         FIELDS,
         "LISTBOX",
         "设备参数",
-        R::new(24, 120, 230, 232),
+        frame.control(FIELDS),
         LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32 | WS_VSCROLL,
     );
     editor.control(
@@ -755,7 +917,7 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
         INPUT,
         "EDIT",
         "",
-        R::new(295, 250, 372, 35),
+        frame.control(INPUT),
         ES_AUTOHSCROLL as u32,
     );
     editor.control(
@@ -763,24 +925,33 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
         CHOICES,
         "COMBOBOX",
         "",
-        R::new(295, 250, 372, 240),
+        frame.control(CHOICES),
         CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
     );
-    for (id, title, x, width) in [
-        (RELOAD, "重新读取", 24, 108),
-        (CLOSE, "关闭", 464, 96),
-        (APPLY, "应用到设备", 572, 124),
-    ] {
-        editor.control(
-            hwnd,
-            id,
-            "BUTTON",
-            title,
-            R::new(x, 426, width, 36),
-            BS_OWNERDRAW as u32,
-        );
+    for (id, title) in [(RELOAD, "重新读取"), (CLOSE, "关闭"), (APPLY, "应用到设备")] {
+        if id != CLOSE || !editor.embedded {
+            editor.control(
+                hwnd,
+                id,
+                "BUTTON",
+                title,
+                frame.control(id),
+                BS_OWNERDRAW as u32,
+            );
+        }
     }
     editor.select(hwnd);
+    Ok((hwnd, editor))
+}
+
+pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<PointerSample>> {
+    let (hwnd, mut editor) = match create(owner, spec, None) {
+        Ok(window) => window,
+        Err(e) => {
+            message(&e);
+            return None;
+        }
+    };
     EnableWindow(owner, 0);
     ShowWindow(hwnd, SW_SHOW);
     SetActiveWindow(hwnd);
@@ -807,16 +978,29 @@ pub(super) unsafe fn open(owner: HWND, spec: &'static DeviceSpec) -> Option<Box<
     }
     EnableWindow(owner, 1);
     SetActiveWindow(owner);
-    DeleteObject(font);
-    DeleteObject(brush);
     if let Some(code) = quit {
         PostQuitMessage(code);
     }
-    editor.latest
+    editor.latest.take()
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn editor_layout_uses_the_embedded_viewport_for_controls_and_footer() {
+        let modal = Frame::new(720, 482);
+        let page = Frame::new(980, 680);
+        assert!(page.control(FIELDS).h > modal.control(FIELDS).h);
+        assert!(page.control(INPUT).w > modal.control(INPUT).w);
+        for frame in [modal, page] {
+            let list = frame.control(FIELDS);
+            let apply = frame.control(APPLY);
+            assert!(list.x + list.w < frame.control(INPUT).x);
+            assert_eq!(apply.x + apply.w, frame.w - 24);
+            assert_eq!(apply.y + apply.h, frame.h - 20);
+        }
+    }
+
     #[test]
     fn editor_targets_reported_profile_axis_stage_and_named_controls() {
         let data = json!({"key":"mouse","fresh":true,"pointer_profile":2,"dpi_min":50,"dpi_max":26000,"dpi_step":50,

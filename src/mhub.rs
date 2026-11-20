@@ -97,6 +97,25 @@ pub fn parent_moved() {
     }
 }
 
+pub fn choose_device() -> Result<(), String> {
+    let controller = CONTROLLER
+        .with_borrow(Clone::clone)
+        .ok_or("驱动中心正在打开")?;
+    unsafe {
+        let web = controller.CoreWebView2().map_err(|e| e.to_string())?;
+        let mut page = PWSTR::null();
+        web.Source(&mut page).map_err(|e| e.to_string())?;
+        if !take_pwstr(page).starts_with(workspace::LOCAL_SITE) {
+            return Err("本地驱动页打开后即可切换设备".into());
+        }
+        web.ExecuteScript(
+            PCWSTR(wide("window.PeripheralDeskHub?.chooseDevice()").as_ptr()),
+            None,
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
 pub fn show_menu(x: i32, y: i32) {
     let hwnd = host_window();
     if !hwnd.is_null() {

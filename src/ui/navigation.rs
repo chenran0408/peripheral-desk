@@ -1,4 +1,4 @@
-use super::{App, Command, REGISTRY};
+use super::{brand::Brand, App, Command, REGISTRY};
 use crate::devices::DeviceSpec;
 
 impl App {
@@ -11,6 +11,10 @@ impl App {
 
     pub(super) fn driver_entries(&self) -> Vec<Command> {
         driver_entries(&REGISTRY)
+    }
+
+    pub(super) fn brand_devices(&self, brand: Brand) -> Vec<usize> {
+        brand_devices(&REGISTRY, brand)
     }
 }
 
@@ -41,10 +45,26 @@ pub(super) fn has_native_controls(spec: &DeviceSpec) -> bool {
 }
 
 fn driver_entries(registry: &[DeviceSpec]) -> Vec<Command> {
-    std::iter::once(Command::MHub)
-        .chain(registry.iter().enumerate().filter_map(|(index, spec)| {
-            has_native_controls(spec).then_some(Command::Device(index))
-        }))
+    [
+        Command::MHub,
+        Command::Brand(Brand::Razer),
+        Command::Brand(Brand::Logitech),
+    ]
+    .into_iter()
+    .chain(registry.iter().enumerate().filter_map(|(index, spec)| {
+        (has_native_controls(spec) && Brand::for_device(spec).is_none())
+            .then_some(Command::Device(index))
+    }))
+    .collect()
+}
+
+fn brand_devices(registry: &[DeviceSpec], brand: Brand) -> Vec<usize> {
+    registry
+        .iter()
+        .enumerate()
+        .filter_map(|(index, spec)| {
+            (Brand::for_device(spec) == Some(brand) && has_native_controls(spec)).then_some(index)
+        })
         .collect()
 }
 
@@ -68,20 +88,24 @@ mod tests {
     }
 
     #[test]
-    fn installed_mchose_models_share_one_hub_and_read_only_models_have_no_editor() {
+    fn brand_workspaces_are_unique_and_only_list_models_with_controls() {
         let specs: Vec<_> = [
             ("mchose-a5-ultra", "MCHOSE", "mouse"),
             ("mchose-g75-pro", "迈从", "keyboard"),
             ("readonly-mouse", "Other", "mouse"),
             ("hecate-g2-pro", "HECATE", "headset"),
             ("adjustable-mouse", "Other", "mouse"),
+            ("adjustable-razer", "RAZER", "mouse"),
+            ("battery-razer", "Razer", "mouse"),
+            ("adjustable-logitech", "Logitech", "mouse"),
+            ("logitech-astro", "ASTRO", "headset"),
         ]
         .into_iter()
         .map(|(key, brand, kind)| {
             let mut value = serde_json::json!({
                 "key":key, "name":key, "brand":brand, "kind":kind, "matches":[{"vid":1,"pid":2}]
             });
-            if key == "mchose-a5-ultra" || key == "adjustable-mouse" {
+            if key == "mchose-a5-ultra" || key.starts_with("adjustable-") {
                 value["dpi_range"] = serde_json::json!([100, 20000]);
             }
             serde_json::from_value::<DeviceManifest>(value)
@@ -90,10 +114,24 @@ mod tests {
                 .unwrap()
         })
         .collect();
-        assert_eq!(driver_entries(&[]), [Command::MHub]);
+        let hubs = [
+            Command::MHub,
+            Command::Brand(Brand::Razer),
+            Command::Brand(Brand::Logitech),
+        ];
+        assert_eq!(driver_entries(&[]), hubs);
+        assert_eq!(brand_devices(&specs, Brand::Razer), [5]);
+        assert_eq!(brand_devices(&specs, Brand::Logitech), [7]);
+        assert_eq!(Brand::for_device(&specs[8]), None);
         assert_eq!(
             driver_entries(&specs),
-            [Command::MHub, Command::Device(3), Command::Device(4)]
+            [
+                hubs[0],
+                hubs[1],
+                hubs[2],
+                Command::Device(3),
+                Command::Device(4)
+            ]
         );
     }
 }

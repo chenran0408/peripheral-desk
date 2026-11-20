@@ -368,8 +368,32 @@ impl App {
         self.page_heading(
             c,
             "设备调节",
-            "迈从设备使用内置 M HUB，其他设备选择对应的型号。",
+            "选择品牌进入驱动中心，或打开已安装的设备设置。",
         );
+    }
+
+    pub(super) unsafe fn brand_heading(&self, c: &Canvas, brand: super::Brand) {
+        self.page_heading(c, &format!("{}驱动中心", brand.name()), brand.description());
+        if self.brand_devices(brand).is_empty() {
+            let panel = R::new(SIDEBAR + 24, HOME_CONTENT_Y, self.width - SIDEBAR - 52, 152);
+            c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
+            c.text(
+                "还没有可调节的设备",
+                R::new(panel.x + 24, panel.y + 28, panel.w - 48, 40),
+                22,
+                600,
+                TEXT,
+                DT_LEFT,
+            );
+            c.text(
+                "选择右上角的「选择设备插件」，按型号查看可用功能并安装。",
+                R::new(panel.x + 24, panel.y + 84, panel.w - 48, 32),
+                15,
+                400,
+                MUTED,
+                DT_LEFT,
+            );
+        }
     }
 
     fn battery_view(&self, command: Command) -> Option<BatteryView<'_>> {
@@ -1093,7 +1117,12 @@ impl App {
                 }
                 Command::Drivers => matches!(
                     self.page,
-                    Page::Drivers | Page::MHub | Page::Onboard(_) | Page::Device(_)
+                    Page::Drivers
+                        | Page::Brand(_)
+                        | Page::Tool(_, _)
+                        | Page::MHub
+                        | Page::Onboard(_)
+                        | Page::Device(_)
                 ),
                 Command::Prefs => self.page == Page::Preferences,
                 _ => false,
@@ -1279,6 +1308,13 @@ impl App {
                 } else {
                     "打开 M HUB"
                 },
+            ),
+            Command::Brand(b) => (
+                "品牌驱动中心".to_owned(),
+                b.name(),
+                b.description().to_owned(),
+                format!("{} 款已安装的可调节设备", self.brand_devices(b).len()),
+                "选择设备",
             ),
             Command::Device(m) => {
                 let spec = &REGISTRY[m];

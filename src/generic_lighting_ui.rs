@@ -3,11 +3,13 @@
 //! Plugin metadata supplies supported modes and bounds. Full-readback devices
 //! show hardware values; explicitly declared write-only effects show sent records
 //! or a labeled draft, with readable brightness tracked separately.
+mod embedded;
 use crate::{
     hid::wide,
     model::AccessoryLighting as LightingConfig,
     paint::{self, Canvas, R},
 };
+pub(crate) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
@@ -80,6 +82,8 @@ enum Operation {
 }
 
 struct Dialog {
+    embedded: bool,
+    color_open: bool,
     key: String,
     name: String,
     capabilities: Capabilities,
@@ -92,7 +96,6 @@ struct Dialog {
     actual_enabled: Option<bool>,
     dirty: bool,
     stale: bool,
-    mode_buttons: Vec<(usize, HWND)>,
     buttons: Vec<(usize, HWND)>,
     font: HFONT,
     dpi: u32,
@@ -101,6 +104,14 @@ struct Dialog {
     operation: Operation,
     pending: Option<Receiver<Result<LightingState, String>>>,
     custom_colors: [u32; 16],
+}
+
+impl Drop for Dialog {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteObject(self.font);
+        }
+    }
 }
 
 fn mode_meta(device: &Value) -> Result<Capabilities, String> {
@@ -282,7 +293,7 @@ impl Dialog {
     }
 
     unsafe fn update_buttons(&self) {
-        for (id, button) in self.buttons.iter().chain(self.mode_buttons.iter()) {
+        for (id, button) in &self.buttons {
             if matches!(*id, CLOCKWISE | COUNTERCLOCKWISE) {
                 ShowWindow(
                     *button,
@@ -431,12 +442,14 @@ impl Dialog {
     }
 
     unsafe fn command(&mut self, hwnd: HWND, id: usize) {
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.color_open {
             return;
         }
         match id {
             CLOSE | 2 => {
-                DestroyWindow(hwnd);
+                if !self.embedded {
+                    DestroyWindow(hwnd);
+                }
                 return;
             }
             REFRESH => {
@@ -480,7 +493,10 @@ impl Dialog {
                 choose.rgbResult = r as u32 | (g as u32) << 8 | (b as u32) << 16;
                 choose.lpCustColors = self.custom_colors.as_mut_ptr();
                 choose.Flags = CC_RGBINIT | CC_FULLOPEN;
-                if ChooseColorW(&mut choose) != 0 {
+                self.color_open = true;
+                let chosen = ChooseColorW(&mut choose) != 0;
+                self.color_open = false;
+                if chosen {
                     if let Some(config) = self.config.as_mut() {
                         config.rgb = [
                             choose.rgbResult as u8,
@@ -581,6 +597,12 @@ impl Dialog {
         let mut ps: PAINTSTRUCT = zeroed();
         let dc = BeginPaint(hwnd, &mut ps);
         let canvas = Canvas::new(dc, self.dpi);
+        if self.embedded {
+            self.paint_embedded(&canvas);
+            drop(canvas);
+            EndPaint(hwnd, &ps);
+            return;
+        }
         canvas.rect(R::new(0, 0, 900, 660), paint::BG);
         canvas.gradient(R::new(0, 0, 900, 3), paint::RED, paint::ORANGE);
         canvas.text(
@@ -792,19 +814,8 @@ impl Dialog {
             },
             DT_LEFT,
         );
-        let config_note = if self.capabilities.write_only {
-            "仅亮度/开关支持读回；模式与颜色不能确认原值，首次更改可能无法恢复原灯效。"
-        } else if self.confirmed.is_none() {
-            "未读到有效的设备灯效配置；模式、颜色、速度和亮度不会显示为已确认。"
-        } else if self.stale {
-            "显示的是上次成功读回的值；刚才的操作失败，当前设备状态需重新读取确认。"
-        } else if self.dirty {
-            "当前显示的更改尚未提交；失败时草稿会保留。"
-        } else {
-            "灯效参数已从设备读回，可编辑并应用。"
-        };
         canvas.text(
-            config_note,
+            self.config_note(),
             R::new(28, 539, 840, 20),
             12,
             400,
@@ -822,6 +833,20 @@ impl Dialog {
         drop(canvas);
         EndPaint(hwnd, &ps);
     }
+
+    fn config_note(&self) -> &'static str {
+        if self.capabilities.write_only {
+            "仅亮度/开关支持读回；模式与颜色不能确认原值，首次更改可能无法恢复原灯效。"
+        } else if self.confirmed.is_none() {
+            "未读到有效的设备灯效配置；模式、颜色、速度和亮度不会显示为已确认。"
+        } else if self.stale {
+            "显示的是上次成功读回的值；刚才的操作失败，当前设备状态需重新读取确认。"
+        } else if self.dirty {
+            "当前显示的更改尚未提交；失败时草稿会保留。"
+        } else {
+            "灯效参数已从设备读回，可编辑并应用。"
+        }
+    }
 }
 
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
@@ -835,6 +860,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
     }
     let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dialog;
     if pointer.is_null() {
+        return DefWindowProcW(hwnd, message, w, l);
+    }
+    if message == WM_NCDESTROY {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        embedded::destroyed(hwnd, pointer);
         return DefWindowProcW(hwnd, message, w, l);
     }
     let dialog = &mut *pointer;
@@ -908,7 +938,10 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             0
         }
         WM_CLOSE => {
-            if dialog.pending.is_some() {
+            if dialog.embedded {
+                return 0;
+            }
+            if dialog.pending.is_some() || dialog.color_open {
                 dialog.status = "正在完成灯效操作，请稍候再关闭。".into();
                 RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
             } else {
@@ -929,6 +962,11 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
 }
 
 unsafe fn add_button(dialog: &mut Dialog, hwnd: HWND, id: usize, text: &str, rect: R) {
+    let rect = if dialog.embedded {
+        dialog.embedded_rect(id, rect)
+    } else {
+        rect
+    };
     let dpi = dialog.dpi;
     let font = dialog.font;
     let instance = GetModuleHandleW(null());
@@ -948,6 +986,9 @@ unsafe fn add_button(dialog: &mut Dialog, hwnd: HWND, id: usize, text: &str, rec
         null(),
     );
     SendMessageW(button, WM_SETFONT, font as usize, 1);
+    if dialog.embedded {
+        crate::controls_ui::viewport::follow_focus(button, hwnd);
+    }
     dialog.buttons.push((id, button));
 }
 
@@ -962,30 +1003,12 @@ fn show_error(owner: HWND, message: &str) {
     }
 }
 
-/// Open the generic editor for the device at the registry index used by the UI.
-pub unsafe fn open(owner: HWND, model: usize) {
-    let Some(spec) = crate::devices::REGISTRY.get(model) else {
-        return;
-    };
-    let installed = match crate::plugin_manager::installed(spec.key) {
-        Ok(Some(driver)) => driver,
-        Ok(None) => {
-            show_error(owner, "尚未安装此设备的灯效驱动。");
-            return;
-        }
-        Err(error) => {
-            show_error(owner, &error);
-            return;
-        }
-    };
+unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box<Dialog>), String> {
+    let spec = crate::devices::REGISTRY.get(model).ok_or("设备不存在。")?;
+    let installed =
+        crate::plugin_manager::installed(spec.key)?.ok_or("尚未安装此设备的灯效驱动。")?;
     let device = &installed.manifest.device;
-    let capabilities = match mode_meta(device) {
-        Ok(value) => value,
-        Err(error) => {
-            show_error(owner, &error);
-            return;
-        }
-    };
+    let capabilities = mode_meta(device)?;
     let supports_switch = installed
         .manifest
         .capabilities
@@ -1021,6 +1044,8 @@ pub unsafe fn open(owner: HWND, model: usize) {
         wide("Microsoft YaHei UI").as_ptr(),
     );
     let mut dialog = Box::new(Dialog {
+        embedded,
+        color_open: false,
         key: spec.key.into(),
         name: spec.name.into(),
         capabilities,
@@ -1037,7 +1062,6 @@ pub unsafe fn open(owner: HWND, model: usize) {
         actual_enabled: None,
         dirty: false,
         stale: false,
-        mode_buttons: vec![],
         buttons: vec![],
         font,
         dpi,
@@ -1047,26 +1071,45 @@ pub unsafe fn open(owner: HWND, model: usize) {
         pending: None,
         custom_colors: [0; 16],
     });
-    let mut owner_rect: RECT = zeroed();
-    GetWindowRect(owner, &mut owner_rect);
-    let mut bounds = RECT {
-        left: 0,
-        top: 0,
-        right: scale(900),
-        bottom: scale(660),
+    let (style, ex_style, x, y, width, height) = if embedded {
+        (
+            WS_CHILD | WS_CLIPCHILDREN,
+            WS_EX_CONTROLPARENT,
+            0,
+            0,
+            scale(embedded::WIDTH),
+            scale(embedded::HEIGHT),
+        )
+    } else {
+        let mut owner_rect: RECT = zeroed();
+        GetWindowRect(owner, &mut owner_rect);
+        let mut bounds = RECT {
+            left: 0,
+            top: 0,
+            right: scale(900),
+            bottom: scale(660),
+        };
+        let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
+        AdjustWindowRectEx(&mut bounds, style, 0, WS_EX_DLGMODALFRAME);
+        let width = bounds.right - bounds.left;
+        let height = bounds.bottom - bounds.top;
+        (
+            style,
+            WS_EX_DLGMODALFRAME,
+            owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
+            owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),
+            width,
+            height,
+        )
     };
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN;
-    AdjustWindowRectEx(&mut bounds, style, 0, WS_EX_DLGMODALFRAME);
-    let width = bounds.right - bounds.left;
-    let height = bounds.bottom - bounds.top;
     let title = format!("{} 灯效 · 外设盒", spec.name);
     let hwnd = CreateWindowExW(
-        WS_EX_DLGMODALFRAME,
+        ex_style,
         class.as_ptr(),
         wide(&title).as_ptr(),
         style,
-        owner_rect.left + ((owner_rect.right - owner_rect.left - width) / 2).max(0),
-        owner_rect.top + ((owner_rect.bottom - owner_rect.top - height) / 2).max(0),
+        x,
+        y,
         width,
         height,
         owner,
@@ -1075,11 +1118,15 @@ pub unsafe fn open(owner: HWND, model: usize) {
         (&mut *dialog as *mut Dialog).cast(),
     );
     if hwnd.is_null() {
-        DeleteObject(font);
-        return;
+        return Err(format!(
+            "无法打开灯效编辑器：{}",
+            std::io::Error::last_os_error()
+        ));
     }
-    let dark = 1i32;
-    DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
+    if !embedded {
+        let dark = 1i32;
+        DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
+    }
     add_button(
         &mut dialog,
         hwnd,
@@ -1091,26 +1138,19 @@ pub unsafe fn open(owner: HWND, model: usize) {
         },
         R::new(704, 115, 144, 34),
     );
-    for (index, mode) in dialog.capabilities.modes.iter().enumerate() {
+    for index in 0..dialog.capabilities.modes.len() {
+        let mode = &dialog.capabilities.modes[index];
         let col = index % 3;
         let row = index / 3;
         let id = MODE_BASE + mode.id as usize;
-        let button = CreateWindowExW(
-            0,
-            wide("BUTTON").as_ptr(),
-            wide(&mode.label).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
-            scale(310 + col as i32 * 174),
-            scale(202 + row as i32 * 44),
-            scale(160),
-            scale(34),
+        let label = mode.label.clone();
+        add_button(
+            &mut dialog,
             hwnd,
-            id as HMENU,
-            instance,
-            null(),
+            id,
+            &label,
+            R::new(310 + col as i32 * 174, 202 + row as i32 * 44, 160, 34),
         );
-        SendMessageW(button, WM_SETFONT, font as usize, 1);
-        dialog.mode_buttons.push((id, button));
     }
     for (id, text, rect) in [
         (COLOR, "选择颜色", R::new(708, 321, 140, 36)),
@@ -1124,11 +1164,25 @@ pub unsafe fn open(owner: HWND, model: usize) {
         (CLOSE, "关闭", R::new(621, 608, 94, 34)),
         (APPLY, "应用灯效", R::new(727, 608, 141, 34)),
     ] {
-        add_button(&mut dialog, hwnd, id, text, rect);
+        if id != CLOSE || !embedded {
+            add_button(&mut dialog, hwnd, id, text, rect);
+        }
     }
-    EnableWindow(owner, 0);
     SetTimer(hwnd, TIMER, 80, None);
     dialog.begin(hwnd, Operation::Read);
+    Ok((hwnd, dialog))
+}
+
+/// Open the generic editor for the device at the registry index used by the UI.
+pub unsafe fn open(owner: HWND, model: usize) {
+    let (hwnd, _dialog) = match create(owner, model, false) {
+        Ok(window) => window,
+        Err(error) => {
+            show_error(owner, &error);
+            return;
+        }
+    };
+    EnableWindow(owner, 0);
     ShowWindow(hwnd, SW_SHOW);
     SetForegroundWindow(hwnd);
     let mut message: MSG = zeroed();
@@ -1147,7 +1201,6 @@ pub unsafe fn open(owner: HWND, model: usize) {
     }
     EnableWindow(owner, 1);
     SetActiveWindow(owner);
-    DeleteObject(dialog.font);
 }
 
 #[cfg(test)]

@@ -73,8 +73,8 @@ jobs:
             cargo test --locked --no-default-features --features driver-runtime --lib
             if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
           }
-      - name: Verify consecutive G75 Pro key remaps preserve the board map
-        run: node --test src/mhub/fixes/g75-keymap.test.cjs
+      - name: Verify local M HUB navigation and G75 Pro onboard key remaps
+        run: node --test src/mhub/fixes/device-connection.test.cjs src/mhub/fixes/g75-keymap.test.cjs
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
         run: ./scripts/build-desktop.ps1
