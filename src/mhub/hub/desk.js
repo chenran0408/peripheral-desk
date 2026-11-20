@@ -21,6 +21,23 @@
   let translations;
   let strings;
 
+  // Magnetic keyboard pages ask the parent for cloud/account services. Keep the
+  // device, theme, preview and local-profile messages on their original routes.
+  window.addEventListener("message", event => {
+    const data = event.data;
+    if (event.origin !== location.origin || typeof data?.type !== "string") return;
+    if (!(data.type === "COMMAND_OPEN_LOGIN" || data.type === "PROXY_OPEN_CLOUD_LIST" ||
+          data.type.startsWith("PROXY_CLOUD_ACTION_"))) return;
+    const keyboard = Array.from(document.querySelectorAll("iframe")).some(frame =>
+      frame.contentWindow === event.source &&
+      ["/cizhou/index.html","/cizhou/preview/index.html"].includes(new URL(frame.src, location.href).pathname));
+    if (!keyboard) return;
+    event.stopImmediatePropagation();
+    if (data._messageId) event.source.postMessage({
+      commandType:data.type, _messageId:data._messageId, err:"本地驱动中心仅使用本地配置文件。"
+    }, location.origin);
+  }, true);
+
   function words() {
     const app = document.querySelector("#app")?.__vue_app__;
     const i18n = app?._context.provides[app.__VUE_I18N_SYMBOL__]?.global;

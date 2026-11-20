@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.4.11-preview.15
+
+- 迈从驱动中心增加本地磁轴键盘编辑器和布局预览。支持的键盘使用随软件提供的型号布局，官网更新不会替换本机这一版。
+- 仍使用同一个 Windows 安装程序，可直接覆盖升级。G75 Pro 的改键、本地配置和已安装插件会保留。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.15/PeripheralDesk-0.4.11-preview.15-windows-x64-setup.exe) · [查看支持范围](https://github.com/chenran0408/peripheral-desk/blob/v0.4.11-preview.15/docs/MHUB-COMPATIBILITY.md)
+
 ## 0.4.11-preview.14
 
 - 一个安装程序即可使用外设盒和本地迈从驱动中心。驱动中心的界面、设备资料和改键修复都保存在电脑上，官网更新不会改动它们。

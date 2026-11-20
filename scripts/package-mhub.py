@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Build the Peripheral Desk Windows distribution with its local MCHOSE driver center."""
 import argparse
+import base64
 import filecmp
 import hashlib
+import io
 import json
 import re
 import shutil
@@ -15,6 +17,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 WEB_PARTS = ("index.html", "mchose.ico", "assets", "cizhou", "vendor-cdn")
+MAGNETIC_PAGES = ("cizhou/index.html", "cizhou/preview/index.html")
 CORE_DOCS = {"README.md", "CHANGELOG.md", "NOTICE", "LICENSE", "SOURCES.md"}
 CORE_NAME = re.compile(r"PeripheralDesk-(\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?)-windows-x64\.zip")
 ENTRY = re.compile(r"(?:\./|/)?assets/(main-[\w-]+\.js)(?:[?#].*)?")
@@ -69,6 +72,26 @@ def inputs(workspace, extras, overlays):
     return files, edits
 
 
+def localize_cdn(content, refs):
+    for remote, local in refs:
+        content = content.replace(remote, local)
+    return content
+
+
+def localize_magnetic_html(html, refs):
+    # Next.js serializes the same inline loader into its hydration stream. Its
+    # T record is sized in UTF-8 bytes, including every URL in the loader.
+    loader = re.search(rb'<script>(\(function\(\)\{var name="MC_CONFIG_GLOBAL_PROD_LOADER".*?)</script>', html, re.S)
+    if not loader:
+        raise ValueError("The magnetic page's inline loader changed")
+    original = loader[1]
+    frame = f":T{len(original):x},".encode()
+    if html.count(frame) != 1:
+        raise ValueError("Cannot identify the magnetic page's loader record")
+    new_size = len(localize_cdn(original, refs))
+    return localize_cdn(html, refs).replace(frame, f":T{new_size:x},".encode(), 1)
+
+
 def fork_site(originals, directory, rustc):
     """Generate project edits from the published sources in a separate build tree."""
     site = directory / "site"
@@ -79,11 +102,10 @@ def fork_site(originals, directory, rustc):
     local_refs = [(("https://cdn.mchose.com.cn/" + name.removeprefix("vendor-cdn/")).encode(),
                    ("/" + name).encode()) for name in originals if name.startswith("vendor-cdn/")]
     for name in originals:
-        if name == "index.html" or (name.startswith("vendor-cdn/") and name.endswith(".css")):
+        if name == "index.html" or name in MAGNETIC_PAGES or name.endswith(".css"):
             path = site / name
             data = path.read_bytes()
-            for remote, local in local_refs:
-                data = data.replace(remote, local)
+            data = localize_magnetic_html(data, local_refs) if name in MAGNETIC_PAGES else localize_cdn(data, local_refs)
             path.write_bytes(data)
     tool = directory / "patch-site.exe"
     subprocess.run([rustc, "--edition=2021", str(PROJECT / "src/mhub/fixes/patch-site.rs"), "-o", str(tool)], check=True)
@@ -96,9 +118,29 @@ def fork_site(originals, directory, rustc):
         if b"<head>" not in html:
             raise ValueError("Cannot insert the local driver centre into index.html")
         index.write_bytes(html.replace(b"<head>", b"<head>\n" + head, 1))
+    # The keyboard editor opens these independent documents in same-origin frames.
+    # Apply the local policy before their scripts, without loading the main Vue UI.
+    policy = next(line for line in head.splitlines() if b'http-equiv="Content-Security-Policy"' in line)
+    child_head = (policy + b'\n<script src="/desk-hub/magnetic-models.js"></script>'
+                  b'\n<link rel="stylesheet" href="/desk-hub/magnetic.css">'
+                  b'\n<script defer src="/desk-hub/magnetic.js"></script>')
+    for name in MAGNETIC_PAGES:
+        child = site / name
+        html = child.read_bytes()
+        if b"<head>" not in html:
+            raise ValueError(f"Missing document head in {name}")
+        child.write_bytes(html.replace(b"<head>", b"<head>\n" + child_head + b"\n", 1))
     assets = site / "desk-hub"
     assets.mkdir(exist_ok=True)
-    for name in ["desk.css", "desk.js"]:
+    # The magnetic editor expects its model directory synchronously on a cold
+    # start. Seed only its published model table, never a user's board profile.
+    table = json.loads((site / "vendor-cdn/configCenter/custom/keyboardConfig.json").read_bytes())
+    with zipfile.ZipFile(io.BytesIO(base64.b64decode(table["__compressBase64__"]))) as archive:
+        models = json.loads(archive.read("data.json"))
+    cache_key = "cz@keyboardConfig@v2@https://cdn.mchose.com.cn/configCenter"
+    script = f"localStorage.setItem({json.dumps(cache_key)}, {json.dumps(json.dumps(models, ensure_ascii=False, separators=(',', ':')))});\n"
+    (assets / "magnetic-models.js").write_text(script, encoding="utf-8", newline="\n")
+    for name in ["desk.css", "desk.js", "magnetic.css", "magnetic.js"]:
         shutil.copyfile(hub / name, assets / name)
     built = {}
     for child in site.iterdir():
@@ -158,7 +200,7 @@ def source_bundle(target, staging, originals, edits, manifest, version):
         archive.writestr("resources.json", json.dumps(index, ensure_ascii=False, indent=2) + "\n")
         for name in ["MHUB-SOURCE.md", "MHUB-NOTICE.txt", "MiSans-License.pdf"]:
             archive.write(staging / name, name)
-        paths = ["LICENSE", "NOTICE", "scripts/package-mhub.py", "installer/PeripheralDesk.iss", "src/mhub.rs"]
+        paths = ["LICENSE", "NOTICE", "scripts/package-mhub.py", "scripts/mhub-cizhou-source.py", "installer/PeripheralDesk.iss", "src/mhub.rs"]
         for directory in ["src/mhub", "installer/mhub"]:
             paths.extend(p.relative_to(PROJECT).as_posix() for p in (PROJECT / directory).rglob("*") if p.is_file())
         for name in paths:

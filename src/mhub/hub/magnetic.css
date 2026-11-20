@@ -1,0 +1,29 @@
+/* Keyboard and receiver versions stay visible beside the local profile tools. */
+.upgrade-btn,
+.upgrade-dongle-btn,
+.upgrade-reminder-panel,
+[data-upgrade-action],
+[data-track="6000-60000002-0-1"],
+[data-pd-local-hidden] {
+  display: none !important;
+}
+.pd-fw-exit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.pd-fw-exit button {
+  padding: 8px 16px;
+  font: inherit;
+  color: white;
+  background: #2864ce;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pd-fw-exit button:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: -4px;
+}

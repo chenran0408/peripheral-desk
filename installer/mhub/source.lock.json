@@ -2,5 +2,13 @@
   "entry": "main-DbMO5C6u.js",
   "asset": "MHub-upstream-main-DbMO5C6u.zip",
   "url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/mhub-source-main-DbMO5C6u/MHub-upstream-main-DbMO5C6u.zip",
-  "sha256": "fb138d1e458a13c16ceea57ebce2c92154cc66428c48923956fd6ba9790933c5"
+  "sha256": "fb138d1e458a13c16ceea57ebce2c92154cc66428c48923956fd6ba9790933c5",
+  "supplements": [
+    {
+      "entry": "cizhou/index.html",
+      "asset": "MHub-magnetic-bdf4d2c3.zip",
+      "url": "https://github.com/chenran0408/peripheral-desk-drivers/releases/download/mhub-magnetic-bdf4d2c3/MHub-magnetic-bdf4d2c3.zip",
+      "sha256": "15c184b871a903743375ad5966107f655c739217da030541defdebf996bddfc4"
+    }
+  ]
 }
