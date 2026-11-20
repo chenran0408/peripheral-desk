@@ -42,7 +42,8 @@ fn battery_entries(capabilities: impl Iterator<Item = bool>, system_count: usize
 }
 
 pub(super) fn has_native_controls(spec: &DeviceSpec) -> bool {
-    spec.has_g2_audio()
+    crate::family_editor::Family::for_device(spec).is_some()
+        || spec.has_g2_audio()
         || !spec.read_only()
         || spec.switch_only()
         || [

@@ -103,7 +103,7 @@ impl<T: EditorState> Embedded<T> {
         Ok(())
     }
 
-    pub(super) fn content(&self) -> HWND {
+    pub(crate) fn content(&self) -> HWND {
         self.content.get()
     }
     pub(super) unsafe fn hide_and_detach(&self) -> HWND {
@@ -202,7 +202,7 @@ unsafe extern "system" fn control_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 
-pub(super) unsafe fn content_size(child: HWND, width: i32, height: i32) {
+pub(crate) unsafe fn content_size(child: HWND, width: i32, height: i32) {
     let mut rect = zeroed();
     GetWindowRect(child, &mut rect);
     if rect.right - rect.left != width || rect.bottom - rect.top != height {

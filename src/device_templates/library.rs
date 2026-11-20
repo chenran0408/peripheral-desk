@@ -1,5 +1,7 @@
 //! Model-scoped local templates. Keep the original JSON for re-export and
 //! project only understood settings when the user applies a template.
+mod a5;
+
 use super::{apply_archive, call, checked_key, data, read_json, OperationReport};
 use crate::{
     controls::{a5_binding, Binding, BindingAction, ControlState},
@@ -18,8 +20,112 @@ const A5: &str = "mchose-a5-ultra";
 const G75: &str = "mchose-g75-pro";
 const FORMAT: &str = "peripheral-desk-device-template";
 
+fn capability(key: &str, cap: &str) -> bool {
+    crate::devices::REGISTRY
+        .iter()
+        .any(|s| s.key == key && s.supports(cap))
+}
+fn snapshot_provider(key: &str) -> Option<(&'static str, &'static str)> {
+    if capability(key, "magnetic-settings") {
+        Some((
+            "mhub-magnetic-template-read",
+            "mhub-magnetic-template-apply",
+        ))
+    } else if capability(key, "mchose-audio-templates") {
+        Some(("mhub-audio-template-read", "mhub-audio-template-apply"))
+    } else {
+        None
+    }
+}
 pub fn supports(key: &str) -> bool {
     matches!(key, G75 | A5)
+        || capability(key, "mchose-mouse-templates")
+        || snapshot_provider(key).is_some()
+}
+
+fn mouse_record<'a>(model: &str, document: &'a Value) -> Result<&'a Value> {
+    let envelope = document
+        .as_object()
+        .filter(|o| o.len() == 1)
+        .ok_or("请选择 M HUB 导出的单设备模板文件。")?;
+    let (product, r) = envelope.iter().next().unwrap();
+    let normalize = |s: &str| {
+        let name = s.trim().to_ascii_lowercase();
+        name.strip_prefix("mchose ")
+            .or_else(|| name.strip_prefix("迈从 "))
+            .unwrap_or(&name)
+            .trim()
+            .to_owned()
+    };
+    let actual = normalize(product);
+    let expected = normalize(model);
+    if actual != expected && !(expected == "a7 v3 magnetic" && actual == "a7 magnetic") {
+        return Err("此模板属于其他型号，请选择当前鼠标的模板。".into());
+    }
+    if !r.is_object()
+        || [
+            "leftKeyType",
+            "dpiSum",
+            "usbRateIndex",
+            "sleep",
+            "sensor",
+            "lodIndex",
+            "adaptivePowerSwitch",
+        ]
+        .iter()
+        .all(|f| r.get(f).is_none())
+    {
+        return Err("文件缺少 M HUB 鼠标的键位、DPI 或性能数据。".into());
+    }
+    Ok(r)
+}
+fn usb_id(v: &Value) -> Option<u16> {
+    if let Some(n) = v.as_u64() {
+        return n.try_into().ok();
+    }
+    let s = v.as_str()?;
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u16::from_str_radix(hex, 16).ok()
+    } else {
+        s.parse().ok()
+    }
+}
+fn keyboard_profile(document: &Value, matches: impl Fn(u16, u16) -> bool) -> Result<Settings> {
+    if document["dataScope"] != "KeyboardProfile"
+        || document["version"] != 3
+        || !document["data"].is_object()
+    {
+        return Err("请选择 M HUB 的 KeyboardProfile v3 文件。".into());
+    }
+    let identity = |obj: &Value| Some((usb_id(&obj["vendorId"])?, usb_id(&obj["productId"])?));
+    let (vid, pid) = identity(document).ok_or("磁轴模板缺少 USB 型号标识。")?;
+    if !matches(vid, pid)
+        || document
+            .get("identity")
+            .is_some_and(|v| identity(v) != Some((vid, pid)))
+    {
+        return Err("磁轴模板的 USB 型号与所选键盘不同。".into());
+    }
+    Ok(Settings {
+        name: name(document["data"]["name"].as_str())?,
+        controls: Value::Null,
+        light: None,
+        detail: "M HUB 磁轴模板 · 应用到当前板载槽。灯效、宏与其他原版字段随文件保留。".into(),
+    })
+}
+fn model_name(key: &str) -> Result<&'static str> {
+    Ok(crate::devices::REGISTRY[checked_key(key)?].name)
+}
+pub fn hint(key: &str) -> &'static str {
+    if key == A5 {
+        "支持首代 A5 Ultra 的 M HUB 六键、休眠及传感器设置。"
+    } else if key == G75 {
+        "保存可读的普通层、Fn 层、Fn2 层和逐键灯光。"
+    } else if capability(key, "mchose-mouse-templates") {
+        "支持原版 M HUB 鼠标 JSON。模板应用到当前选中的设备和板载槽。"
+    } else {
+        "保存、导入和应用当前型号的本地设置。"
+    }
 }
 
 #[derive(Clone)]
@@ -27,6 +133,7 @@ pub struct Template {
     pub name: String,
     pub detail: String,
     document: Value,
+    source: PathBuf,
 }
 
 struct Settings {
@@ -100,17 +207,64 @@ fn old_a5_fields(document: &Value) -> Result<Settings> {
     if count == 0 && !info.contains_key("buttonType1") {
         return Err("没有识别到原版 A5 六键模板。".into());
     }
+    let performance = a5::desired(document).len();
     Ok(Settings {
         name: name(record["name"].as_str())?,
         controls: json!(controls),
         light: None,
-        detail: format!("M HUB · {count} 个可识别按键。另有 {unknown} 个按键未转入；原版宏、性能和其他字段随文件保留。"),
+        detail: format!("M HUB · {count} 个可识别按键、{performance} 个性能参数。另有 {unknown} 个键位未转入；原版宏、DPI 档表和其他字段随文件保留。"),
     })
 }
 
 fn settings(key: &str, document: &Value) -> Result<Settings> {
     if !supports(key) {
         return Err("此型号尚无本地模板格式。".into());
+    }
+    if capability(key, "mchose-mouse-templates") {
+        let r = mouse_record(model_name(key)?, document)?;
+        let count = ["left", "right", "mid", "forward", "retreat", "dpi"]
+            .iter()
+            .filter(|k| {
+                r.get(format!("{k}KeyType"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|v| v != "ff")
+            })
+            .count();
+        return Ok(Settings {
+            name: name(r["name"].as_str())?,
+            controls: Value::Null,
+            light: None,
+            detail: format!(
+                "M HUB · {count} 个键位 · {} 个 DPI 档位。应用到设备当前板载槽。",
+                r.get("dpiSum")
+                    .and_then(Value::as_u64)
+                    .map_or_else(|| "未指定".into(), |n| n.to_string())
+            ),
+        });
+    }
+    if snapshot_provider(key).is_some() {
+        if capability(key, "magnetic-settings") && document["dataScope"] == "KeyboardProfile" {
+            let spec = &crate::devices::REGISTRY[checked_key(key)?];
+            return keyboard_profile(document, |vid, pid| {
+                spec.extra_matchers
+                    .iter()
+                    .any(|m| m.vid == vid && m.pid == pid)
+            });
+        }
+        if document["format"] != FORMAT
+            || document["schema"] != 1
+            || document["device"] != key
+            || document["snapshot"]["model"] != key
+            || document["snapshot"]["schema"] != 1
+        {
+            return Err("模板的设备型号或文件版本不匹配。".into());
+        }
+        return Ok(Settings {
+            name: name(document["name"].as_str())?,
+            controls: Value::Null,
+            light: None,
+            detail: format!("{} · 本地设备设置", model_name(key)?),
+        });
     }
     if document["format"] != FORMAT {
         return if key == A5 {
@@ -168,9 +322,10 @@ fn settings(key: &str, document: &Value) -> Result<Settings> {
         )
     } else {
         format!(
-            "{} 个按键映射 · {} 个已读回的板载宏",
+            "{} 个按键映射 · {} 个已读回的板载宏 · {} 个性能参数",
             state.bindings.len(),
-            state.macros.len()
+            state.macros.len(),
+            a5::desired(document).len()
         )
     };
     if key == G75 && light.is_none() && !state.colors.is_empty() {
@@ -202,6 +357,7 @@ fn item(key: &str, document: Value) -> Result<Template> {
         name: parsed.name,
         detail: parsed.detail,
         document,
+        source: PathBuf::new(),
     })
 }
 
@@ -221,6 +377,7 @@ fn list_in(key: &str, folder: &Path) -> Result<Vec<Template>> {
             if let Some(record) = read_json(&path)? {
                 let mut template = item(key, record["document"].clone())?;
                 template.name = name(record["name"].as_str())?;
+                template.source = path;
                 result.push(template);
             }
         }
@@ -234,24 +391,70 @@ fn store(folder: &Path, key: &str, document: Value, alias: &str) -> Result<Templ
     if !alias.trim().is_empty() {
         entry.name = name(Some(alias))?;
     }
-    // A user-provided display name is never a path. Identical imports are idempotent.
-    let hash = Sha256::digest(entry.name.to_lowercase().as_bytes());
-    let path = folder.join(format!("{hash:x}.json"));
-    match read_json(&path)? {
-        Some(old) if old["document"] != entry.document => {
-            return Err("此型号已有同名模板。请使用不同的模板名称。".into())
+    let lower = entry.name.to_lowercase();
+    if let Some(old) = list_in(key, folder)?
+        .into_iter()
+        .find(|i| i.name.to_lowercase() == lower)
+    {
+        if old.document == entry.document {
+            return Ok(old);
         }
-        Some(_) => {}
-        None => {
-            let record = json!({"name":entry.name,"document":entry.document});
-            let bytes = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
-            if bytes.len() > super::MAX_FILE {
-                return Err("模板文件过大。".into());
-            }
-            crate::storage::atomic_write(&path, &bytes)?;
-        }
+        return Err("此型号已有同名模板。请使用不同的模板名称。".into());
     }
+    write_entry(folder, entry)
+}
+
+fn write_entry(folder: &Path, mut entry: Template) -> Result<Template> {
+    let lower = entry.name.to_lowercase();
+    // A stable file identity allows a rename to commit in one atomic replacement.
+    // Older entries used the digest of their display name. New entries may reuse a renamed label.
+    let hash = Sha256::digest(lower.as_bytes());
+    let mut path = folder.join(format!("{hash:x}.json"));
+    let mut suffix = 0;
+    while path.exists() {
+        suffix += 1;
+        path = folder.join(format!("{hash:x}-{suffix}.json"));
+    }
+    let record = json!({"name":entry.name,"document":entry.document});
+    let bytes = serde_json::to_vec(&record).map_err(|e| e.to_string())?;
+    if bytes.len() > super::MAX_FILE {
+        return Err("模板文件过大。".into());
+    }
+    crate::storage::atomic_write(&path, &bytes)?;
+    entry.source = path;
     Ok(entry)
+}
+pub fn rename(key: &str, entry: &Template, title: &str) -> Result<Template> {
+    rename_in(&directory(key)?, key, entry, title)
+}
+fn rename_in(dir: &Path, key: &str, entry: &Template, title: &str) -> Result<Template> {
+    let title = name(Some(title))?;
+    if list_in(key, dir)?
+        .iter()
+        .any(|i| i.source != entry.source && i.name.to_lowercase() == title.to_lowercase())
+    {
+        return Err("此型号已有同名模板。".into());
+    }
+    let mut old = read_json(&entry.source)?.ok_or("模板已移除，请重新打开模板列表。")?;
+    old["name"] = json!(title);
+    let doc = &mut old["document"];
+    if doc["dataScope"] == "KeyboardProfile" {
+        doc["data"]["name"] = json!(title)
+    } else if doc["format"] == FORMAT {
+        doc["name"] = json!(title);
+    } else if let Some(record) = doc.as_object_mut().and_then(|r| r.values_mut().next()) {
+        record["name"] = json!(title);
+    }
+    let bytes = serde_json::to_vec(&old).map_err(|e| e.to_string())?;
+    crate::storage::atomic_write(&entry.source, &bytes)?;
+    Ok(Template {
+        name: title,
+        document: old["document"].clone(),
+        ..entry.clone()
+    })
+}
+pub fn delete(entry: &Template) -> Result<()> {
+    std::fs::remove_file(&entry.source).map_err(|e| format!("删除模板失败：{e}"))
 }
 
 pub fn import(key: &str, path: &Path, alias: &str) -> Result<Template> {
@@ -261,6 +464,79 @@ pub fn import(key: &str, path: &Path, alias: &str) -> Result<Template> {
         read_json(path)?.ok_or("找不到模板文件。")?,
         alias,
     )
+}
+
+pub fn supports_legacy_import(key: &str) -> bool {
+    key == A5 || capability(key, "mchose-mouse-templates") || capability(key, "magnetic-settings")
+}
+
+pub fn import_legacy(key: &str, product: &str) -> Result<(Vec<Template>, String)> {
+    let documents = crate::mhub::legacy_templates::read(key, product)?;
+    import_legacy_in(&directory(key)?, key, documents)
+}
+
+fn import_legacy_in(
+    folder: &Path,
+    key: &str,
+    documents: Vec<Value>,
+) -> Result<(Vec<Template>, String)> {
+    if documents.is_empty() {
+        return Ok((Vec::new(), "此型号没有可导入的旧 M HUB 本地模板。".into()));
+    }
+    let existing = list_in(key, folder)?;
+    let mut added = Vec::new();
+    let mut duplicates = 0;
+    let mut skipped = 0;
+    let mut reason = None;
+    for document in documents {
+        if existing
+            .iter()
+            .chain(&added)
+            .any(|t| t.document == document)
+        {
+            duplicates += 1;
+            continue;
+        }
+        let mut entry = match item(key, document) {
+            Ok(t) => t,
+            Err(err) => {
+                skipped += 1;
+                reason.get_or_insert(err);
+                continue;
+            }
+        };
+        let base = entry.name.clone();
+        for i in 2.. {
+            if existing
+                .iter()
+                .chain(&added)
+                .all(|t| t.name.to_lowercase() != entry.name.to_lowercase())
+            {
+                break;
+            }
+            let suffix = format!(" ({i})");
+            let stem: String = base.chars().take(96 - suffix.len()).collect();
+            entry.name = format!("{stem}{suffix}");
+        }
+        match write_entry(folder, entry) {
+            Ok(t) => added.push(t),
+            Err(err) => {
+                let saved = added.len();
+                return Ok((
+                    added,
+                    format!("已导入 {saved} 个模板，保存下一个模板时出错：{err}"),
+                ));
+            }
+        }
+    }
+    let mut message = format!(
+        "已导入 {} 个模板。已有 {duplicates} 个相同模板。",
+        added.len()
+    );
+    if let Some(reason) = reason {
+        message.push_str(&format!("\r\n有 {skipped} 个未导入。{reason}"));
+    }
+    Ok((added, message))
 }
 
 pub fn export(entry: &Template, path: &Path) -> Result<()> {
@@ -273,12 +549,28 @@ pub fn export(entry: &Template, path: &Path) -> Result<()> {
 pub fn capture(key: &str, target: &DeviceTarget, title: &str) -> Result<Template> {
     let title = name(Some(title))?;
     plugin_manager::with_device_target(key, Some(target), || {
+        if capability(key, "mchose-mouse-templates") {
+            let document = call(key, json!({"op":"template-read","name":title}))?;
+            return store(&directory(key)?, key, document, "");
+        }
+        if let Some((op, _)) = snapshot_provider(key) {
+            let snapshot = call(key, json!({"op":op}))?;
+            let doc =
+                json!({"format":FORMAT,"schema":1,"device":key,"name":title,"snapshot":snapshot});
+            return store(&directory(key)?, key, doc, "");
+        }
         let controls = call(key, json!({"op":"controls-read","extended_modes":true}))?;
         let mut document =
             json!({"format":FORMAT,"schema":1,"name":title,"device":key,"controls":controls});
         if key == G75 {
             if let Ok(state) = call(key, json!({"op":"read-state"})) {
                 document["lightingMode"] = state["light"].clone();
+            }
+        } else if key == A5 {
+            if let Ok(state) = call(key, json!({"op":"read-state"}))
+                .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))
+            {
+                document["performance"] = a5::capture(&state);
             }
         }
         store(&directory(key)?, key, document, "")
@@ -288,6 +580,29 @@ pub fn capture(key: &str, target: &DeviceTarget, title: &str) -> Result<Template
 pub fn apply(key: &str, target: &DeviceTarget, entry: &Template) -> Result<OperationReport> {
     let selected = settings(key, &entry.document)?;
     plugin_manager::with_device_target(key, Some(target), || {
+        if let Some((_, op)) = snapshot_provider(key) {
+            let document = if entry.document["dataScope"] == "KeyboardProfile" {
+                &entry.document
+            } else {
+                &entry.document["snapshot"]
+            };
+            let value = call(key, json!({"op":op,"document":document}))?;
+            let changed = value["changed"]
+                .as_u64()
+                .map(|v| v as usize)
+                .or_else(|| value["applied"].as_bool().map(usize::from))
+                .ok_or("插件未返回模板应用结果。")?;
+            return Ok(OperationReport {
+                changed,
+                skipped: value["skipped"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect(),
+                message: format!("已应用「{}」，{} 组设置有变化。", entry.name, changed),
+            });
+        }
         let protected = crate::resident_macros::list(key)?
             .library
             .recovery
@@ -295,11 +610,42 @@ pub fn apply(key: &str, target: &DeviceTarget, entry: &Template) -> Result<Opera
             .filter(|r| r.target_instance.as_ref().is_none_or(|id| id == &target.id))
             .map(|r| (r.control, r.layer))
             .collect();
+        if capability(key, "mchose-mouse-templates") {
+            let r = mouse_record(model_name(key)?, &entry.document)?;
+            let prepared = call(key, json!({"op":"template-prepare","record":r}))?;
+            let profile = prepared["profile"]
+                .as_u64()
+                .and_then(|v| u8::try_from(v).ok())
+                .ok_or("设备未回报板载配置号。")?;
+            let changed = prepared["changed"].as_bool().ok_or("缺少模板设置确认。")?;
+            let mut report = apply_archive(
+                key,
+                json!({"cached":{"controls":prepared["controls"]}}),
+                None,
+                &protected,
+                Some((profile, changed.then_some(r))),
+                &[],
+            )?;
+            if prepared["skipped_keys"].as_u64().unwrap_or(0) > 0 {
+                report.skipped.push("未识别的按键操作随原文件保留。".into())
+            }
+            if prepared["adaptive_skipped"] == true {
+                report.skipped.push("当前固件未启用自适应省电设置。".into())
+            }
+            return Ok(report);
+        }
+        let performance = if key == A5 {
+            a5::desired(&entry.document)
+        } else {
+            vec![]
+        };
         let mut report = apply_archive(
             key,
             json!({"cached":{"controls":selected.controls}}),
             selected.light,
             &protected,
+            None,
+            &performance,
         )?;
         if entry.document["format"] != FORMAT {
             report.skipped.push(selected.detail);
@@ -355,12 +701,57 @@ mod tests {
         assert_eq!(list_in(A5, &saved).unwrap().len(), 1);
         let reread = list_in(A5, &saved).unwrap().pop().unwrap();
         assert_eq!(entry.name, reread.name);
+        let archive = json!({"A5 Ultra":{"name":"我的设置","allInfo":{"buttonType1":0,"buttonValue1":"0x000000"},"extra":"原样保留"}});
+        let migration = folder.join("migration");
+        let (entries, _) =
+            import_legacy_in(&migration, A5, vec![raw.clone(), archive.clone()]).unwrap();
+        assert_eq!(entries.len(), 2);
+        let mut conflict = archive.clone();
+        conflict["A5 Ultra"]["extra"] = json!("不同内容");
+        let (entries, _) =
+            import_legacy_in(&migration, A5, vec![archive.clone(), conflict.clone()]).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "我的设置 (2)");
+        assert_eq!(entries[0].document, conflict);
+        assert!(import_legacy_in(&migration, A5, vec![archive, conflict])
+            .unwrap()
+            .0
+            .is_empty());
         let path = folder.join("export.json");
         export(&reread, &path).unwrap();
         assert_eq!(read_json(&path).unwrap().unwrap(), raw);
+        let renamed = rename_in(&saved, A5, &reread, "常用").unwrap();
+        assert_eq!(renamed.document["A5 ultra"]["name"], "常用");
+        assert_eq!(
+            renamed.document["A5 ultra"]["futureData"],
+            raw["A5 ultra"]["futureData"]
+        );
+        let second = store(&saved, A5, raw.clone(), "我的设置").unwrap();
+        assert_ne!(second.source, renamed.source);
+        assert!(rename_in(&saved, A5, &second, "常用").is_err());
+        delete(&renamed).unwrap();
+        assert_eq!(list_in(A5, &saved).unwrap().len(), 1);
         std::fs::remove_dir_all(folder).unwrap();
     }
 
+    #[test]
+    fn keyboard_profile_accepts_vendor_identity_and_rejects_other_layout_revisions() {
+        let mut doc = json!({"version":3,"dataScope":"KeyboardProfile","vendorId":"0x3837","productId":12352,"identity":{"vendorId":14391,"productId":"0x3040"},"data":{"name":"办公"}});
+        let check = |v, p| v == 0x3837 && p == 0x3040;
+        assert_eq!(keyboard_profile(&doc, check).unwrap().name, "办公");
+        doc["identity"]["productId"] = json!(12290);
+        assert!(keyboard_profile(&doc, check).is_err());
+    }
+    #[test]
+    fn new_mouse_envelope_checks_model_and_generations_before_hardware() {
+        let doc = json!({"MCHOSE A7 Magnetic":{"name":"游戏","leftKeyType":"00","dpiSum":4,"other":[99]}});
+        assert_eq!(
+            mouse_record("迈从 A7 V3 Magnetic", &doc).unwrap()["other"],
+            json!([99])
+        );
+        assert!(mouse_record("迈从 A7 V3", &doc).is_err());
+        assert!(mouse_record("迈从 A5 V3 Ultra", &json!({"A5 Ultra":{"allInfo":{}}})).is_err());
+    }
     #[test]
     fn g75_projects_known_entries_and_retains_future_entries_in_the_file() {
         let original = json!({"format":FORMAT,"schema":1,"device":G75,"name":"方案",

@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 
 #[path = "razer_pointer.rs"]
 mod embedded;
-pub(super) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
+pub(super) use embedded::{
+    close_embedded, embedded_writing, open_embedded, reload_after_template, resize_embedded,
+};
 
 const FIELDS: usize = 101;
 const INPUT: usize = 102;

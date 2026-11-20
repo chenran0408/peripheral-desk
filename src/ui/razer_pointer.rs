@@ -51,6 +51,14 @@ pub(in crate::ui) unsafe fn resize_embedded(bounds: RECT) {
     }
 }
 
+pub(in crate::ui) unsafe fn reload_after_template() {
+    let hwnd = CHILD.get();
+    if !hwnd.is_null() {
+        let editor = &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Editor);
+        editor.begin(hwnd, None);
+    }
+}
+
 pub(in crate::ui) unsafe fn embedded_writing() -> bool {
     let hwnd = CHILD.get();
     if hwnd.is_null() {

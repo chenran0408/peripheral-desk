@@ -1,4 +1,5 @@
 //! The local MCHOSE editor is a child of the main window on its UI apartment.
+pub mod legacy_templates;
 pub mod timing;
 mod writes;
 pub use writes::{closing, take_write_notices, WRITE_MESSAGE};

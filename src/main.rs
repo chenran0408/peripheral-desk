@@ -6,6 +6,7 @@ pub use peripheral_desk::{
 mod configuration_ui;
 mod controls_ui;
 mod device_templates;
+mod family_editor;
 mod generic_lighting_ui;
 mod lighting_ui;
 mod paint;

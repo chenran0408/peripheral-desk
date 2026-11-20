@@ -1015,6 +1015,32 @@ impl Drop for Library {
         }
     }
 }
+// Source template documents can be 8 MiB. The worker envelope also holds the
+// selected model, target and configuration directory.
+const TEMPLATE_PACKET_LIMIT: usize = 8 * 1024 * 1024 + 64 * 1024;
+fn is_template_op(op: &str) -> bool {
+    matches!(
+        op,
+        "template-read"
+            | "template-prepare"
+            | "template-settings"
+            | "mhub-magnetic-template-read"
+            | "mhub-magnetic-template-apply"
+            | "mhub-audio-template-read"
+            | "mhub-audio-template-apply"
+    )
+}
+fn packet_limit(request: &Value, ordinary: usize) -> usize {
+    if request
+        .get("op")
+        .and_then(Value::as_str)
+        .is_some_and(is_template_op)
+    {
+        TEMPLATE_PACKET_LIMIT
+    } else {
+        ordinary
+    }
+}
 fn invoke_native(key: &str, request: &Value) -> Result<Value> {
     let driver = installed(key)?.ok_or("尚未安装此设备驱动，请打开驱动仓库下载")?;
     compatible(
@@ -1051,7 +1077,7 @@ fn invoke_native(key: &str, request: &Value) -> Result<Value> {
         );
         let input = serde_json::to_vec(request).map_err(|e| e.to_string())?;
         let output = call(input.as_ptr(), input.len());
-        if output.ptr.is_null() || output.len > 4 * 1024 * 1024 {
+        if output.ptr.is_null() || output.len > packet_limit(request, 4 * 1024 * 1024) {
             if !output.ptr.is_null() {
                 free(output.ptr, output.len);
             }
@@ -1076,13 +1102,16 @@ pub fn worker_main(key: &str) {
         safe_id(key)?;
         let mut bytes = Vec::new();
         std::io::stdin()
-            .take(256 * 1024 + 1)
+            .take(TEMPLATE_PACKET_LIMIT as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
-        if bytes.len() > 256 * 1024 {
+        if bytes.len() > TEMPLATE_PACKET_LIMIT {
             return Err("驱动请求过大".into());
         }
         let request: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        if bytes.len() > packet_limit(&request, 256 * 1024) {
+            return Err("驱动请求过大".into());
+        }
         invoke_native(key, &request)
     })();
     let reply = match outcome {
@@ -1182,7 +1211,7 @@ fn invoke_scoped(key: &str, mut request: Value, requested: Option<&DeviceTarget>
         None
     };
     let input = serde_json::to_vec(&request).map_err(|e| e.to_string())?;
-    if input.len() > 256 * 1024 {
+    if input.len() > packet_limit(&request, 256 * 1024) {
         return Err("驱动请求过大".into());
     }
     let mut child = Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
@@ -1194,11 +1223,12 @@ fn invoke_scoped(key: &str, mut request: Value, requested: Option<&DeviceTarget>
         .spawn()
         .map_err(|e| e.to_string())?;
     let mut output = child.stdout.take().unwrap();
+    let output_limit = packet_limit(&request, 4 * 1024 * 1024);
     let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         output
             .by_ref()
-            .take(4 * 1024 * 1024 + 1)
+            .take(output_limit as u64 + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         Ok::<_, String>(bytes)
@@ -1211,7 +1241,11 @@ fn invoke_scoped(key: &str, mut request: Value, requested: Option<&DeviceTarget>
         return Err(e.to_string());
     }
     let operation = request.get("op").and_then(Value::as_str).unwrap_or("");
-    let timeout = if key == "mchose-g75-pro" && operation == "controls-apply" {
+    // A complete mouse or keyboard template spans several on-board regions.
+    // Leave time for readback and for the driver to finish a rollback.
+    let timeout = if is_template_op(operation)
+        || (key == "mchose-g75-pro" && operation == "controls-apply")
+    {
         360
     } else if key == "hecate-g2-pro" {
         if operation.contains("apply") || operation == "lighting-switch" {
@@ -1253,7 +1287,7 @@ fn invoke_scoped(key: &str, mut request: Value, requested: Option<&DeviceTarget>
         std::thread::sleep(Duration::from_millis(20));
     }
     let bytes = reader.join().map_err(|_| "驱动结果读取线程异常")??;
-    if bytes.len() > 4 * 1024 * 1024 {
+    if bytes.len() > output_limit {
         return Err("驱动结果超出体积限制".into());
     }
     let reply: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

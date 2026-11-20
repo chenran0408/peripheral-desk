@@ -1,5 +1,8 @@
 # 安装与使用
 
+在「设备调节」选择自己的迈从设备即可进入原生页。CZ 有线磁轴键盘支持按实体键设置，兼容耳机与音箱可调音量及型号支持的板载音效，0x4D 鼠标可导入原版模板。新型号插件可在「插件管理」选择预览渠道下载。[型号和功能名单](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-NATIVE-FAMILIES.md)
+
+
 ## 第一次运行
 
 1. 从 [主程序发布页](https://github.com/chenran0408/peripheral-desk/releases) 下载 Windows x64 `setup.exe` 安装到当前用户目录，或下载 ZIP 解压运行 `PeripheralDesk.exe`。安装不需要管理员权限。

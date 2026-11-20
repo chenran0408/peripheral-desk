@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.4.12-preview.4
+
+- 在「设备调节」点选迈从磁轴键盘，可在原版键位图上设置触发行程、快速触发、DKS 和 SOCD。此次覆盖 26 款有线键盘和布局版本。
+- 15 款迈从耳机和音箱新增原生音频页。V9 Pro 2 和 R9 可直接点选十段 EQ 曲线调整增益，K20 系列可调灯，K20 GT 还可改屏幕主题。
+- 17 款迈从鼠标新增原生本地模板，支持原版文件。键盘和耳机也可按型号保存自己的设置。模板可在本机重命名、删除和导出，也可从本机旧版 M HUB 导入已有的鼠标和磁轴模板。
+- 升级后，在「插件管理」的预览通道更新或安装自己的型号。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.4/PeripheralDesk-0.4.12-preview.4-windows-x64-setup.exe) · [查看设备名单和功能](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-NATIVE-FAMILIES.md)
+
 ## 0.4.12-preview.3
 
 - 外设盒换用 M HUB 的浅灰背景、灰白卡片和蓝色选中态。主窗口、编辑器、插件管理和托盘共用配色。在「偏好设置」可切换 M HUB 深色。

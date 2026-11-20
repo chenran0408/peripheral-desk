@@ -32,7 +32,10 @@ const APPLY: i32 = 114;
 const SAVE: i32 = 115;
 const IMPORT: i32 = 116;
 const EXPORT: i32 = 117;
-type Outcome = Result<(Option<Template>, String, bool), String>;
+const RENAME: i32 = 118;
+const DELETE: i32 = 119;
+const LEGACY: i32 = 120;
+type Outcome = Result<(Vec<Template>, String, bool), String>;
 
 struct Window {
     key: &'static str,
@@ -44,6 +47,7 @@ struct Window {
     brush: HBRUSH,
     pending: Option<mpsc::Receiver<Outcome>>,
     applying: bool,
+    list_changed: bool,
     needs_refresh: bool,
 }
 
@@ -64,11 +68,17 @@ impl Window {
             (LIST, true),
             (NAME, true),
             (IMPORT, true),
+            (LEGACY, templates::supports_legacy_import(self.key)),
             (EXPORT, selected),
+            (RENAME, selected),
+            (DELETE, selected),
             (APPLY, selected && self.target.is_some()),
             (SAVE, self.target.is_some()),
         ] {
-            EnableWindow(GetDlgItem(hwnd, id), i32::from(idle && enabled));
+            let child = GetDlgItem(hwnd, id);
+            if !child.is_null() {
+                EnableWindow(child, i32::from(idle && enabled));
+            }
         }
     }
 
@@ -163,12 +173,23 @@ impl Window {
         );
         SendDlgItemMessageW(hwnd, NAME, EM_SETLIMITTEXT, 96, 0);
         for (id, title, r) in [
-            (SAVE, "保存当前设备", R::new(276, 132, 162, 36)),
+            (SAVE, "保存当前设备", R::new(276, 132, 130, 36)),
+            (RENAME, "重命名", R::new(414, 132, 96, 36)),
+            (DELETE, "删除", R::new(518, 132, 98, 36)),
             (IMPORT, "导入本地文件", R::new(24, 307, 110, 36)),
             (EXPORT, "导出模板", R::new(142, 307, 110, 36)),
             (APPLY, "应用所选模板", R::new(454, 307, 162, 36)),
         ] {
             child(id, "BUTTON", title, r, BS_OWNERDRAW as u32);
+        }
+        if templates::supports_legacy_import(self.key) {
+            child(
+                LEGACY,
+                "BUTTON",
+                "导入旧库",
+                R::new(276, 307, 124, 36),
+                BS_OWNERDRAW as u32,
+            );
         }
         child(
             STATUS,
@@ -206,7 +227,21 @@ impl Window {
             return;
         }
         let selected = self.selected(hwnd).cloned();
+        if id == DELETE {
+            let Some(entry) = &selected else { return };
+            let prompt = format!("删除本地模板「{}」？", entry.name);
+            if MessageBoxW(
+                hwnd,
+                wide(&prompt).as_ptr(),
+                wide("删除模板").as_ptr(),
+                MB_YESNO | MB_DEFBUTTON2 | MB_ICONQUESTION,
+            ) != IDYES
+            {
+                return;
+            }
+        }
         let key = self.key;
+        let product = self.model_name;
         let path = if matches!(id, IMPORT | EXPORT) {
             let file = format!("{key}-template.json");
             match configuration_ui::choose_file(hwnd, id == IMPORT, &file) {
@@ -227,13 +262,17 @@ impl Window {
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.applying = id == APPLY;
+        self.list_changed = matches!(id, RENAME | DELETE);
         self.refresh(hwnd);
         self.status(
             hwnd,
             match id {
-                SAVE => "正在从所选设备读取当前按键与灯光…",
+                SAVE => "正在从所选设备读取设置…",
+                RENAME => "正在重命名…",
+                DELETE => "正在删除本地模板…",
                 APPLY => "正在核对当前设备，并写入不同的设置…",
                 IMPORT => "正在读取本地模板文件…",
+                LEGACY => "正在读取此型号的旧 M HUB 本地模板…",
                 _ => "正在导出模板文件…",
             },
         );
@@ -247,16 +286,29 @@ impl Window {
                         &name,
                     )?;
                     let note = format!("已保存「{}」。\r\n{}", entry.name, entry.detail);
-                    Ok((Some(entry), note, false))
+                    Ok((vec![entry], note, false))
                 }
                 IMPORT => {
                     let entry = templates::import(key, &path.unwrap(), &name)?;
                     let note = format!("已导入「{}」。\r\n{}", entry.name, entry.detail);
-                    Ok((Some(entry), note, false))
+                    Ok((vec![entry], note, false))
+                }
+                LEGACY => {
+                    let (entries, note) = templates::import_legacy(key, product)?;
+                    Ok((entries, note, false))
+                }
+                RENAME => {
+                    let updated =
+                        templates::rename(key, selected.as_ref().ok_or("请先选择模板。")?, &name)?;
+                    Ok((vec![updated], "模板已重命名。".into(), false))
+                }
+                DELETE => {
+                    templates::delete(selected.as_ref().ok_or("请先选择模板。")?)?;
+                    Ok((vec![], "本地模板已删除。".into(), false))
                 }
                 EXPORT => {
                     templates::export(selected.as_ref().ok_or("请先选择模板。")?, &path.unwrap())?;
-                    Ok((None, "模板文件已导出。".into(), false))
+                    Ok((vec![], "模板文件已导出。".into(), false))
                 }
                 APPLY => {
                     let report = templates::apply(
@@ -268,7 +320,7 @@ impl Window {
                         .chain(report.skipped)
                         .collect::<Vec<_>>()
                         .join("\r\n");
-                    Ok((None, message, report.changed != 0))
+                    Ok((vec![], message, report.changed != 0))
                 }
                 _ => unreachable!(),
             })();
@@ -288,9 +340,22 @@ impl Window {
         KillTimer(hwnd, 1);
         self.pending = None;
         match result {
-            Ok((entry, note, wrote)) => {
+            Ok((entries, note, wrote)) => {
                 self.needs_refresh |= wrote;
-                if let Some(entry) = entry {
+                if self.list_changed {
+                    let index = SendDlgItemMessageW(hwnd, LIST, LB_GETCURSEL, 0, 0);
+                    if let Some(index) = usize::try_from(index)
+                        .ok()
+                        .filter(|i| *i < self.entries.len())
+                    {
+                        self.entries.remove(index);
+                        SendDlgItemMessageW(hwnd, LIST, LB_DELETESTRING, index, 0);
+                    }
+                    if !self.entries.is_empty() {
+                        SendDlgItemMessageW(hwnd, LIST, LB_SETCURSEL, 0, 0);
+                    }
+                }
+                for entry in entries {
                     let index = self.add(hwnd, entry);
                     SendDlgItemMessageW(hwnd, LIST, LB_SETCURSEL, index, 0);
                 }
@@ -330,7 +395,11 @@ unsafe extern "system" fn dialog(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> 
                     }
                     window.refresh(hwnd);
                 }
-                IMPORT | EXPORT | APPLY | SAVE if event == BN_CLICKED => window.run(hwnd, id),
+                IMPORT | EXPORT | APPLY | SAVE | RENAME | DELETE | LEGACY
+                    if event == BN_CLICKED =>
+                {
+                    window.run(hwnd, id)
+                }
                 _ => {}
             }
             1
@@ -386,11 +455,7 @@ unsafe extern "system" fn dialog(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> 
                     DT_LEFT,
                 );
             }
-            let hint = if window.key == "mchose-a5-ultra" {
-                "支持外设盒按键模板及首代 A5 Ultra 的 M HUB 六键 JSON。"
-            } else {
-                "保存可读的普通层、Fn 层、Fn2 层和逐键灯光。"
-            };
+            let hint = templates::hint(window.key);
             canvas.text(
                 hint,
                 R::new(24, 360, 592, 26),
@@ -478,6 +543,7 @@ pub(crate) unsafe fn open(owner: HWND, model: usize) -> bool {
         brush: CreateSolidBrush(paint::colorref(paint::palette().field)),
         pending: None,
         applying: false,
+        list_changed: false,
         needs_refresh: false,
     };
     let focus = GetFocus();
@@ -514,8 +580,8 @@ mod tests {
     fn offline_dialog_exposes_local_import_and_requires_a_target_for_writes() {
         unsafe {
             let mut window = Window {
-                key: "mchose-g75-pro",
-                model_name: "G75 Pro",
+                key: "mchose-a5-ultra",
+                model_name: "A5 Ultra",
                 target: None,
                 entries: vec![],
                 dpi: 96,
@@ -523,6 +589,7 @@ mod tests {
                 brush: CreateSolidBrush(paint::colorref(paint::palette().field)),
                 pending: None,
                 applying: false,
+                list_changed: false,
                 needs_refresh: false,
             };
             let hwnd = CreateDialogIndirectParamW(
@@ -534,10 +601,11 @@ mod tests {
             );
             assert!(!hwnd.is_null(), "{}", std::io::Error::last_os_error());
             assert_eq!(IsWindowVisible(hwnd), 0);
-            for id in [LIST, NAME, STATUS, APPLY, SAVE, IMPORT, EXPORT] {
+            for id in [LIST, NAME, STATUS, APPLY, SAVE, IMPORT, EXPORT, LEGACY] {
                 assert!(!GetDlgItem(hwnd, id).is_null());
             }
             assert_ne!(IsWindowEnabled(GetDlgItem(hwnd, IMPORT)), 0);
+            assert_ne!(IsWindowEnabled(GetDlgItem(hwnd, LEGACY)), 0);
             assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, APPLY)), 0);
             assert_eq!(IsWindowEnabled(GetDlgItem(hwnd, SAVE)), 0);
             DestroyWindow(hwnd);

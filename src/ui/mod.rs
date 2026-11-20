@@ -530,6 +530,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 let error = crate::mhub::take_error();
                 if a.page == Page::MHub {
                     a.navigate(hwnd, a.hub_source);
+                } else if matches!(a.page, Page::Tool(_, Tool::Family(_))) {
+                    crate::family_editor::reload();
                 }
                 a.begin(hwnd, None);
                 if let Some(error) = error {
@@ -853,6 +855,8 @@ impl App {
                     hwnd,
                     if REGISTRY[m].key == "mchose-g75-pro" {
                         "灯效与性能"
+                    } else if matches!(tool, Tool::Family(_)) {
+                        "‹  设备调节"
                     } else {
                         "‹  设备设置"
                     },
@@ -1535,7 +1539,7 @@ impl App {
         }
     }
     unsafe fn open_mhub(&mut self, hwnd: HWND, selected: Option<usize>) {
-        if self.hub_open || self.modal_open || crate::mhub::closing() {
+        if self.hub_open || self.modal_open || self.tool_busy() || crate::mhub::closing() {
             return;
         }
         if selected.is_some_and(|m| {
@@ -1547,14 +1551,21 @@ impl App {
             self.render(hwnd);
             return;
         }
+        let source = self.page;
+        if let Page::Tool(model, Tool::Family(_)) = source {
+            if !crate::family_editor::close() {
+                return;
+            }
+            self.page = Page::Device(model);
+        }
         let preferred = selected.map(|m| REGISTRY[m].key);
         crate::mhub::timing::start(preferred.unwrap_or("mhub"));
         match crate::mhub::open_for_model(hwnd, self.hub_bounds(hwnd), preferred) {
             Ok(()) => {
-                self.hub_source = if let Page::Tool(m, _) = self.page {
-                    Page::Device(m)
-                } else {
-                    self.page
+                self.hub_source = match source {
+                    Page::Tool(_, Tool::Family(_)) => source,
+                    Page::Tool(m, _) => Page::Device(m),
+                    _ => source,
                 };
                 self.hub_open = true;
                 self.pointer_sample = None;
@@ -1569,6 +1580,9 @@ impl App {
                 self.tray(hwnd);
             }
             Err(error) => {
+                if let Page::Tool(_, Tool::Family(_)) = source {
+                    self.navigate(hwnd, source);
+                }
                 self.set_status(&error, true);
             }
         }
@@ -1687,10 +1701,25 @@ impl App {
                 self.modal_open = true;
                 let outcome = match command {
                     Command::DeviceTemplates(model) => {
-                        if crate::device_templates::open(hwnd, model)
-                            && self.page == Page::Tool(model, Tool::Bindings)
+                        if (!matches!(self.page, Page::Tool(_, Tool::Family(_)))
+                            || crate::family_editor::allow_replacement())
+                            && crate::device_templates::open(hwnd, model)
                         {
-                            crate::controls_ui::reload_after_template();
+                            match self.page {
+                                Page::Tool(m, Tool::Bindings) if m == model => {
+                                    crate::controls_ui::reload_after_template()
+                                }
+                                Page::Tool(m, Tool::Pointer) if m == model => {
+                                    pointer_editor::reload_after_template()
+                                }
+                                Page::Tool(m, Tool::Family(_)) if m == model => {
+                                    crate::family_editor::reload()
+                                }
+                                Page::Device(m) if m == model => {
+                                    self.pointer_requested = pointer_editor::available(&REGISTRY[m])
+                                }
+                                _ => {}
+                            }
                         }
                         crate::plugin_ui::StoreExit::Close
                     }
@@ -1842,6 +1871,13 @@ impl App {
                         Command::Device(m)
                     };
                     self.command(hwnd, next);
+                }
+            }
+            Command::Device(m)
+                if crate::family_editor::Family::for_device(&REGISTRY[m]).is_some() =>
+            {
+                if let Some(family) = crate::family_editor::Family::for_device(&REGISTRY[m]) {
+                    self.open_tool(hwnd, m, Tool::Family(family));
                 }
             }
             Command::Device(m)
@@ -2469,7 +2505,7 @@ impl App {
                             false
                         }
                 }
-                Command::MHub => !self.modal_open && !crate::mhub::closing(),
+                Command::MHub => !self.modal_open && !self.tool_busy() && !crate::mhub::closing(),
                 Command::Board(op) => {
                     matches!(self.page, Page::Onboard(m) if self.board_enabled(m, op))
                         && self.pending.is_none()

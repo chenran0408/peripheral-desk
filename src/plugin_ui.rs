@@ -158,6 +158,9 @@ impl DriverRow<'_> {
                 "effects" => "音效",
                 "experimental-onboard-macros" => "板载宏（实验）",
                 "macro-section" => "独立读取板载宏",
+                "magnetic-settings" => "磁轴高级设置",
+                "mchose-audio-settings" => "播放与音频设置",
+                "mchose-mouse-templates" => "原生本地模板",
                 "software-macro-trigger" => "常驻软件宏",
                 other => other,
             })

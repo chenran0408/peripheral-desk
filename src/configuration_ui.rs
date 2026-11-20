@@ -308,17 +308,24 @@ pub(crate) unsafe fn choose_file(
     let end = file.iter().position(|&v| v == 0).unwrap_or(file.len());
     Ok(Some(PathBuf::from(String::from_utf16_lossy(&file[..end]))))
 }
-unsafe fn text(hwnd: HWND) -> String {
+pub(crate) unsafe fn text(hwnd: HWND) -> String {
     let mut buffer = vec![0; GetWindowTextLengthW(hwnd).max(0) as usize + 1];
     let count = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
     String::from_utf16_lossy(&buffer[..count.max(0) as usize])
 }
 pub(crate) unsafe fn draw_action_button(item: &DRAWITEMSTRUCT, dpi: u32, primary: usize) -> isize {
+    draw_action_button_on(item, dpi, primary, palette().bg)
+}
+pub(crate) unsafe fn draw_action_button_on(
+    item: &DRAWITEMSTRUCT,
+    dpi: u32,
+    primary: usize,
+    background: u32,
+) -> isize {
     if item.CtlType != ODT_BUTTON {
         return 0;
     }
     // Clear every physical pixel, including antialiased rounded corners.
-    let background = palette().bg;
     let brush = CreateSolidBrush(
         ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
     );
@@ -349,6 +356,8 @@ pub(crate) unsafe fn draw_action_button(item: &DRAWITEMSTRUCT, dpi: u32, primary
         500,
         if disabled {
             palette().dim
+        } else if item.CtlID as usize == primary {
+            palette().on_primary
         } else {
             palette().text
         },

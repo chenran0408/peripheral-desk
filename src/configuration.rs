@@ -600,7 +600,14 @@ fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
         Some(source) => source,
         None => collect(key)?,
     };
-    apply_archive(key, normalize(source, key)?, None, &BTreeSet::new())
+    apply_archive(
+        key,
+        normalize(source, key)?,
+        None,
+        &BTreeSet::new(),
+        None,
+        &[],
+    )
 }
 
 fn apply_archive(
@@ -608,6 +615,8 @@ fn apply_archive(
     archive: Value,
     template_light: Option<u8>,
     protected: &BTreeSet<(u16, u8)>,
+    template_pointer: Option<(u8, Option<&Value>)>,
+    template_a5: &[Action],
 ) -> Result<OperationReport> {
     let model = checked_key(key)?;
     let mut report = OperationReport::default();
@@ -673,6 +682,47 @@ fn apply_archive(
                 .push("音效配置没有可识别的参数表，已保留原值。".into());
         }
     }
+    if !template_a5.is_empty() && key == "mchose-a5-ultra" {
+        let state: State = serde_json::from_value(call(key, json!({"op":"read-state"}))?)
+            .map_err(|e| format!("无法读取原性能设置：{e}"))?;
+        for &wanted in template_a5 {
+            let current = match wanted {
+                Action::Sleep(_) => state.sleep_seconds.map(Action::Sleep),
+                Action::Tune(k, _) => state.tuning.get(&k).map(|v| Action::Tune(k, *v)),
+                _ => None,
+            };
+            if current == Some(wanted) {
+                continue;
+            }
+            let label = match wanted {
+                Action::Sleep(_) => "休眠时间",
+                Action::Tune(k, _) => REGISTRY[model]
+                    .advanced
+                    .iter()
+                    .find(|s| s.key == k)
+                    .map_or("传感器设置", |s| s.title),
+                _ => continue,
+            };
+            let Some(original) = current.filter(|a| REGISTRY[model].validate(*a, &state).is_ok())
+            else {
+                report
+                    .skipped
+                    .push(format!("未读到能恢复的原值，已跳过「{label}」。"));
+                continue;
+            };
+            if REGISTRY[model].validate(wanted, &state).is_err() {
+                report
+                    .skipped
+                    .push(format!("「{label}」的模板值超出当前驱动支持范围。"));
+                continue;
+            }
+            let request = |action: Action| json!({"op":"apply-setting","action":action});
+            plans.push(Plan {
+                request: request(wanted),
+                undo: vec![request(original)],
+            });
+        }
+    }
     if let Some(raw) = archive["cached"].get("controls") {
         match control_state(raw.clone()) {
             Err(_) => report
@@ -683,6 +733,9 @@ fn apply_archive(
                     key,
                     json!({"op":"controls-read","extended_modes":true}),
                 )?)?;
+                if template_pointer.is_some_and(|(profile, _)| baseline.profile != Some(profile)) {
+                    return Err("板载槽已切换，请重新选择模板。".into());
+                }
                 for binding in wanted.bindings {
                     if protected.contains(&(binding.control, binding.layer)) {
                         report
@@ -900,6 +953,14 @@ fn apply_archive(
             1
         }
     });
+    // This group is written last. The model plugin verifies and restores its own blocks;
+    // a failed pointer group also rolls back the preceding key changes.
+    if let Some((profile, Some(record))) = template_pointer {
+        plans.push(Plan {
+            request: json!({"op":"template-settings","profile":profile,"record":record}),
+            undo: vec![],
+        });
+    }
     let mut attempted = Vec::new();
     for (index, plan) in plans.iter().enumerate() {
         attempted.push(index);
@@ -915,7 +976,7 @@ fn apply_archive(
             return Err(format!(
                 "应用中断：{error}；{}",
                 if failed == 0 {
-                    "已逐项恢复原设置"
+                    "先前步骤已恢复；本步结果见上文"
                 } else {
                     "部分原设置恢复失败，请查看设备并重新读取"
                 }
