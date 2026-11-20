@@ -73,6 +73,8 @@ jobs:
             cargo test --locked --no-default-features --features driver-runtime --lib
             if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
           }
+      - name: Verify consecutive G75 Pro key remaps preserve the board map
+        run: node --test src/mhub/fixes/g75-keymap.test.cjs
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
         run: ./scripts/build-desktop.ps1
@@ -114,6 +116,11 @@ jobs:
         run: |
           ./scripts/installer.ps1
           ./scripts/test-installer.ps1 -Version $env:APP_VERSION
+      - name: Build the local driver center from the pinned project source
+        if: hashFiles('installer/mhub/source.lock.json') != ''
+        shell: pwsh
+        run: |
+          ./scripts/pack-reviewed-hub.ps1 -SourceLock installer/mhub/source.lock.json -CoreZip "dist/PeripheralDesk-$env:APP_VERSION-windows-x64.zip" -Work work/mhub-package -Output dist/mhub
       - uses: actions/upload-artifact@v4
         with:
           name: PeripheralDesk-reviewed-release
@@ -121,6 +128,7 @@ jobs:
             dist/*.zip
             dist/*-setup.exe
             dist/SHA256SUMS.txt
+            dist/mhub/
             work/release-notes.md
           if-no-files-found: error
   publish:
@@ -151,14 +159,30 @@ jobs:
           if ($setup.Count -ne 1) { throw "Expected exactly one Windows installer" }
           $extra = @()
           if ($env:RELEASE_TAG.Contains('-')) { $extra = @('--prerelease') }
-          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:RELEASE_TAG --notes-file release-files/work/release-notes.md @extra $zip[0].FullName $setup[0].FullName release-files/dist/SHA256SUMS.txt
+          $hub = @()
+          if (Test-Path release-files/dist/mhub) {
+            $folder = Resolve-Path release-files/dist/mhub
+            $sums = @(Get-ChildItem -LiteralPath $folder -Filter '*-SHA256SUMS.txt' -File)
+            if ($sums.Count -ne 1) { throw 'Missing driver center checksums' }
+            $entries = @(Get-Content -LiteralPath $sums[0].FullName)
+            if ($entries.Count -ne 4) { throw 'Expected driver center installer, portable, resources, and source' }
+            foreach ($line in $entries) {
+              if ($line -notmatch '^([a-f0-9]{64})  ([A-Za-z0-9._-]+)$') { throw 'Invalid driver center checksum entry' }
+              $path = Join-Path $folder $Matches[2]
+              if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $Matches[1]) { throw "Hash mismatch for $path" }
+              $hub += $path
+            }
+            $hub += $sums[0].FullName
+          }
+          gh release create $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --verify-tag --draft --title $env:RELEASE_TAG --notes-file release-files/work/release-notes.md @extra $zip[0].FullName $setup[0].FullName release-files/dist/SHA256SUMS.txt @hub
           if ($LASTEXITCODE -ne 0) { throw "Upload failed; inspect the draft before retrying" }
           gh release edit $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --draft=false
           if ($LASTEXITCODE -ne 0) { throw "Publication failed" }
       - name: Verify the public download matches the reviewed package
         shell: pwsh
         run: |
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir downloaded --pattern '*.zip' --pattern '*-setup.exe' --pattern SHA256SUMS.txt
+          $core = "PeripheralDesk-$($env:RELEASE_TAG.Substring(1))-windows-x64"
+          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir downloaded --pattern "$core.zip" --pattern "$core-setup.exe" --pattern SHA256SUMS.txt
           if ($LASTEXITCODE -ne 0) { throw "Public release download failed" }
           $zip = @(Get-ChildItem downloaded -Filter *.zip -File)
           if ($zip.Count -ne 1) { throw "Expected exactly one published core ZIP" }

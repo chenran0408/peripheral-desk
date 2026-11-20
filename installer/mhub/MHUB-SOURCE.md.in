@@ -1,0 +1,26 @@
+# 外设盒 · 迈从驱动中心
+
+外设盒 @VERSION@ 基于 M HUB 公开部署的网页，维护本地运行的迈从驱动中心。上游入口为 `@BUILD@`。驱动中心的界面、设备修复和资源更新由外设盒提供。迈从网页的提供条件见同目录的 `MHUB-NOTICE.txt`。外设盒自身代码按 AGPL-3.0-only 发布。MiSans 字体和网页依赖各自保留其权利及许可。
+
+## 修改网页
+
+在外设盒中打开迈从驱动中心，通过工作区菜单打开当前工作区。可以编辑其中的 HTML、JavaScript 和 CSS，再重新加载页面。安装目录的 `mhub-builtin/payload.zip` 是此版本附带的初始内容。驱动中心使用本地网页和型号表。线上账号、社区及固件服务请使用厂商官方页面。
+
+## 下载可编辑源码
+
+- [随本版提供的网页源码与改动](@DOWNLOAD@)
+- [同版本外设盒项目源码](@TAG@)，其中 `src/mhub.rs`、`src/mhub/` 实现网页托管、WebHID 和个性化功能。
+- [M HUB 原站](https://www.mchose.com.cn/) 与 [迈从资源 CDN](https://cdn.mchose.com.cn/)。`upstream/` 保存此版本的公开部署文件，包括浏览器实际执行的 JavaScript、HTML、CSS 及配套文件。原厂开发工程未公开。
+- 小米 [MiSans 许可](https://hyperos.mi.com/font-download/MiSans%E5%AD%97%E4%BD%93%E7%9F%A5%E8%AF%86%E4%BA%A7%E6%9D%83%E8%AE%B8%E5%8F%AF%E5%8D%8F%E8%AE%AE.pdf) 随附在 `MiSans-License.pdf`。原网页组件的版权与许可说明一起保存在 `cizhou/CZ_SHARED_DATA/*.LICENSE.txt` 中。
+
+## 重建本版
+
+网页源码包中的 `upstream/` 是本版收录的官方部署文件。`edits/` 列出实际交付的更改及新增文件，便于直接比较。`project/src/mhub/fixes/` 包含 G75 修复源码，`project/src/mhub/hub/` 包含外设盒的网页入口、样式与脚本。打包时由脚本将这些修改应用到库存原版。`resources.json` 列出官方文件原始地址、原版与交付内容的 SHA-256；由外设盒新增的文件只列交付摘要。完整项目在上方同版本源码链接。
+
+在 Windows 上解压网页源码包。下载发布页相同版本的标准绿色版，使用该发布页的 `SHA256SUMS.txt` 核对绿色版。安装 Python 3.11 或更新版本、Rust（含 MSVC x64 构建工具）和 Inno Setup 6。打开 Visual Studio 的 x64 Native Tools 命令提示符，前往解压根目录，将绿色版 ZIP 放在当前目录，并将命令中的 `--iscc` 换成本机的编译器路径。
+
+```powershell
+python project/scripts/package-mhub.py --workspace upstream --core-zip PeripheralDesk-@VERSION@-windows-x64.zip --output build --work temp --iscc "C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
+```
+
+如需加入自己的网页改动，请在命令末尾增加 `--overlay 你的改动目录`。输出目录包含安装版、绿色版、可单独安装的网页资源包、网页源码与校验清单。使用原文件和相同的 Python/zlib 压缩版本，可重建相同内容摘要的 `mhub-builtin/payload.zip`。

@@ -745,7 +745,7 @@ impl App {
         if self.hub_open && !matches!(self.page, Page::Device(m) if self.hub_controls(m)) {
             self.add(
                 hwnd,
-                "返回 M HUB",
+                "返回驱动中心",
                 R::new(12, self.height - 114, SIDEBAR - 24, 36),
                 GHOST,
                 Command::MHub,
@@ -834,9 +834,9 @@ impl App {
                     self.add(
                         hwnd,
                         if self.hub_controls(m) {
-                            "返回 M HUB"
+                            "返回驱动中心"
                         } else {
-                            "打开官方 M HUB"
+                            "打开驱动中心"
                         },
                         R::new(SIDEBAR + 23, h - 148, 144, 38),
                         CHIP,
@@ -1270,7 +1270,7 @@ impl App {
                 match peripheral_desk::resident_macros::list(spec.key) {
                     Ok(state) if !state.active.is_empty() || !state.library.recovery.is_empty() => {
                         message(&format!(
-                            "{} 正在使用软件宏。请在「软件宏」中停用并恢复按键后打开 M HUB。",
+                            "{} 正在使用软件宏。请在「软件宏」中停用并恢复按键后打开驱动中心。",
                             spec.name
                         ));
                         return;
@@ -1296,7 +1296,7 @@ impl App {
                         state.charging = None;
                     }
                 }
-                self.set_status("已打开官方 M HUB，关闭其窗口后恢复本地控制", false);
+                self.set_status("已打开驱动中心，关闭其窗口后恢复本地控制", false);
                 self.tray(hwnd);
             }
             Err(error) => {

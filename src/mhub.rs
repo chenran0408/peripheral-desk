@@ -1,6 +1,9 @@
-//! Official online M HUB in a dedicated WebView2 window and COM apartment.
+//! The local MCHOSE driver center runs in a separate WebView2 COM apartment.
 mod bootstrap;
+mod builtin;
+mod fixes;
 mod menu;
+mod release_resources;
 mod resources;
 mod workspace;
 use crate::hid::wide;
@@ -19,7 +22,7 @@ use webview2_com::{
     take_pwstr, wait_with_pump, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
     NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler,
+    NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
 };
 use windows::{
     core::{PCWSTR, PWSTR},
@@ -35,8 +38,8 @@ use windows_sys::Win32::{
     UI::WindowsAndMessaging::*,
 };
 
-const SITE: &str = "https://www.mchose.com.cn/";
-const TITLE: &str = "迈从 M HUB · 官方网页驱动";
+const SETUP_PAGE: &str = "https://setup.peripheraldesk.test/mchose";
+const TITLE: &str = "外设盒 · 迈从驱动中心";
 const STARTING: usize = 1;
 static WINDOW: AtomicUsize = AtomicUsize::new(0);
 pub const CLOSED_MESSAGE: u32 = WM_APP + 0x4d;
@@ -45,7 +48,7 @@ thread_local! {
     static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
 }
 
-/// While the official page owns the session, local MCHOSE polling and controls are paused.
+/// While the driver center owns the session, local MCHOSE polling and controls are paused.
 pub fn active() -> bool {
     WINDOW.load(Ordering::Acquire) != 0
 }
@@ -88,7 +91,7 @@ pub fn open(owner: HWND) -> Result<(), String> {
         .map(|_| ())
         .map_err(|error| {
             WINDOW.store(0, Ordering::Release);
-            format!("无法启动 M HUB 窗口：{error}")
+            format!("无法启动迈从驱动中心：{error}")
         })
 }
 
@@ -144,7 +147,7 @@ fn run_window(owner: HWND) -> Result<(), String> {
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
-            wide("正在打开迈从 M HUB…").as_ptr(),
+            wide("正在打开迈从驱动中心…").as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
             x,
             y,
@@ -167,7 +170,7 @@ fn run_window(owner: HWND) -> Result<(), String> {
             }
             DestroyWindow(hwnd);
             return Err(format!(
-                "无法载入迈从网页驱动。请检查 Microsoft Edge WebView2 运行时后重新打开。\n{error}"
+                "无法载入迈从驱动中心。请检查 Microsoft Edge WebView2 运行时后重新打开。\n{error}"
             ));
         }
         let mut msg = MSG::default();
@@ -218,16 +221,62 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
     settings.SetIsWebMessageEnabled(false)?;
     let mut token = 0;
     web.add_NavigationStarting(
+        &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
+            if let Some(args) = args {
+                let mut uri = PWSTR::null();
+                args.Uri(&mut uri)?;
+                let uri = take_pwstr(uri);
+                if let Some(command) = setup_command(&uri) {
+                    args.SetCancel(true)?;
+                    if let Some(web) = sender {
+                        let mut source = PWSTR::null();
+                        web.Source(&mut source)?;
+                        let mut clicked = windows::core::BOOL::default();
+                        args.IsUserInitiated(&mut clicked)?;
+                        if take_pwstr(source) == SETUP_PAGE && clicked.as_bool() {
+                            PostMessageW(hwnd, WM_COMMAND, command, 0);
+                        }
+                    }
+                } else if !uri.starts_with(workspace::LOCAL_SITE)
+                    && uri != SETUP_PAGE
+                    && uri != "about:blank"
+                {
+                    args.SetCancel(true)?;
+                }
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
+    web.add_FrameNavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(|_, args| {
             if let Some(args) = args {
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
-                if !uri.starts_with(SITE) && !uri.starts_with(workspace::LOCAL_SITE) {
+                if !uri.starts_with(workspace::LOCAL_SITE)
+                    && !matches!(uri.as_str(), "about:blank" | "about:srcdoc")
+                    && !uri
+                        .strip_prefix("blob:")
+                        .is_some_and(|p| p.starts_with(workspace::LOCAL_SITE))
+                {
                     args.SetCancel(true)?;
-                    let mut clicked = windows::core::BOOL::default();
-                    args.IsUserInitiated(&mut clicked)?;
-                    open_external_link(&uri, clicked.as_bool());
+                }
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
+    web.add_PermissionRequested(
+        &PermissionRequestedEventHandler::create(Box::new(|_, args| {
+            if let Some(args) = args {
+                let mut uri = PWSTR::null();
+                args.Uri(&mut uri)?;
+                let uri = take_pwstr(uri);
+                if uri != workspace::LOCAL_SITE.trim_end_matches('/')
+                    && !uri.starts_with(workspace::LOCAL_SITE)
+                {
+                    args.SetState(COREWEBVIEW2_PERMISSION_STATE_DENY)?;
                 }
             }
             Ok(())
@@ -241,12 +290,8 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                 let mut uri = PWSTR::null();
                 args.Uri(&mut uri)?;
                 let uri = take_pwstr(uri);
-                if uri.starts_with(SITE) || uri.starts_with(workspace::LOCAL_SITE) {
+                if uri.starts_with(workspace::LOCAL_SITE) {
                     browser.Navigate(PCWSTR(wide(&uri).as_ptr()))?;
-                } else {
-                    let mut clicked = windows::core::BOOL::default();
-                    args.IsUserInitiated(&mut clicked)?;
-                    open_external_link(&uri, clicked.as_bool());
                 }
             }
             Ok(())
@@ -266,23 +311,17 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                     }
                 }
                 let title = if success.as_bool() {
-                    let mut local = false;
                     if let Some(web) = sender {
                         let mut uri = PWSTR::null();
                         web.Source(&mut uri)?;
-                        local = take_pwstr(uri).starts_with(workspace::LOCAL_SITE);
-                        let _ = menu::apply_style(&web);
-                        if local {
+                        if take_pwstr(uri).starts_with(workspace::LOCAL_SITE) {
+                            let _ = menu::apply_style(&web);
                             menu::load_user_module(&web)?;
                         }
                     }
-                    if local {
-                        "迈从 M HUB · 本地可编辑工作区"
-                    } else {
-                        TITLE
-                    }
+                    TITLE
                 } else {
-                    "M HUB 页面未载入 · 请检查网络后刷新"
+                    "本地驱动中心未载入 · 请在驱动中心菜单选择或安装资源"
                 };
                 SetWindowTextW(hwnd, wide(title).as_ptr());
             }
@@ -293,22 +332,17 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
     resize(hwnd, &controller)?;
     controller.SetZoomFactor(menu::saved_zoom())?;
     controller.SetIsVisible(true)?;
-    menu::open_initial(&web)?;
+    menu::open_initial(hwnd, &web)?;
     let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
     CONTROLLER.set(Some(controller));
     Ok(())
 }
 
-unsafe fn open_external_link(uri: &str, user_initiated: bool) {
-    if user_initiated && uri.starts_with("https://") {
-        windows_sys::Win32::UI::Shell::ShellExecuteW(
-            null_mut(),
-            wide("open").as_ptr(),
-            wide(uri).as_ptr(),
-            null(),
-            null(),
-            SW_SHOWNORMAL,
-        );
+fn setup_command(uri: &str) -> Option<usize> {
+    match uri.strip_prefix(workspace::LOCAL_SITE)? {
+        "_peripheral_desk/setup/install" => Some(menu::INSTALL),
+        "_peripheral_desk/setup/choose" => Some(menu::SELECT_COPY),
+        _ => None,
     }
 }
 
@@ -325,26 +359,20 @@ unsafe fn resize(hwnd: HWND, controller: &ICoreWebView2Controller) -> windows::c
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
+        WM_INITMENUPOPUP if (l >> 16) == 0 => {
+            menu::update_menu(w as HMENU);
+            0
+        }
         WM_COMMAND if l == 0 => {
             menu::report(hwnd, menu::command(hwnd, w & 0xffff));
             0
         }
-        resources::READY => {
-            resources::ready(w);
-            0
-        }
-        menu::PROGRESS => {
-            if menu::has_download() {
-                SetWindowTextW(
-                    hwnd,
-                    wide(&format!("下载 M HUB 工作区 · 已保存 {w} / {l} 项")).as_ptr(),
-                );
+        menu::BUILTIN_READY => {
+            let result = menu::builtin_ready();
+            if result.is_err() {
+                SetWindowTextW(hwnd, wide(TITLE).as_ptr());
             }
-            0
-        }
-        menu::INSTALLED => {
-            SetWindowTextW(hwnd, wide(TITLE).as_ptr());
-            menu::report(hwnd, menu::installed(hwnd));
+            menu::report(hwnd, result);
             0
         }
         WM_SIZE | WM_SETFOCUS | WM_MOVE => {

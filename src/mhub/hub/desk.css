@@ -1,0 +1,117 @@
+/* Local MCHOSE driver UI. Personal styles are loaded after this sheet. */
+:root {
+  --pd-hub-accent: #ac343c;
+  --pd-hub-ink: #202326;
+  --pd-hub-secondary: #565d64;
+  --pd-hub-surface: #fff;
+  --pd-hub-paper: #f2f3f5;
+  --pd-hub-line: #d8dadf;
+}
+:root:has(.app-header--dark) {
+  --pd-hub-accent: #ff8889;
+  --pd-hub-ink: #f2f2f3;
+  --pd-hub-secondary: #b6b8bf;
+  --pd-hub-surface: #202126;
+  --pd-hub-paper: #16171b;
+  --pd-hub-line: #3b3c43;
+}
+[data-pd-hub-hidden],
+.app-header__logo-group, .header-promotion, .download-client-popover,
+.device-card-upgrade, [data-home-card-key="advertisement-card"],
+.mouse-upgrade-panel, .device-card-ad-learn__button,
+.guide-dialog, .el-overlay:has(.guide-dialog) {
+  display: none !important;
+}
+.pd-hub-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 13px;
+  white-space: nowrap;
+  color: var(--pd-hub-ink);
+  font: 600 18px/1.2 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+.pd-hub-brand > small {
+  border-inline-start: 1px solid var(--pd-hub-line);
+  padding-inline-start: 13px;
+  color: var(--pd-hub-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.connect-device--web-guide:has(.web-no-device) {
+  background: var(--pd-hub-paper);
+}
+.connect-device--web-guide:has(.web-no-device) .connect-device__web-guide-background,
+.web-no-device:has(.pd-hub-help) .web-no-device__illustration {
+  display: none;
+}
+.no-device-guide .web-no-device:has(.pd-hub-help) {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-columns: minmax(260px, 1.6fr) minmax(190px, 1fr);
+  align-items: center;
+  gap: clamp(24px, 4vw, 64px);
+  width: min(790px, calc(100% - 64px));
+  height: auto;
+  padding: clamp(26px, 4vw, 56px);
+  border: 1px solid var(--pd-hub-line);
+  border-radius: 22px;
+  background: var(--pd-hub-surface);
+  color: var(--pd-hub-ink);
+  text-align: start;
+  transform: none;
+}
+.web-no-device:has(.pd-hub-help) .web-no-device__intro {
+  position: static;
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 14px;
+  width: auto;
+  max-width: none;
+  padding: 0;
+  text-align: start;
+  transform: none;
+}
+.web-no-device:has(.pd-hub-help) .web-no-device__title {
+  margin: 0;
+  color: var(--pd-hub-ink);
+  font-size: clamp(27px, 3.8vw, 40px);
+  line-height: 1.18;
+  letter-spacing: -.035em;
+}
+.web-no-device:has(.pd-hub-help) .web-no-device__description {
+  margin: 0;
+  color: var(--pd-hub-secondary);
+  line-height: 1.7;
+  font-size: 14px;
+}
+.web-no-device:has(.pd-hub-help) .web-no-device__authorize {
+  margin: 7px 0 0;
+  min-width: 128px;
+}
+.web-no-device__authorize::part(button):focus-visible {
+  outline: 2px solid var(--pd-hub-accent);
+  outline-offset: 4px;
+}
+.pd-hub-help {
+  margin: 0;
+  padding-inline-start: clamp(16px, 3vw, 34px);
+  border-inline-start: 1px solid var(--pd-hub-line);
+  font: 14px/1.6 "Segoe UI", "Microsoft YaHei UI", sans-serif;
+}
+.pd-hub-help dt { color: var(--pd-hub-ink); font-weight: 600; }
+.pd-hub-help dd { margin: 3px 0 16px; color: var(--pd-hub-secondary); }
+.pd-hub-help dd:last-child { margin-bottom: 0; }
+@media (max-width: 680px) {
+  .no-device-guide .web-no-device:has(.pd-hub-help) {
+    grid-template-columns: minmax(0, 1fr);
+    width: calc(100% - 32px);
+    gap: 20px;
+    padding: 22px;
+  }
+  .pd-hub-help {
+    padding: 14px 0 0;
+    border-inline-start: 0;
+    border-block-start: 1px solid var(--pd-hub-line);
+  }
+}

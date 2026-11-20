@@ -11,6 +11,9 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    // MoveFileExW needs a verbatim path when an editable workspace exceeds MAX_PATH.
+    let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+    let path = parent.join(path.file_name().ok_or("缺少文件名")?);
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -29,10 +32,13 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
         unsafe {
+            use std::os::windows::ffi::OsStrExt;
             use windows_sys::Win32::Storage::FileSystem::*;
+            let source: Vec<_> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+            let target: Vec<_> = path.as_os_str().encode_wide().chain(Some(0)).collect();
             if MoveFileExW(
-                crate::hid::wide(&temporary.to_string_lossy()).as_ptr(),
-                crate::hid::wide(&path.to_string_lossy()).as_ptr(),
+                source.as_ptr(),
+                target.as_ptr(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             ) == 0
             {

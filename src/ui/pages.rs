@@ -80,7 +80,7 @@ pub(super) fn connection(s: &backend::State, installed: bool) -> &str {
         return "尚未安装插件";
     }
     if crate::plugin_manager::web_driver_owns(&s.key) {
-        return "M HUB 控制中";
+        return "驱动中心控制中";
     }
     if !s.fresh {
         return if s.present {
@@ -100,7 +100,7 @@ pub(super) fn connection(s: &backend::State, installed: bool) -> &str {
 }
 pub(super) fn reading(s: &backend::State, spec: &crate::devices::DeviceSpec) -> String {
     if crate::plugin_manager::web_driver_owns(&s.key) && s.percent.is_none() {
-        return "M HUB 控制中".into();
+        return "驱动中心控制中".into();
     }
     match (s.fresh, s.percent) {
         (true, Some(p)) => format!("{p}%"),
@@ -591,7 +591,7 @@ impl App {
         }
         if self.hub_controls(m) {
             c.text(
-                "正在使用 M HUB",
+                "正在使用迈从驱动中心",
                 R::new(cx, 179, rw - 60, 38),
                 22,
                 600,
@@ -599,7 +599,7 @@ impl App {
                 DT_LEFT,
             );
             c.text(
-                "在官方窗口选择设备并完成设置。关闭 M HUB 窗口后，外设盒会自动恢复读取。",
+                "在驱动中心选择设备并完成设置。关闭窗口后，设备页会恢复读取。",
                 R::new(cx, 237, rw - 60, 72),
                 14,
                 400,

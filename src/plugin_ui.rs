@@ -755,7 +755,7 @@ impl Manager {
             hwnd,
             MHUB,
             "BUTTON",
-            "官方 M HUB",
+            "打开驱动中心",
             R::new(862, 168, 132, 30),
             BS_OWNERDRAW as u32,
         );

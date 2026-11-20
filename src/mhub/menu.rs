@@ -1,10 +1,9 @@
 use super::*;
-use std::sync::atomic::AtomicBool;
 use windows::core::Interface;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
-const OFFICIAL: usize = 2101;
-const INSTALL: usize = 2102;
+const OPEN_BUILTIN: usize = 2105;
+pub(super) const INSTALL: usize = 2102;
 const LOCAL: usize = 2103;
 const DIRECTORY: usize = 2104;
 const STYLE: usize = 2111;
@@ -14,35 +13,34 @@ const ZOOM_SMALL: usize = 2121;
 const ZOOM_NORMAL: usize = 2122;
 const ZOOM_LARGE: usize = 2123;
 const RELOAD: usize = 2131;
-const SELECT_COPY: usize = 2132;
+pub(super) const SELECT_COPY: usize = 2132;
 const COLOR_DEFAULT: usize = 2140;
 const COLOR_CORAL: usize = 2141;
 const COLOR_TEAL: usize = 2142;
-pub(super) const INSTALLED: u32 = WM_APP + 71;
-pub(super) const PROGRESS: u32 = WM_APP + 72;
-static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+pub(super) const BUILTIN_READY: u32 = WM_APP + 75;
+type Prepared = Result<(PathBuf, &'static str), String>;
 thread_local! {
-    static RESULT: RefCell<Option<mpsc::Receiver<Result<PathBuf,String>>>> = const {RefCell::new(None)};
+    static BUILTIN_RESULT: RefCell<Option<mpsc::Receiver<Prepared>>> = const {RefCell::new(None)};
 }
 
 pub(super) unsafe fn create(hwnd: HWND) {
     let bar = CreateMenu();
     for (name, items) in [
         (
-            "工作区(&W)",
+            "驱动中心(&W)",
             &[
-                (INSTALL, "下载或更新可编辑副本…"),
-                (LOCAL, "打开本地副本"),
-                (DIRECTORY, "打开网页文件夹"),
-                (SELECT_COPY, "切换已保存的版本…"),
-                (OFFICIAL, "返回官方网站"),
+                (OPEN_BUILTIN, "使用随软件安装的版本"),
+                (INSTALL, "安装或更新驱动中心…"),
+                (LOCAL, "使用当前本地版本"),
+                (DIRECTORY, "打开驱动中心文件夹"),
+                (SELECT_COPY, "切换本地版本…"),
                 (RELOAD, "刷新当前页面"),
             ][..],
         ),
         (
             "外观(&V)",
             &[
-                (COLOR_DEFAULT, "使用官网配色"),
+                (COLOR_DEFAULT, "使用默认配色"),
                 (COLOR_CORAL, "珊瑚红强调色"),
                 (COLOR_TEAL, "青绿强调色"),
                 (STYLE, "编辑个人样式…"),
@@ -56,11 +54,31 @@ pub(super) unsafe fn create(hwnd: HWND) {
     ] {
         let submenu = CreatePopupMenu();
         for (id, label) in items {
+            if *id == OPEN_BUILTIN && builtin::package().is_none() {
+                continue;
+            }
             AppendMenuW(submenu, MF_STRING, *id, wide(label).as_ptr());
         }
         AppendMenuW(bar, MF_POPUP, submenu as usize, wide(name).as_ptr());
     }
     SetMenu(hwnd, bar);
+}
+
+pub(super) unsafe fn update_menu(menu: HMENU) {
+    let has_workspace = workspace::selected().is_ok();
+    let busy = BUILTIN_RESULT.with_borrow(|slot| slot.is_some());
+    for (id, enabled) in [
+        (LOCAL, has_workspace),
+        (DIRECTORY, has_workspace),
+        (INSTALL, !busy),
+        (OPEN_BUILTIN, !busy),
+    ] {
+        EnableMenuItem(
+            menu,
+            id as u32,
+            MF_BYCOMMAND | if enabled { MF_ENABLED } else { MF_GRAYED },
+        );
+    }
 }
 
 fn zoom_file() -> Result<PathBuf, String> {
@@ -134,7 +152,7 @@ unsafe fn open_path(path: &std::path::Path, edit: bool) -> Result<(), String> {
 }
 
 unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
-    workspace::sync_script(path)?;
+    workspace::prepare_user_hooks(path)?;
     let web3: ICoreWebView2_3 = web.cast().map_err(|e| e.to_string())?;
     web3.SetVirtualHostNameToFolderMapping(
         PCWSTR(wide("mhub.peripheraldesk.test").as_ptr()),
@@ -152,42 +170,26 @@ unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<
 pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
     let web = browser()?;
     match id {
-        OFFICIAL => {
-            web.Navigate(PCWSTR(wide(SITE).as_ptr()))
-                .map_err(|e| e.to_string())?;
-            remember_mode(false)
-        }
+        OPEN_BUILTIN => prepare(
+            hwnd,
+            Some(builtin::package().ok_or("此版本未附带驱动中心资源，请选择安装或更新")?),
+        ),
+        INSTALL => prepare(hwnd, None),
         RELOAD => {
             let mut uri = PWSTR::null();
             web.Source(&mut uri).map_err(|e| e.to_string())?;
             if take_pwstr(uri).starts_with(workspace::LOCAL_SITE) {
-                workspace::sync_script(&workspace::selected()?)?;
+                workspace::prepare_user_hooks(&workspace::selected()?)?;
+                web.Reload()
+            } else {
+                show_install(&web)
             }
-            web.Reload().map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())
         }
-        INSTALL => {
-            if DOWNLOADING.swap(true, Ordering::AcqRel) {
-                return Err("已有工作区下载正在进行".into());
-            }
-            SetWindowTextW(hwnd, wide("正在准备可编辑工作区…").as_ptr());
-            let window = hwnd as usize;
-            let (tx, rx) = mpsc::channel();
-            RESULT.set(Some(rx));
-            thread::spawn(move || {
-                let result = workspace::install(|n, total| {
-                    PostMessageW(window as HWND, PROGRESS, n, total as isize);
-                });
-                DOWNLOADING.store(false, Ordering::Release);
-                if tx.send(result).is_ok() {
-                    PostMessageW(window as HWND, INSTALLED, 0, 0);
-                }
-            });
-            Ok(())
-        }
-        LOCAL => open_local(&web, &workspace::selected()?),
+        LOCAL => open_local(&web, &workspace::selected()?, "local"),
         SELECT_COPY => {
             if let Some(path) = choose_previous(hwnd)? {
-                open_local(&web, &path)?;
+                open_local(&web, &path, "local")?;
             }
             Ok(())
         }
@@ -222,72 +224,131 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
     }
 }
 
-pub(super) unsafe fn installed(hwnd: HWND) -> Result<(), String> {
-    let result = RESULT.take().and_then(|rx| rx.try_recv().ok());
-    if let Some(result) = result {
-        let path = result?;
-        if MessageBoxW(
-            hwnd,
-            wide("网页已保存。现在打开本地副本？\n你可以从“工作区”菜单找到并修改网页文件。")
-                .as_ptr(),
-            wide("M HUB 可编辑工作区").as_ptr(),
-            MB_YESNO | MB_ICONINFORMATION,
-        ) == IDYES
-        {
-            open_local(&browser()?, &path)?;
-        }
-    }
-    Ok(())
-}
-
 pub(super) unsafe fn report(hwnd: HWND, result: Result<(), String>) {
     if let Err(e) = result {
         MessageBoxW(
             hwnd,
             wide(&e).as_ptr(),
-            wide("M HUB 工作区").as_ptr(),
+            wide(TITLE).as_ptr(),
             MB_OK | MB_ICONERROR,
         );
     }
 }
 
-pub(super) fn has_download() -> bool {
-    RESULT.with_borrow(|r| r.is_some())
+fn remember_mode(mode: &str) -> Result<(), String> {
+    crate::storage::atomic_write(&workspace::root()?.join("mode.txt"), mode.as_bytes())
 }
 
-fn remember_mode(local: bool) -> Result<(), String> {
-    crate::storage::atomic_write(
-        &workspace::root()?.join("mode.txt"),
-        if local { b"local" } else { b"official" },
-    )
-}
-
-unsafe fn open_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
+unsafe fn open_local(
+    web: &ICoreWebView2,
+    path: &std::path::Path,
+    mode: &str,
+) -> Result<(), String> {
+    BUILTIN_RESULT.take();
     navigate_local(web, path)?;
     let build = path
         .file_name()
         .and_then(|s| s.to_str())
-        .filter(|s| workspace::build_name(s))
+        .filter(|s| workspace::workspace_name(s))
         .ok_or("网页副本的版本目录无效")?;
     crate::storage::atomic_write(&workspace::root()?.join("current.txt"), build.as_bytes())?;
-    remember_mode(true)
+    remember_mode(mode)
 }
 
-pub(super) unsafe fn open_initial(web: &ICoreWebView2) -> windows::core::Result<()> {
-    if let Ok(root) = workspace::root() {
-        if std::fs::read_to_string(root.join("mode.txt"))
-            .as_deref()
-            .ok()
-            == Some("local")
-        {
-            if let Ok(path) = workspace::selected() {
-                return navigate_local(web, &path).map_err(|e| {
-                    windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), &e)
-                });
+unsafe fn prepare(hwnd: HWND, package: Option<PathBuf>) -> Result<(), String> {
+    if BUILTIN_RESULT.with_borrow(|r| r.is_some()) {
+        return Ok(());
+    }
+    let root = workspace::root()?;
+    let (tx, rx) = mpsc::channel();
+    let window = hwnd as usize;
+    let progress = if package.is_some() {
+        "正在打开内置驱动中心…"
+    } else {
+        "正在安装或更新迈从驱动中心…"
+    };
+    thread::Builder::new()
+        .name("迈从驱动中心".into())
+        .spawn(move || {
+            let result = match package {
+                Some(dir) => builtin::prepare(&dir, &root).map(|p| (p, "builtin")),
+                None => release_resources::install(&root).map(|p| (p, "local")),
+            };
+            if tx.send(result).is_ok() {
+                PostMessageW(window as HWND, BUILTIN_READY, 0, 0);
+            }
+        })
+        .map_err(|e| e.to_string())?;
+    BUILTIN_RESULT.set(Some(rx));
+    SetWindowTextW(hwnd, wide(progress).as_ptr());
+    Ok(())
+}
+
+unsafe fn show_install(web: &ICoreWebView2) -> windows::core::Result<()> {
+    web.Navigate(PCWSTR(wide(SETUP_PAGE).as_ptr()))
+}
+
+pub(super) unsafe fn builtin_ready() -> Result<(), String> {
+    let result = BUILTIN_RESULT.with_borrow(|r| r.as_ref().and_then(|rx| rx.try_recv().ok()));
+    if let Some(result) = result {
+        BUILTIN_RESULT.take();
+        let web = browser()?;
+        match result {
+            Ok((path, mode)) => open_local(&web, &path, mode)?,
+            Err(error) => {
+                let mut source = PWSTR::null();
+                web.Source(&mut source).map_err(|e| e.to_string())?;
+                if !take_pwstr(source).starts_with(workspace::LOCAL_SITE) {
+                    show_install(&web).map_err(|e| e.to_string())?;
+                }
+                return Err(error);
             }
         }
     }
-    web.Navigate(PCWSTR(wide(SITE).as_ptr()))
+    Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Initial {
+    Install,
+    Local(PathBuf),
+    Bundled(PathBuf),
+}
+
+fn initial_choice(
+    mode: Option<&str>,
+    bundle: Option<PathBuf>,
+    selected: Option<PathBuf>,
+) -> Initial {
+    match (mode, bundle, selected) {
+        (Some("local" | "official") | None, _, Some(p)) => Initial::Local(p),
+        (_, Some(p), _) => Initial::Bundled(p),
+        (_, None, Some(p)) => Initial::Local(p),
+        _ => Initial::Install,
+    }
+}
+
+pub(super) unsafe fn open_initial(hwnd: HWND, web: &ICoreWebView2) -> windows::core::Result<()> {
+    let mode = workspace::root()
+        .ok()
+        .and_then(|root| std::fs::read_to_string(root.join("mode.txt")).ok());
+    let choice = initial_choice(
+        mode.as_deref(),
+        builtin::package(),
+        workspace::selected().ok(),
+    );
+    let result = match choice {
+        Initial::Local(path) => navigate_local(web, &path).and_then(|()| {
+            if mode.as_deref() == Some("official") {
+                remember_mode("local")
+            } else {
+                Ok(())
+            }
+        }),
+        Initial::Bundled(path) => prepare(hwnd, Some(path)),
+        Initial::Install => return show_install(web),
+    };
+    result.map_err(|e| windows::core::Error::new(windows::core::HRESULT(0x80004005u32 as i32), e))
 }
 
 unsafe fn choose_previous(hwnd: HWND) -> Result<Option<PathBuf>, String> {
@@ -326,7 +387,7 @@ unsafe fn choose_previous(hwnd: HWND) -> Result<Option<PathBuf>, String> {
         || !dir
             .file_name()
             .and_then(|s| s.to_str())
-            .is_some_and(workspace::build_name)
+            .is_some_and(workspace::workspace_name)
     {
         return Err("请选择 MHubWorkspace 中已保存版本的 index.html".into());
     }
@@ -345,4 +406,39 @@ pub(super) unsafe fn load_user_module(web: &ICoreWebView2) -> windows::core::Res
         script.src='/_peripheral_desk/personal.js?v='+Date.now(); document.head.append(script);
     })()"#;
     web.ExecuteScript(PCWSTR(wide(code).as_ptr()), None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn offline_start_migrates_official_and_keeps_selected_workspace() {
+        let bundle = PathBuf::from("pack");
+        let edited = PathBuf::from("edited");
+        assert_eq!(
+            initial_choice(None, Some(bundle.clone()), None),
+            Initial::Bundled(bundle.clone())
+        );
+        assert_eq!(
+            initial_choice(Some("official"), Some(bundle.clone()), Some(edited.clone())),
+            Initial::Local(edited.clone())
+        );
+        assert_eq!(
+            initial_choice(Some("local"), Some(bundle), Some(edited.clone())),
+            Initial::Local(edited.clone())
+        );
+        assert_eq!(
+            initial_choice(Some("builtin"), None, Some(edited.clone())),
+            Initial::Local(edited)
+        );
+        assert_eq!(
+            initial_choice(Some("official"), Some(PathBuf::from("pack")), None),
+            Initial::Bundled(PathBuf::from("pack"))
+        );
+        assert_eq!(
+            initial_choice(Some("official"), None, None),
+            Initial::Install
+        );
+        assert_eq!(initial_choice(None, None, None), Initial::Install);
+    }
 }
