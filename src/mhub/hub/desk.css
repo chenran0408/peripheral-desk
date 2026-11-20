@@ -1,19 +1,11 @@
-/* Local MCHOSE driver UI. Personal styles are loaded after this sheet. */
+/* Local M HUB chrome follows the bundled driver-ui palette. Personal styles load last. */
 :root {
-  --pd-hub-accent: #ac343c;
-  --pd-hub-ink: #202326;
-  --pd-hub-secondary: #565d64;
-  --pd-hub-surface: #fff;
-  --pd-hub-paper: #f2f3f5;
-  --pd-hub-line: #d8dadf;
-}
-:root:has(.app-header--dark) {
-  --pd-hub-accent: #ff8889;
-  --pd-hub-ink: #f2f2f3;
-  --pd-hub-secondary: #b6b8bf;
-  --pd-hub-surface: #202126;
-  --pd-hub-paper: #16171b;
-  --pd-hub-line: #3b3c43;
+  --pd-hub-accent: var(--du-accent-blue, #0053e2);
+  --pd-hub-ink: var(--du-on-l-c2, #151515);
+  --pd-hub-secondary: var(--du-on-l-c4, #565656);
+  --pd-hub-surface: var(--du-fill-p8, #fff);
+  --pd-hub-paper: var(--du-bg-b1, #e6e7ed);
+  --pd-hub-line: var(--du-fill-p14, #cbccd1);
 }
 [data-pd-hub-hidden],
 .app-header__logo-group, .header-promotion, .download-client-popover,

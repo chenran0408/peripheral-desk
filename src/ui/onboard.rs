@@ -1,5 +1,6 @@
 //! Existing Logitech onboard profiles and their saved DPI stages.
 use super::*;
+use crate::paint::palette;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -184,7 +185,7 @@ impl App {
             R::new(x, 84, w - 150, 38),
             26,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.text(
@@ -192,17 +193,22 @@ impl App {
             R::new(x + 1, 125, w - 150, 22),
             13,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         let panel = |y, h, title: &str, hint: &str| {
-            c.round(R::new(x, y, w, h), 14, PANEL, Some(BORDER));
+            c.round(
+                R::new(x, y, w, h),
+                14,
+                palette().panel,
+                Some(palette().border),
+            );
             c.text(
                 title,
                 R::new(x + 24, y + 11, w - 48, 28),
                 17,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -210,7 +216,7 @@ impl App {
                 R::new(x + 24, y + 39, w - 48, 25),
                 13,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
         };
@@ -231,7 +237,7 @@ impl App {
                 R::new(x + 24, 244, w - 48, 104),
                 14,
                 400,
-                TEXT,
+                palette().text,
                 DT_LEFT | DT_WORDBREAK,
             );
             return;

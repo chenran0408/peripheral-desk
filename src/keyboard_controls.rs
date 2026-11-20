@@ -1,5 +1,6 @@
 //! G75 Pro structured controls derived from the official MCHOSE HUB schemas.
 //! Unknown mappings, matrix holes and trailing bytes are preserved verbatim.
+mod macros;
 use crate::{
     controls::{Binding, BindingAction, ControlAction, ControlSection, ControlState, KeyColor},
     keyboard::Keyboard,
@@ -104,8 +105,6 @@ const KEYS: [&str; 96] = [
     "End",
     "right",
 ];
-const MACRO_NOTICE: &str =
-    "设备宏暂未开放：官方驱动依赖本地宏目录，尚无完整设备宏备份与读回协议，不能安全覆盖现有宏。";
 fn real_key(index: usize) -> bool {
     index < KEYS.len() && !KEYS[index].starts_with("space") && !KEYS[index].starts_with("noChange")
 }
@@ -151,7 +150,7 @@ fn encode(action: &BindingAction) -> Result<[u8; 4]> {
             let [high, low] = usage.to_be_bytes();
             [2, 0, high, low]
         }
-        BindingAction::Macro(_) => return Err(MACRO_NOTICE.into()),
+        BindingAction::Macro(_) => return Err("请通过板载宏编辑器写入对应宏及播放方式".into()),
         _ => return Err("G75 不支持该键位动作".into()),
     })
 }
@@ -197,16 +196,17 @@ pub fn read_sections(keyboard: &Keyboard, section: Option<ControlSection>) -> Re
         binding_types: ["mouse", "keyboard", "consumer", "disabled"]
             .map(String::from)
             .to_vec(),
-        notice: MACRO_NOTICE.into(),
         ..ControlState::default()
     };
     let layers: &[u8] = match &section {
         Some(ControlSection::Layer(n @ 0..=2)) => std::slice::from_ref(n),
         Some(ControlSection::Layer(_)) => return Err("键位层超出范围".into()),
         Some(ControlSection::Colors) => &[],
+        Some(ControlSection::Macros) => &[0],
         None => &[0, 1, 2],
     };
     let mut errors = Vec::new();
+    let mut macro_bindings = Vec::new();
     for &layer in layers {
         match keyboard.read_block_layer(0x41, layer).and_then(|bytes| {
             validate_bindings(&bytes)?;
@@ -218,12 +218,19 @@ pub fn read_sections(keyboard: &Keyboard, section: Option<ControlSection>) -> Re
                     .enumerate()
                     .filter(|(index, _)| real_key(*index))
                 {
+                    let raw = &bytes[index * 4..index * 4 + 4];
+                    if let [3, mode, 1, slot] = raw {
+                        if layer == 0 {
+                            macro_bindings.push((index as u16, *mode, *slot));
+                        }
+                    }
                     state.bindings.push(Binding {
                         control: index as u16,
                         layer,
                         label: label(key).into(),
-                        action: decode(&bytes[index * 4..index * 4 + 4]),
-                        editable: *key != "Fn",
+                        action: decode(raw),
+                        editable: *key != "Fn"
+                            && (raw[0] != 3 || matches!(raw, [3, 1 | 2 | 4, 1, _])),
                     });
                 }
             }
@@ -248,11 +255,19 @@ pub fn read_sections(keyboard: &Keyboard, section: Option<ControlSection>) -> Re
             Err(error) => errors.push(format!("逐键灯：{error}")),
         }
     }
+    if section.is_none() || section == Some(ControlSection::Macros) {
+        if let Err(error) = macros::populate(keyboard, &mut state, &macro_bindings) {
+            if section == Some(ControlSection::Macros) {
+                return Err(error);
+            }
+            errors.push(format!("无法读取板载宏：{error}"));
+        }
+    }
     if !errors.is_empty() {
         if section.is_some() {
             return Err(errors.join("；"));
         }
-        state.notice = format!("{} {}", errors.join("；"), MACRO_NOTICE);
+        state.notice = errors.join("；");
     }
     Ok(state)
 }
@@ -294,7 +309,10 @@ pub fn apply(keyboard: &Keyboard, action: &ControlAction) -> Result<()> {
             }
             Ok(())
         }
-        ControlAction::Macro { .. } => Err(MACRO_NOTICE.into()),
+        ControlAction::Macro {
+            control,
+            definition,
+        } => macros::apply(keyboard, *control, definition),
     }
 }
 fn label(key: &str) -> &str {

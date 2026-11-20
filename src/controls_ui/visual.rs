@@ -1,5 +1,6 @@
 //! Model artwork and physical key coordinates for the embedded native editor.
 use super::*;
+use crate::paint::palette;
 use serde::Deserialize;
 use std::{collections::BTreeSet, fs::File, io::Read};
 use windows::{
@@ -269,6 +270,8 @@ impl Editor {
                 "多媒体",
                 "禁用此键",
                 "DPI 循环",
+                "升高一档 DPI",
+                "降低一档 DPI",
             ];
             let kinds = self
                 .kinds()
@@ -358,6 +361,7 @@ impl Editor {
         }
         match self.page {
             0 => Some(ControlSection::Layer(visual.layer)),
+            1 if REGISTRY[self.model].supports("macro-section") => Some(ControlSection::Macros),
             2 => Some(ControlSection::Colors),
             _ => None,
         }
@@ -367,6 +371,7 @@ impl Editor {
             !self.state.as_ref().is_some_and(|s| match section {
                 ControlSection::Layer(layer) => s.bindings.iter().any(|b| b.layer == layer),
                 ControlSection::Colors => !s.colors.is_empty(),
+                ControlSection::Macros => s.macro_supported,
             })
         }) {
             self.restore_selection = (selected != u16::MAX).then_some(selected);
@@ -477,16 +482,16 @@ impl Editor {
         let v = self.visual.as_ref().unwrap();
         let d = &v.diagram;
         let selected = self.visual_selected();
-        c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
+        c.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
         c.text(
             REGISTRY[self.model].name,
             R::new(24, 12, 430, 36),
             24,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
-        c.round(STAGE, 14, PANEL, Some(BORDER));
+        c.round(STAGE, 14, palette().panel, Some(palette().border));
         if let Some(art) = &v.art {
             let [sw, sh] = d.size;
             c.image(art.image, d.project(d.art.unwrap_or([0, 0, sw, sh])), true);
@@ -498,13 +503,13 @@ impl Editor {
             if let Some([ax, ay]) = k.anchor {
                 let anchor = d.project([ax, ay, 1, 1]);
                 let edge = if anchor.x > r.x + r.w { r.x + r.w } else { r.x };
-                c.line(edge, r.y + r.h / 2, anchor.x, anchor.y, MUTED, 1.);
+                c.line(edge, r.y + r.h / 2, anchor.x, anchor.y, palette().muted, 1.);
                 c.ellipse(
                     R::new(anchor.x - 3, anchor.y - 3, 6, 6),
                     if selected == k.id || v.hover == Some(k.id) {
-                        RED
+                        palette().accent
                     } else {
-                        MUTED
+                        palette().muted
                     },
                 );
             }
@@ -521,13 +526,13 @@ impl Editor {
                 .as_ref()
                 .and_then(|s| s.colors.iter().find(|c| c.control == k.id));
             let bg = if active {
-                0x99ff3859
+                (0x99 << 24) | (palette().accent & 0x00ffffff)
             } else if hover > 0. && !callout && v.art.is_some() {
-                (((119. * hover) as u32) << 24) | 0x00ff7542
+                (((119. * hover) as u32) << 24) | (palette().accent_light & 0x00ffffff)
             } else if hover > 0. {
-                paint::blend(FIELD, 0xff99442d, hover)
+                paint::blend(palette().field, palette().accent_border, hover)
             } else if callout || v.art.is_none() {
-                FIELD
+                palette().field
             } else {
                 0
             };
@@ -537,11 +542,11 @@ impl Editor {
                     4,
                     bg,
                     Some(if active {
-                        RED
+                        palette().accent
                     } else if hover > 0. {
-                        paint::blend(BORDER, ORANGE, hover)
+                        paint::blend(palette().border, palette().accent_light, hover)
                     } else {
-                        BORDER
+                        palette().border
                     }),
                 );
             }
@@ -562,7 +567,7 @@ impl Editor {
                     r,
                     if callout { 13 } else { 10 },
                     500,
-                    TEXT,
+                    palette().text,
                     DT_CENTER,
                 );
             }
@@ -573,7 +578,14 @@ impl Editor {
             [(24, "选择要着色的键")].as_slice()
         };
         for (x, label) in fields {
-            c.text(label, R::new(*x, 353, 170, 28), 13, 500, MUTED, DT_LEFT);
+            c.text(
+                label,
+                R::new(*x, 353, 170, 28),
+                13,
+                500,
+                palette().muted,
+                DT_LEFT,
+            );
         }
         let hint = if self.page == 2 {
             if self.picked {
@@ -593,14 +605,21 @@ impl Editor {
         } else {
             "正在读取当前层的板载键位…".to_owned()
         };
-        c.text(&hint, R::new(24, 470, 750, 31), 14, 400, MUTED, DT_LEFT);
+        c.text(
+            &hint,
+            R::new(24, 470, 750, 31),
+            14,
+            400,
+            palette().muted,
+            DT_LEFT,
+        );
         if self.page == 2 && self.picked {
             let [r, g, b] = self.rgb;
             c.round(
                 R::new(350, 382, 50, 32),
                 7,
                 0xff000000 | (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b),
-                Some(BORDER),
+                Some(palette().border),
             );
         }
     }

@@ -42,3 +42,5 @@
 插件可以声明 `control-sections`，支持在 `controls-read` 和 `controls-apply` 中接收可选字段 `control_section`。普通层为 `{"layer":0}`，Fn、Fn2 分别为 1、2，灯光为 `"colors"`。返回相同的 `ControlState` 类型，只填入本次已真实读回的区域。旧宿主省略字段时返回全量结果，旧插件在新宿主中沿用全量请求。分层只改变查询范围，写入仍须以目标设备的当前块为基线，并核对结果。
 
 [按迈从型号查原生、内置网页与设备限制](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-EDITORS.md)
+
+声明 `macro-section` 的型号，普通键位页只读当前层。打开板载宏页时发送 `"control_section":"macros"`，读取基本层引用和板载定义。可写入的动作和模式以本次回复为准。17 款迈从 0x4D 鼠标可在 `binding_types` 分别声明 `dpi-up` 和 `dpi-down`。

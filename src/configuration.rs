@@ -18,6 +18,9 @@ use std::{
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
+#[path = "device_templates/library.rs"]
+pub mod templates;
+
 const MAX_FILE: usize = 8 * 1024 * 1024;
 const CACHE_NAMES: [&str; 5] = [
     "state",
@@ -514,6 +517,52 @@ fn directional_lighting_plan(
         undo,
     }))
 }
+fn g75_light_plans(
+    previous: u8,
+    template_light: Option<u8>,
+    baseline: &ControlState,
+    desired: Vec<crate::controls::KeyColor>,
+    old: Vec<crate::controls::KeyColor>,
+    report: &mut OperationReport,
+) -> Vec<Plan> {
+    let mut plans = Vec::new();
+    let normal_mode = |mode| json!({"op":"apply-setting","action":Action::Light(mode)});
+    let after_colors = if desired.is_empty() { previous } else { 19 };
+    // The firmware enters custom mode through a Colors write,
+    // including when the stored colors already match.
+    let custom_color = desired.first().or(baseline.colors.first()).cloned();
+    let switch = |mode| {
+        if mode == 19 {
+            custom_color
+                .clone()
+                .map(|c| ControlAction::Colors(vec![c]).request(baseline.profile))
+        } else {
+            Some(normal_mode(mode))
+        }
+    };
+    if !desired.is_empty() {
+        let mut undo = vec![ControlAction::Colors(old).request(baseline.profile)];
+        if previous != 19 {
+            undo.push(normal_mode(previous));
+        }
+        plans.push(Plan {
+            request: ControlAction::Colors(desired).request(baseline.profile),
+            undo,
+        });
+    }
+    if let Some(mode) = template_light.filter(|mode| *mode != after_colors) {
+        if let Some((request, undo)) = switch(mode).zip(switch(after_colors)) {
+            plans.push(Plan {
+                request,
+                undo: vec![undo],
+            });
+        } else {
+            report.skipped.push("未读到逐键颜色，保留当前灯效。".into());
+        }
+    }
+    plans
+}
+
 fn binding_request(profile: Option<u8>, control: u16, layer: u8, action: BindingAction) -> Value {
     ControlAction::Bind {
         control,
@@ -547,12 +596,20 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
 }
 fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
     crate::resident_macros::disable_device(key)?;
-    let model = checked_key(key)?;
     let source = match read_json(&cache_path(key, "imported-configuration", false))? {
         Some(source) => source,
         None => collect(key)?,
     };
-    let archive = normalize(source, key)?;
+    apply_archive(key, normalize(source, key)?, None, &BTreeSet::new())
+}
+
+fn apply_archive(
+    key: &str,
+    archive: Value,
+    template_light: Option<u8>,
+    protected: &BTreeSet<(u16, u8)>,
+) -> Result<OperationReport> {
+    let model = checked_key(key)?;
     let mut report = OperationReport::default();
     let mut plans = Vec::new();
     backup(key)?;
@@ -627,6 +684,12 @@ fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
                     json!({"op":"controls-read","extended_modes":true}),
                 )?)?;
                 for binding in wanted.bindings {
+                    if protected.contains(&(binding.control, binding.layer)) {
+                        report
+                            .skipped
+                            .push("已保留当前实物上由软件宏使用的触发键。".into());
+                        continue;
+                    }
                     let Some(original) = baseline
                         .bindings
                         .iter()
@@ -637,6 +700,17 @@ fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
                     };
                     if !original.editable || matches!(binding.action, BindingAction::Unknown(_)) {
                         report.skipped.push("保留按键或未知映射已跳过。".into());
+                        continue;
+                    }
+                    // The macro operation addresses the base layer. Neither a
+                    // write nor its rollback may redirect an Fn slot there.
+                    if binding.layer != 0
+                        && (matches!(original.action, BindingAction::Macro(_))
+                            || matches!(binding.action, BindingAction::Macro(_)))
+                    {
+                        report
+                            .skipped
+                            .push("已保留 Fn 层的宏绑定，仅普通层支持宏写回。".into());
                         continue;
                     }
                     if matches!(
@@ -735,7 +809,7 @@ fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
                         report.skipped.push("未知逐键灯位置已跳过。".into());
                     }
                 }
-                if !desired.is_empty() {
+                if !desired.is_empty() || template_light.is_some() {
                     let state: State =
                         serde_json::from_value(call(key, json!({"op":"read-state"}))?)
                             .map_err(|e| e.to_string())?;
@@ -744,14 +818,14 @@ fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
                             mode == 19 || crate::devices::LIGHTS.iter().any(|(id, _)| *id == mode)
                         })
                     {
-                        let mut undo = vec![ControlAction::Colors(old).request(baseline.profile)];
-                        if state.light != Some(19) {
-                            undo.push(json!({"op":"apply-setting","action":Action::Light(state.light.unwrap())}));
-                        }
-                        plans.push(Plan {
-                            request: ControlAction::Colors(desired).request(baseline.profile),
-                            undo,
-                        });
+                        plans.extend(g75_light_plans(
+                            state.light.unwrap(),
+                            template_light,
+                            &baseline,
+                            desired,
+                            old,
+                            &mut report,
+                        ));
                     } else {
                         report
                             .skipped

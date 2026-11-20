@@ -2,6 +2,7 @@
 mod embedded;
 pub(crate) mod viewport;
 mod visual;
+use crate::paint::palette;
 use crate::{
     controls::{
         self, BindingAction, ControlAction, ControlSection, ControlState, KeyColor,
@@ -9,11 +10,11 @@ use crate::{
     },
     devices::REGISTRY,
     hid::wide,
-    paint::{self, Canvas, BG, BORDER, DIM, FIELD, MUTED, ORANGE, PANEL, R, RED, TEXT},
+    paint::{self, Canvas, R},
 };
 pub(crate) use embedded::{
-    close_embedded, embedded_writing, open_embedded, resize_embedded, take_write_notice,
-    writing_model, WRITE_FINISHED,
+    close_embedded, embedded_writing, open_embedded, reload_after_template, resize_embedded,
+    take_write_notice, writing_model, WRITE_FINISHED,
 };
 use std::{
     collections::BTreeMap,
@@ -338,11 +339,19 @@ impl Editor {
             .map(|s| s.binding_types.as_slice())
             .unwrap_or(&[]);
         if !declared.is_empty() {
-            return ["mouse", "keyboard", "consumer", "disabled", "dpi-cycle"]
-                .iter()
-                .enumerate()
-                .filter_map(|(index, name)| declared.iter().any(|d| d == name).then_some(index))
-                .collect();
+            return [
+                "mouse",
+                "keyboard",
+                "consumer",
+                "disabled",
+                "dpi-cycle",
+                "dpi-up",
+                "dpi-down",
+            ]
+            .iter()
+            .enumerate()
+            .filter_map(|(index, name)| declared.iter().any(|d| d == name).then_some(index))
+            .collect();
         }
         match REGISTRY[self.model].key {
             "razer-deathadder-v3-pro" => vec![0, 1, 3],
@@ -466,10 +475,15 @@ impl Editor {
             b.editable
                 && match b.action {
                     BindingAction::Unknown(_) => false,
-                    BindingAction::Macro(_) => self
-                        .state
-                        .as_ref()
-                        .is_some_and(|s| s.macros.contains_key(&b.control)),
+                    BindingAction::Macro(_) => {
+                        // Unbinding a G75 key changes only its reference. Its macro
+                        // directory remains intact, including other keys' references.
+                        self.page == 0 && REGISTRY[self.model].supports("macro-section")
+                            || self
+                                .state
+                                .as_ref()
+                                .is_some_and(|s| s.macros.contains_key(&b.control))
+                    }
                     _ => true,
                 }
         })
@@ -506,6 +520,8 @@ impl Editor {
                 .find(|(u, _)| u == n)
                 .map_or_else(|| format!("媒体 0x{n:04X}"), |(_, s)| (*s).into()),
             BindingAction::DpiCycle => "DPI 循环".into(),
+            BindingAction::DpiUp => "升高一档 DPI".into(),
+            BindingAction::DpiDown => "降低一档 DPI".into(),
             BindingAction::Macro(n) => format!("设备宏 {n}"),
             BindingAction::Unknown(_) => "未识别（只读）".into(),
         }
@@ -517,9 +533,11 @@ impl Editor {
         self.embedded && (self.page == 1 || (self.page == 2 && self.visual.is_none()))
     }
     fn macro_available(&self) -> bool {
-        self.state
-            .as_ref()
-            .is_some_and(|s| s.macro_supported || !s.macros.is_empty())
+        REGISTRY[self.model].supports("macro-section")
+            || self
+                .state
+                .as_ref()
+                .is_some_and(|s| s.macro_supported || !s.macros.is_empty())
     }
     unsafe fn change_page(&mut self, hwnd: HWND, page: usize) {
         if self.pending.is_some() || (page == 1 && !self.macro_available()) {
@@ -529,6 +547,16 @@ impl Editor {
         self.remember_macro();
         self.page = page;
         self.selected = 0;
+        if page == 1 && self.visual_section() == Some(ControlSection::Macros) {
+            self.state = None;
+            self.selected = usize::MAX;
+            self.macro_control = None;
+            self.restore_selection = (previous != u16::MAX).then_some(previous);
+            self.layout(hwnd);
+            self.begin(hwnd, None);
+            SetFocus(self.child(KEYS));
+            return;
+        }
         self.layout(hwnd);
         if self.visual_page() {
             self.show_visual_section(hwnd, previous);
@@ -649,6 +677,8 @@ impl Editor {
                                 "多媒体",
                                 "禁用此键",
                                 "DPI 循环",
+                                "升高一档 DPI",
+                                "降低一档 DPI",
                             ][*i]
                                 .to_string()
                         })
@@ -819,6 +849,8 @@ impl Editor {
             Some(BindingAction::Consumer(_)) => 2,
             Some(BindingAction::Disabled) => 3,
             Some(BindingAction::DpiCycle) => 4,
+            Some(BindingAction::DpiUp) => 5,
+            Some(BindingAction::DpiDown) => 6,
             _ => usize::MAX,
         };
         self.set_select(
@@ -1059,6 +1091,19 @@ impl Editor {
                     notice
                 };
                 self.error = false;
+                if self.page == 1 {
+                    if let Some(control) = self.restore_selection.take() {
+                        self.selected = self
+                            .state
+                            .as_ref()
+                            .and_then(|s| {
+                                s.bindings
+                                    .iter()
+                                    .position(|b| b.layer == 0 && b.control == control)
+                            })
+                            .unwrap_or(0);
+                    }
+                }
                 self.layout(hwnd);
                 if let Some(control) = self.restore_selection.take() {
                     self.select_hotspot(hwnd, control);
@@ -1146,6 +1191,8 @@ impl Editor {
             2 if target < MEDIA.len() => BindingAction::Consumer(MEDIA[target].0),
             3 => BindingAction::Disabled,
             4 => BindingAction::DpiCycle,
+            5 => BindingAction::DpiUp,
+            6 => BindingAction::DpiDown,
             _ => {
                 self.status(hwnd, "请先选择具体的目标功能或键盘按键。", true);
                 return;
@@ -1399,14 +1446,18 @@ impl Editor {
             }
         } else {
             let c = Canvas::new(dc, self.dpi);
-            c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-            c.gradient(R::new(0, 0, WIDTH, 76), 0xff201017, BG);
+            c.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
+            c.gradient(
+                R::new(0, 0, WIDTH, 76),
+                palette().accent_surface,
+                palette().bg,
+            );
             c.text(
                 "设备自定义",
                 R::new(28, 18, 650, 30),
                 23,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             let name = REGISTRY[self.model].name;
@@ -1418,9 +1469,26 @@ impl Editor {
                     || name.to_owned(),
                     |profile| format!("{name}   ·   板载配置 {}", u16::from(profile) + 1),
                 );
-            c.text(&subtitle, R::new(28, 52, 780, 21), 13, 400, MUTED, DT_LEFT);
-            c.round(R::new(24, 144, 326, 512), 14, PANEL, Some(BORDER));
-            c.round(R::new(366, 144, 650, 512), 14, PANEL, Some(BORDER));
+            c.text(
+                &subtitle,
+                R::new(28, 52, 780, 21),
+                13,
+                400,
+                palette().muted,
+                DT_LEFT,
+            );
+            c.round(
+                R::new(24, 144, 326, 512),
+                14,
+                palette().panel,
+                Some(palette().border),
+            );
+            c.round(
+                R::new(366, 144, 650, 512),
+                14,
+                palette().panel,
+                Some(palette().border),
+            );
             c.text(
                 if self.page == 2 {
                     "选择灯光按键"
@@ -1430,7 +1498,7 @@ impl Editor {
                 R::new(40, 160, 294, 24),
                 15,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             match self.page {
@@ -1439,18 +1507,32 @@ impl Editor {
                         .binding()
                         .map(|b| format!("{} · 第 {} 层", b.label, b.layer))
                         .unwrap_or_else(|| "尚无可用键位".into());
-                    c.text(&title, R::new(390, 162, 598, 30), 20, 600, TEXT, DT_LEFT);
+                    c.text(
+                        &title,
+                        R::new(390, 162, 598, 30),
+                        20,
+                        600,
+                        palette().text,
+                        DT_LEFT,
+                    );
                     let value = self
                         .binding()
                         .map(|b| format!("当前：{}", self.describe(&b.action)))
                         .unwrap_or_else(|| "读取成功后显示设备实际配置".into());
-                    c.text(&value, R::new(390, 202, 598, 24), 14, 400, MUTED, DT_LEFT);
+                    c.text(
+                        &value,
+                        R::new(390, 202, 598, 24),
+                        14,
+                        400,
+                        palette().muted,
+                        DT_LEFT,
+                    );
                     c.text(
                         "操作类型",
                         R::new(390, 234, 320, 22),
                         13,
                         400,
-                        MUTED,
+                        palette().muted,
                         DT_LEFT,
                     );
                     c.text(
@@ -1458,20 +1540,34 @@ impl Editor {
                         R::new(390, 316, 414, 22),
                         13,
                         400,
-                        MUTED,
+                        palette().muted,
                         DT_LEFT,
                     );
-                    self.wrapped(&c,if self.editable(){"选择操作后点击应用。组合键在所选按键上叠加 Ctrl、Shift、Alt、Win；设备不支持的动作会给出原因。"}else{"此键当前只读。主点击、Fn、未知功能或已有宏会按设备规则保留，避免覆盖无法完整恢复的配置。"},390,450,592,4,DIM);
+                    self.wrapped(&c,if self.editable(){"选择操作后点击应用。组合键在所选按键上叠加 Ctrl、Shift、Alt、Win；设备不支持的动作会给出原因。"}else{"此键当前只读。主点击、Fn、未知功能或已有宏会按设备规则保留，避免覆盖无法完整恢复的配置。"},390,450,592,4,palette().dim);
                 }
                 1 => {
-                    c.text("板载宏", R::new(390, 158, 598, 30), 20, 600, TEXT, DT_LEFT);
-                    c.text("宏名称", R::new(390, 184, 292, 20), 13, 400, MUTED, DT_LEFT);
+                    c.text(
+                        "板载宏",
+                        R::new(390, 158, 598, 30),
+                        20,
+                        600,
+                        palette().text,
+                        DT_LEFT,
+                    );
+                    c.text(
+                        "宏名称",
+                        R::new(390, 184, 292, 20),
+                        13,
+                        400,
+                        palette().muted,
+                        DT_LEFT,
+                    );
                     c.text(
                         "播放方式",
                         R::new(710, 184, 278, 20),
                         13,
                         400,
-                        MUTED,
+                        palette().muted,
                         DT_LEFT,
                     );
                     let max = self.state.as_ref().map_or(0, |s| s.macro_max_events);
@@ -1480,11 +1576,18 @@ impl Editor {
                         R::new(390, 480, 598, 24),
                         13,
                         400,
-                        MUTED,
+                        palette().muted,
                         DT_LEFT,
                     );
                     for (x, label) in [(390, "事件"), (532, "按键"), (720, "等待 / 毫秒")] {
-                        c.text(label, R::new(x, 500, 170, 22), 13, 400, MUTED, DT_LEFT);
+                        c.text(
+                            label,
+                            R::new(x, 500, 170, 22),
+                            13,
+                            400,
+                            palette().muted,
+                            DT_LEFT,
+                        );
                     }
                     if !self.state.as_ref().is_some_and(|s| s.macro_supported) {
                         self.wrapped(
@@ -1494,7 +1597,7 @@ impl Editor {
                             566,
                             426,
                             3,
-                            ORANGE,
+                            palette().amber,
                         );
                     } else if !self.editable() {
                         self.wrapped(
@@ -1504,7 +1607,7 @@ impl Editor {
                             572,
                             426,
                             2,
-                            ORANGE,
+                            palette().amber,
                         );
                     } else {
                         c.text(
@@ -1512,7 +1615,7 @@ impl Editor {
                             R::new(390, 596, 426, 25),
                             13,
                             400,
-                            DIM,
+                            palette().dim,
                             DT_LEFT,
                         );
                     }
@@ -1523,7 +1626,7 @@ impl Editor {
                         R::new(390, 162, 598, 30),
                         20,
                         600,
-                        TEXT,
+                        palette().text,
                         DT_LEFT,
                     );
                     if self.picked {
@@ -1531,13 +1634,13 @@ impl Editor {
                             | ((self.rgb[0] as u32) << 16)
                             | ((self.rgb[1] as u32) << 8)
                             | self.rgb[2] as u32;
-                        c.round(R::new(390, 224, 104, 104), 14, rgb, Some(BORDER));
+                        c.round(R::new(390, 224, 104, 104), 14, rgb, Some(palette().border));
                         c.text(
                             &format!("#{:02X}{:02X}{:02X}", self.rgb[0], self.rgb[1], self.rgb[2]),
                             R::new(516, 244, 440, 35),
                             25,
                             400,
-                            TEXT,
+                            palette().text,
                             DT_LEFT,
                         );
                         c.text(
@@ -1545,12 +1648,12 @@ impl Editor {
                             R::new(516, 284, 440, 24),
                             13,
                             400,
-                            MUTED,
+                            palette().muted,
                             DT_LEFT,
                         );
-                        self.wrapped(&c,"应用到选中键只修改当前键；应用到全部键使用同一颜色。其它键位与设置由适配器保留。",390,428,598,4,DIM);
+                        self.wrapped(&c,"应用到选中键只修改当前键；应用到全部键使用同一颜色。其它键位与设置由适配器保留。",390,428,598,4,palette().dim);
                     } else {
-                        self.wrapped(&c,"此设备未返回可编辑的逐键灯数据。可能没有此功能，或当前连接暂不支持读取；具体原因见下方。",390,224,598,5,MUTED);
+                        self.wrapped(&c,"此设备未返回可编辑的逐键灯数据。可能没有此功能，或当前连接暂不支持读取；具体原因见下方。",390,224,598,5,palette().muted);
                     }
                 }
             }
@@ -1565,7 +1668,11 @@ impl Editor {
                 R::new(28, 654, 984, 22),
                 12,
                 400,
-                if self.error { ORANGE } else { DIM },
+                if self.error {
+                    palette().error
+                } else {
+                    palette().dim
+                },
                 DT_LEFT,
             );
         }
@@ -1581,9 +1688,9 @@ impl Editor {
         };
         // Clear every physical pixel, including antialiased rounded corners.
         let background = if child.id < 100 || child.id == RELOAD {
-            BG
+            palette().bg
         } else {
-            PANEL
+            palette().panel
         };
         let brush = CreateSolidBrush(
             ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
@@ -1601,29 +1708,29 @@ impl Editor {
         c.rect(
             r,
             if child.id < 100 || child.id == RELOAD {
-                BG
+                palette().bg
             } else {
-                PANEL
+                palette().panel
             },
         );
         c.round(
             R::new(0, 0, width - 1, height - 1),
             9,
             if disabled {
-                FIELD
+                palette().field
             } else if primary || selected {
                 if pressed {
-                    ORANGE
+                    palette().primary_pressed
                 } else {
-                    RED
+                    palette().primary
                 }
             } else {
-                FIELD
+                palette().field
             },
             Some(if item.itemState & ODS_FOCUS != 0 {
-                MUTED
+                palette().muted
             } else {
-                BORDER
+                palette().border
             }),
         );
         c.text(
@@ -1631,7 +1738,13 @@ impl Editor {
             r,
             14,
             if primary || selected { 600 } else { 400 },
-            if disabled { DIM } else { TEXT },
+            if disabled {
+                palette().dim
+            } else if primary || selected {
+                palette().on_primary
+            } else {
+                palette().text
+            },
             DT_CENTER,
         );
     }
@@ -1710,8 +1823,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => {
             let dc = w as HDC;
-            SetTextColor(dc, colorref(TEXT));
-            SetBkColor(dc, colorref(FIELD));
+            SetTextColor(dc, colorref(palette().text));
+            SetBkColor(dc, colorref(palette().field));
             editor.brush as isize
         }
         WM_CLOSE => {
@@ -1773,7 +1886,7 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
         embedded,
         dpi,
         font,
-        brush: CreateSolidBrush(colorref(FIELD)),
+        brush: CreateSolidBrush(colorref(palette().field)),
         page: 0,
         children: Vec::new(),
         state: None,
@@ -1862,7 +1975,7 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
         ));
     }
     if !embedded {
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,

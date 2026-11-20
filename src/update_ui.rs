@@ -1,9 +1,10 @@
 //! Independent core release channel and restart-aware native update window.
+use crate::paint::palette;
 use crate::{
     hid::wide,
-    paint::{self, blend, Canvas, BG, BORDER, DIM, FIELD, MUTED, PANEL, R, RED, TEXT},
+    paint::{self, blend, Canvas, R},
     plugin_ui::StoreExit,
-    ui::widgets::{DANGER, HOVER, PRESSED, RADIUS_LG, RADIUS_MD, SPACE_2, SUCCESS},
+    ui::widgets::{RADIUS_LG, RADIUS_MD, SPACE_2},
 };
 use peripheral_desk::{
     core_update::{self, UpdateInfo},
@@ -449,15 +450,26 @@ impl Updater {
         let old = SelectObject(dc, bitmap);
         {
             let c = Canvas::new(dc, self.dpi);
-            c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-            c.gradient_v(R::new(0, 0, WIDTH, 84), blend(BG, 0xff25131a, 0.8), BG);
-            c.text("检查更新", R::new(28, 16, 490, 28), 18, 500, TEXT, DT_LEFT);
+            c.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
+            c.gradient_v(
+                R::new(0, 0, WIDTH, 84),
+                blend(palette().bg, palette().accent_surface, 0.8),
+                palette().bg,
+            );
+            c.text(
+                "检查更新",
+                R::new(28, 16, 490, 28),
+                18,
+                500,
+                palette().text,
+                DT_LEFT,
+            );
             c.text(
                 "一次检查主程序与已安装插件，按需选择更新。",
                 R::new(28, 46, 500, 20),
                 12,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -465,19 +477,29 @@ impl Updater {
                 R::new(548, 31, 88, 24),
                 13,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             let version_card = R::new(24, 110, 892, 420);
             c.soft_shadow(version_card, 12);
-            c.round(version_card, RADIUS_LG, PANEL, Some(BORDER));
-            c.round(R::new(44, 300, 852, 210), RADIUS_MD, FIELD, Some(BORDER));
+            c.round(
+                version_card,
+                RADIUS_LG,
+                palette().panel,
+                Some(palette().border),
+            );
+            c.round(
+                R::new(44, 300, 852, 210),
+                RADIUS_MD,
+                palette().field,
+                Some(palette().border),
+            );
             c.text(
                 "当前版本",
                 R::new(44, 134, 150, 26),
                 14,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -485,7 +507,7 @@ impl Updater {
                 R::new(210, 128, 450, 38),
                 24,
                 400,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -493,7 +515,7 @@ impl Updater {
                 R::new(44, 184, 150, 26),
                 14,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -502,9 +524,9 @@ impl Updater {
                 24,
                 400,
                 if self.info.as_ref().is_some_and(|i| i.available) {
-                    SUCCESS
+                    palette().green
                 } else {
-                    MUTED
+                    palette().muted
                 },
                 DT_LEFT,
             );
@@ -513,7 +535,7 @@ impl Updater {
                 R::new(44, 234, 150, 26),
                 14,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -525,29 +547,51 @@ impl Updater {
                 R::new(210, 234, 650, 26),
                 15,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             let plugin_card = R::new(24, 606, 892, 120);
             c.soft_shadow(plugin_card, 12);
-            c.round(plugin_card, RADIUS_LG, PANEL, Some(BORDER));
-            c.round(R::new(44, 640, 580, 76), RADIUS_MD, FIELD, Some(BORDER));
-            c.round(R::new(644, 640, 252, 42), RADIUS_MD, FIELD, Some(BORDER));
+            c.round(
+                plugin_card,
+                RADIUS_LG,
+                palette().panel,
+                Some(palette().border),
+            );
+            c.round(
+                R::new(44, 640, 580, 76),
+                RADIUS_MD,
+                palette().field,
+                Some(palette().border),
+            );
+            c.round(
+                R::new(644, 640, 252, 42),
+                RADIUS_MD,
+                palette().field,
+                Some(palette().border),
+            );
             c.text(
                 "设备插件 · 使用插件管理所选通道",
                 R::new(44, 606 + SPACE_2, 800, 24),
                 14,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
-            c.text("更新内容", R::new(44, 272, 852, 23), 14, 600, TEXT, DT_LEFT);
+            c.text(
+                "更新内容",
+                R::new(44, 272, 852, 23),
+                14,
+                600,
+                palette().text,
+                DT_LEFT,
+            );
             c.text(
                 "仅替换主程序与文档；更新前备份旧 EXE 和配置，保留设备驱动及用户数据。",
                 R::new(28, 738, 884, 22),
                 13,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
             c.text(
@@ -561,7 +605,11 @@ impl Updater {
                 R::new(28, 760, 884, 18),
                 12,
                 400,
-                if self.error { DANGER } else { DIM },
+                if self.error {
+                    palette().error
+                } else {
+                    palette().dim
+                },
                 DT_LEFT,
             );
         }
@@ -576,7 +624,7 @@ impl Updater {
             return;
         };
         // Clear every physical pixel, including antialiased rounded corners.
-        let background = BG;
+        let background = palette().bg;
         let brush = CreateSolidBrush(
             ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
         );
@@ -589,25 +637,25 @@ impl Updater {
         let primary = child.id == INSTALL;
         let pressed = item.itemState & ODS_SELECTED != 0;
         let hovered = item.itemState & ODS_HOTLIGHT != 0;
-        c.rect(R::new(0, 0, width, height), BG);
+        c.rect(R::new(0, 0, width, height), palette().bg);
         c.round(
             R::new(0, 0, width - 1, height - 1),
             RADIUS_MD,
             if disabled {
-                FIELD
+                palette().field
             } else if pressed {
-                PRESSED
+                palette().pressed
             } else if primary {
-                RED
+                palette().primary
             } else if hovered {
-                HOVER
+                palette().hover
             } else {
-                FIELD
+                palette().field
             },
             Some(if item.itemState & ODS_FOCUS != 0 {
-                MUTED
+                palette().muted
             } else {
-                BORDER
+                palette().border
             }),
         );
         c.text(
@@ -615,7 +663,13 @@ impl Updater {
             R::new(0, 0, width, height),
             14,
             if primary { 600 } else { 400 },
-            if disabled { DIM } else { TEXT },
+            if disabled {
+                palette().dim
+            } else if primary && !pressed {
+                palette().on_primary
+            } else {
+                palette().text
+            },
             DT_CENTER,
         );
     }
@@ -663,8 +717,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
             0
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORBTN | WM_CTLCOLORLISTBOX => {
-            SetTextColor(w as HDC, rgb(TEXT));
-            SetBkColor(w as HDC, rgb(FIELD));
+            SetTextColor(w as HDC, rgb(palette().text));
+            SetBkColor(w as HDC, rgb(palette().field));
             updater.brush as isize
         }
         WM_CLOSE => {
@@ -716,7 +770,7 @@ pub(crate) unsafe fn open(owner: HWND) -> StoreExit {
     let mut updater = Box::new(Updater {
         dpi,
         font,
-        brush: CreateSolidBrush(rgb(FIELD)),
+        brush: CreateSolidBrush(rgb(palette().field)),
         children: Vec::new(),
         info: None,
         previous: None,
@@ -753,7 +807,7 @@ pub(crate) unsafe fn open(owner: HWND) -> StoreExit {
         updater.as_mut() as *mut Updater as _,
     );
     if !hwnd.is_null() {
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,

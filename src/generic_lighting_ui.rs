@@ -4,10 +4,11 @@
 //! show hardware values; explicitly declared write-only effects show sent records
 //! or a labeled draft, with readable brightness tracked separately.
 mod embedded;
+use crate::paint::palette;
 use crate::{
     hid::wide,
     model::AccessoryLighting as LightingConfig,
-    paint::{self, Canvas, R},
+    paint::{Canvas, R},
 };
 pub(crate) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
 use serde::Deserialize;
@@ -603,14 +604,18 @@ impl Dialog {
             EndPaint(hwnd, &ps);
             return;
         }
-        canvas.rect(R::new(0, 0, 900, 660), paint::BG);
-        canvas.gradient(R::new(0, 0, 900, 3), paint::RED, paint::ORANGE);
+        canvas.rect(R::new(0, 0, 900, 660), palette().bg);
+        canvas.gradient(
+            R::new(0, 0, 900, 3),
+            palette().accent,
+            palette().accent_light,
+        );
         canvas.text(
             &self.name,
             R::new(28, 20, 640, 36),
             25,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -622,25 +627,25 @@ impl Dialog {
             R::new(28, 62, 720, 22),
             13,
             400,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.round(
             R::new(28, 102, 238, 394),
             16,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         let config = self.config.as_ref();
         let color = config.map(|c| c.rgb).unwrap_or([100, 100, 100]);
         let rgb = 0xff000000 | (color[0] as u32) << 16 | (color[1] as u32) << 8 | color[2] as u32;
-        canvas.ellipse(R::new(75, 147, 144, 144), paint::BG);
+        canvas.ellipse(R::new(75, 147, 144, 144), palette().bg);
         canvas.arc(
             R::new(87, 159, 120, 120),
             0.,
             359.9,
             if self.actual_enabled == Some(false) {
-                paint::BORDER
+                palette().border
             } else {
                 rgb
             },
@@ -651,7 +656,7 @@ impl Dialog {
             R::new(48, 320, 198, 24),
             15,
             600,
-            paint::TEXT,
+            palette().text,
             DT_CENTER,
         );
         canvas.text(
@@ -663,7 +668,7 @@ impl Dialog {
             R::new(39, 351, 216, 22),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_CENTER,
         );
         if let Some(config) = config {
@@ -673,7 +678,7 @@ impl Dialog {
                 R::new(46, 403, 202, 26),
                 15,
                 500,
-                paint::TEXT,
+                palette().text,
                 DT_CENTER,
             );
         }
@@ -683,7 +688,7 @@ impl Dialog {
                 R::new(42, 429, 210, 20),
                 12,
                 500,
-                paint::MUTED,
+                palette().muted,
                 DT_CENTER,
             );
         }
@@ -691,15 +696,15 @@ impl Dialog {
         canvas.round(
             R::new(286, 102, 586, 394),
             16,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         canvas.text(
             "灯效开关",
             R::new(310, 122, 200, 24),
             15,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         let enabled_text = match self.actual_enabled {
@@ -713,9 +718,9 @@ impl Dialog {
             13,
             500,
             if self.actual_enabled.is_some() {
-                paint::GREEN
+                palette().green
             } else {
-                paint::MUTED
+                palette().muted
             },
             DT_LEFT,
         );
@@ -724,7 +729,7 @@ impl Dialog {
             R::new(310, 174, 120, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -732,20 +737,20 @@ impl Dialog {
             R::new(310, 328, 140, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         let mode_color = config
             .and_then(|c| self.mode(c.effect))
             .is_some_and(|m| m.color);
         if mode_color {
-            canvas.round(R::new(430, 321, 42, 36), 8, rgb, Some(paint::BORDER));
+            canvas.round(R::new(430, 321, 42, 36), 8, rgb, Some(palette().border));
             canvas.text(
                 &format!("#{:02X}{:02X}{:02X}", color[0], color[1], color[2]),
                 R::new(483, 327, 132, 24),
                 14,
                 500,
-                paint::TEXT,
+                palette().text,
                 DT_LEFT,
             );
         } else {
@@ -754,7 +759,7 @@ impl Dialog {
                 R::new(430, 327, 245, 24),
                 13,
                 400,
-                paint::DIM,
+                palette().dim,
                 DT_LEFT,
             );
         }
@@ -769,7 +774,7 @@ impl Dialog {
             R::new(310, 382, 80, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -777,7 +782,7 @@ impl Dialog {
             R::new(410, 382, 98, 22),
             14,
             500,
-            paint::TEXT,
+            palette().text,
             DT_CENTER,
         );
         canvas.text(
@@ -785,7 +790,7 @@ impl Dialog {
             R::new(310, 438, 80, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -793,7 +798,7 @@ impl Dialog {
             R::new(410, 438, 98, 22),
             14,
             500,
-            paint::TEXT,
+            palette().text,
             DT_CENTER,
         );
 
@@ -808,9 +813,9 @@ impl Dialog {
             13,
             500,
             if self.actual_enabled.is_some() {
-                paint::GREEN
+                palette().green
             } else {
-                paint::MUTED
+                palette().muted
             },
             DT_LEFT,
         );
@@ -819,7 +824,7 @@ impl Dialog {
             R::new(28, 539, 840, 20),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         canvas.text(
@@ -827,7 +832,11 @@ impl Dialog {
             R::new(28, 565, 840, 34),
             12,
             400,
-            if self.error { paint::RED } else { paint::MUTED },
+            if self.error {
+                palette().error
+            } else {
+                palette().muted
+            },
             DT_LEFT,
         );
         drop(canvas);
@@ -879,7 +888,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             if draw.CtlType != ODT_BUTTON {
                 return 0;
             }
-            let background = paint::PANEL;
+            let background = palette().panel;
             let brush = CreateSolidBrush(
                 ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
             );
@@ -894,14 +903,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(0, 0, width, height),
                 8,
                 if dialog.selected(id) && !disabled {
-                    paint::RED
+                    palette().primary
                 } else {
-                    paint::FIELD
+                    palette().field
                 },
                 Some(if draw.itemState & ODS_FOCUS != 0 {
-                    paint::MUTED
+                    palette().muted
                 } else {
-                    paint::BORDER
+                    palette().border
                 }),
             );
             let n = GetWindowTextLengthW(draw.hwndItem).max(0) as usize;
@@ -921,7 +930,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(4, 0, width - 8, height),
                 12,
                 500,
-                if disabled { paint::DIM } else { paint::TEXT },
+                if disabled {
+                    palette().dim
+                } else if dialog.selected(id) {
+                    palette().on_primary
+                } else {
+                    palette().text
+                },
                 DT_CENTER,
             );
             1
@@ -1124,7 +1139,7 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
         ));
     }
     if !embedded {
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     }
     add_button(

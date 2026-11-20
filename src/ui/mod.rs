@@ -1,9 +1,10 @@
+use crate::paint::palette;
 use crate::{
     backend::{self, Action, Snapshot},
     devices::{Kind, LIGHTS, REGISTRY},
     hid::wide,
     model::Tuning,
-    paint::{self, Canvas, Images, R, *},
+    paint::{self, Canvas, Images, R},
     startup,
 };
 use std::{
@@ -129,6 +130,8 @@ enum Command {
     DriverManager,
     AddDevice,
     Configuration,
+    DeviceTemplates(usize),
+    Appearance,
     CoreUpdate,
     PresetLibrary,
     MHub,
@@ -200,6 +203,7 @@ struct App {
     startup_enabled: bool,
     images: Images,
     icon: HICON,
+    class_icon: HICON,
     tray_added: bool,
     taskbar_created: u32,
     flyout: HWND,
@@ -233,6 +237,7 @@ pub fn run(hidden: bool, battery: bool) {
             CloseHandle(mutex);
             return;
         }
+        paint::theme::load();
         let images = Images::load();
         let icon = paint::tray_icon();
         let instance = GetModuleHandleW(null());
@@ -301,6 +306,7 @@ pub fn run(hidden: bool, battery: bool) {
             startup_enabled: startup::is_enabled().unwrap_or(false),
             images,
             icon,
+            class_icon: icon,
             tray_added: false,
             taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
             flyout: null_mut(),
@@ -329,7 +335,7 @@ pub fn run(hidden: bool, battery: bool) {
             return;
         }
         app.main = hwnd;
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(hwnd, 20, &dark as *const _ as _, 4);
         let corner = 2i32;
         DwmSetWindowAttribute(hwnd, 33, &corner as *const _ as _, 4);
@@ -354,6 +360,9 @@ pub fn run(hidden: bool, battery: bool) {
             }
         }
         crate::mhub::shutdown();
+        if app.icon != icon {
+            DestroyIcon(app.icon);
+        }
         DestroyIcon(icon);
         CloseHandle(mutex);
     }
@@ -822,6 +831,15 @@ impl App {
         }
         match self.page {
             Page::Tool(m, tool) => {
+                if crate::device_templates::supports(REGISTRY[m].key) {
+                    self.add(
+                        hwnd,
+                        "本地模板",
+                        R::new(w - 358, 16, 102, 34),
+                        GHOST,
+                        Command::DeviceTemplates(m),
+                    );
+                }
                 if REGISTRY[m].mchose() {
                     self.add(
                         hwnd,
@@ -992,6 +1010,15 @@ impl App {
                     tabs.push(("‹  设备调节", Command::Drivers));
                     if spec.mchose() {
                         tabs.push(("更多原厂功能", Command::MHub));
+                    }
+                    if crate::device_templates::supports(spec.key) {
+                        self.add(
+                            hwnd,
+                            "本地模板",
+                            R::new(w - 390, h - 61, 102, 39),
+                            GHOST,
+                            Command::DeviceTemplates(m),
+                        );
                     }
                     if spec.supports("onboard-profiles") {
                         tabs.push(("板载配置", Command::OpenBoard(m)));
@@ -1284,6 +1311,17 @@ impl App {
                 );
             }
             Page::Preferences => {
+                self.add(
+                    hwnd,
+                    if paint::theme::is_dark() {
+                        "切换至浅色"
+                    } else {
+                        "切换至深色"
+                    },
+                    R::new(w - 176, 90, 126, 36),
+                    GHOST,
+                    Command::Appearance,
+                );
                 let left = SIDEBAR + 48;
                 let available = w - left - 82;
                 for (i, value) in [30, 60, 120, 300, 600, 1800].iter().enumerate() {
@@ -1602,11 +1640,37 @@ impl App {
     }
     unsafe fn command(&mut self, hwnd: HWND, command: Command) {
         match command {
+            Command::Appearance => {
+                let dark = !paint::theme::is_dark();
+                match paint::theme::save(dark) {
+                    Ok(()) => {
+                        let replacement = paint::tray_icon();
+                        if !replacement.is_null() {
+                            let old = std::mem::replace(&mut self.icon, replacement);
+                            self.tray(hwnd);
+                            if old != self.class_icon {
+                                DestroyIcon(old);
+                            }
+                        }
+                        let value = i32::from(dark);
+                        DwmSetWindowAttribute(hwnd, 20, (&value as *const i32).cast(), 4);
+                        self.layout(hwnd);
+                        if !self.flyout.is_null() {
+                            InvalidateRect(self.flyout, null(), 0);
+                        }
+                    }
+                    Err(error) => {
+                        self.set_status(&error, true);
+                        self.render(hwnd);
+                    }
+                }
+            }
             Command::AudioPage(value) => {
                 self.audio_page = value;
                 self.layout(hwnd);
             }
             Command::Configuration
+            | Command::DeviceTemplates(_)
             | Command::BrandPlugins(_)
             | Command::CoreUpdate
             | Command::DriverManager
@@ -1622,6 +1686,14 @@ impl App {
                 }
                 self.modal_open = true;
                 let outcome = match command {
+                    Command::DeviceTemplates(model) => {
+                        if crate::device_templates::open(hwnd, model)
+                            && self.page == Page::Tool(model, Tool::Bindings)
+                        {
+                            crate::controls_ui::reload_after_template();
+                        }
+                        crate::plugin_ui::StoreExit::Close
+                    }
                     Command::Configuration => {
                         let model = if let Page::Device(m) = self.page {
                             Some(m)
@@ -2409,6 +2481,7 @@ impl App {
                 | Command::DriverManager
                 | Command::AddDevice
                 | Command::Configuration
+                | Command::DeviceTemplates(_)
                 | Command::CoreUpdate
                 | Command::ControlsEditor
                 | Command::ResidentMacros
@@ -2472,7 +2545,7 @@ impl App {
                     R::new(SIDEBAR + 146, 16, self.width - SIDEBAR - 425, 34),
                     17,
                     600,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 ),
                 Page::MHub => c.text(
@@ -2480,7 +2553,7 @@ impl App {
                     R::new(SIDEBAR + 144, 16, self.width - SIDEBAR - 510, 34),
                     17,
                     600,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 ),
                 Page::Onboard(m) => self.board_paint(&c, m),
@@ -2532,7 +2605,11 @@ impl App {
                 },
                 12,
                 400,
-                if self.status_error { RED } else { DIM },
+                if self.status_error {
+                    palette().error
+                } else {
+                    palette().dim
+                },
                 DT_LEFT,
             );
         }

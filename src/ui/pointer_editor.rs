@@ -1,5 +1,6 @@
 //! Capability-driven editor for a plugin's active onboard pointer profile.
 use super::*;
+use crate::paint::palette;
 use crate::{devices::DeviceSpec, plugin_manager};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -562,13 +563,13 @@ impl Editor {
             let f = self.frame(hwnd);
             let field_x = f.panel_x + 22;
             let field_width = f.w - field_x - 46;
-            c.rect(R::new(0, 0, f.w, f.h), BG);
+            c.rect(R::new(0, 0, f.w, f.h), palette().bg);
             c.text(
                 "指针与性能",
                 R::new(24, 14, 400, 39),
                 25,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -576,7 +577,7 @@ impl Editor {
                 R::new(25, 55, 420, 24),
                 14,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             if let Some(profile) = &self.profile {
@@ -585,16 +586,23 @@ impl Editor {
                     R::new(f.w - 214, 38, 188, 28),
                     13,
                     500,
-                    MUTED,
+                    palette().muted,
                     DT_RIGHT,
                 );
             }
-            c.text("设备参数", R::new(24, 90, 200, 26), 14, 600, TEXT, DT_LEFT);
+            c.text(
+                "设备参数",
+                R::new(24, 90, 200, 26),
+                14,
+                600,
+                palette().text,
+                DT_LEFT,
+            );
             c.round(
                 R::new(f.panel_x, 120, f.w - f.panel_x - 24, f.content_h),
                 12,
-                PANEL,
-                Some(BORDER),
+                palette().panel,
+                Some(palette().border),
             );
             if let Some(entry) = self.entry() {
                 c.text(
@@ -602,7 +610,7 @@ impl Editor {
                     R::new(field_x, 137, field_width, 33),
                     19,
                     600,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 );
                 c.text(
@@ -610,7 +618,7 @@ impl Editor {
                     R::new(field_x, 179, field_width, 27),
                     14,
                     400,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT,
                 );
                 c.text(
@@ -618,7 +626,7 @@ impl Editor {
                     R::new(field_x, 220, field_width, 22),
                     13,
                     500,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 );
                 let hint = match &entry.input {
@@ -632,7 +640,7 @@ impl Editor {
                     R::new(field_x, 301, field_width, 27),
                     12,
                     400,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT,
                 );
             } else {
@@ -645,7 +653,7 @@ impl Editor {
                     R::new(field_x, 165, field_width, 55),
                     19,
                     500,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT,
                 );
             }
@@ -654,7 +662,11 @@ impl Editor {
                 R::new(25, f.h - 117, f.w - 50, 57),
                 13,
                 400,
-                if self.error { RED } else { MUTED },
+                if self.error {
+                    palette().error
+                } else {
+                    palette().muted
+                },
                 DT_LEFT | DT_WORDBREAK,
             );
         }
@@ -707,8 +719,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         }
         WM_ERASEBKGND => 1,
         WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
-            SetTextColor(w as HDC, 0x00f5f2f2);
-            SetBkColor(w as HDC, 0x00241c1c);
+            SetTextColor(w as HDC, crate::paint::colorref(palette().text));
+            SetBkColor(w as HDC, crate::paint::colorref(palette().field));
             editor.brush as isize
         }
         WM_MEASUREITEM => {
@@ -726,19 +738,19 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
             let width = item.rcItem.right * 96 / editor.dpi as i32;
             let height = item.rcItem.bottom * 96 / editor.dpi as i32;
             let disabled = item.itemState & ODS_DISABLED != 0;
-            c.rect(R::new(0, 0, width + 1, height + 1), BG);
+            c.rect(R::new(0, 0, width + 1, height + 1), palette().bg);
             c.round(
                 R::new(0, 0, width - 1, height - 1),
                 8,
                 if !disabled && item.CtlID as usize == APPLY {
-                    RED
+                    palette().primary
                 } else {
-                    FIELD
+                    palette().field
                 },
                 Some(if item.itemState & ODS_FOCUS != 0 {
-                    MUTED
+                    palette().muted
                 } else {
-                    BORDER
+                    palette().border
                 }),
             );
             let title = match item.CtlID as usize {
@@ -751,7 +763,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 R::new(3, 0, width - 6, height),
                 14,
                 500,
-                if disabled { DIM } else { TEXT },
+                if disabled {
+                    palette().dim
+                } else if item.CtlID as usize == APPLY {
+                    palette().on_primary
+                } else {
+                    palette().text
+                },
                 DT_CENTER,
             );
             1
@@ -834,7 +852,7 @@ unsafe fn create(
         ..zeroed()
     });
     let font = font(dpi);
-    let brush = CreateSolidBrush(0x00241c1c);
+    let brush = CreateSolidBrush(crate::paint::colorref(palette().field));
     let mut editor = Box::new(Editor {
         spec,
         target: plugin_manager::selected_device_target(spec.key),
@@ -903,7 +921,7 @@ unsafe fn create(
         ));
     }
     if !editor.embedded {
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     }
     let frame = editor.frame(hwnd);

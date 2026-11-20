@@ -1,9 +1,9 @@
 //! Tray icon, right-click menu and the battery flyout window.
 use super::{
     pages::{connection, reading, system_reading},
-    widgets::{HOVER, PRESSED, WARN},
     App, Command, Page, TRAY,
 };
+use crate::paint::palette;
 use crate::{
     devices::REGISTRY,
     hid::wide,
@@ -213,17 +213,27 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     scroll_metrics(a, height);
                 let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
                 let mut y = list_top - scroll;
-                windows_sys::Win32::Graphics::GdiPlus::GdipGraphicsClear(c.graphics, PANEL);
-                c.text("设备电量", R::new(20, 13, 205, 25), 17, 600, TEXT, DT_LEFT);
+                windows_sys::Win32::Graphics::GdiPlus::GdipGraphicsClear(
+                    c.graphics,
+                    palette().panel,
+                );
+                c.text(
+                    "设备电量",
+                    R::new(20, 13, 205, 25),
+                    17,
+                    600,
+                    palette().text,
+                    DT_LEFT,
+                );
                 c.text(
                     &format!("{count} 台设备"),
                     R::new(220, 16, 120, 20),
                     11,
                     400,
-                    DIM,
+                    palette().dim,
                     DT_RIGHT,
                 );
-                c.line(18, 48, 342, 48, BORDER, 1.);
+                c.line(18, 48, 342, 48, palette().border, 1.);
                 let clip = SaveDC(dc);
                 IntersectClipRect(dc, 0, a.px(list_top), a.px(360), a.px(footer));
                 if count == 0 {
@@ -232,7 +242,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         R::new(20, 90, 320, 25),
                         14,
                         500,
-                        TEXT,
+                        palette().text,
                         DT_LEFT,
                     );
                     c.text(
@@ -240,12 +250,19 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         R::new(20, 118, 320, 22),
                         11,
                         400,
-                        MUTED,
+                        palette().muted,
                         DT_LEFT,
                     );
                 }
                 if hids > 0 {
-                    c.text("外设", R::new(20, y, 320, 18), 10, 600, DIM, DT_LEFT);
+                    c.text(
+                        "外设",
+                        R::new(20, y, 320, 18),
+                        10,
+                        600,
+                        palette().dim,
+                        DT_LEFT,
+                    );
                     y += 22;
                 }
                 for (row, &entry) in entries[..hids].iter().enumerate() {
@@ -254,7 +271,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     };
                     let spec = &REGISTRY[i];
                     if a.fx.flyout.hovered == Some(HoverTarget::Row(row)) {
-                        c.capsule(R::new(9, y, 326, 60), HOVER, None);
+                        c.capsule(R::new(9, y, 326, 60), palette().hover, None);
                     }
                     c.image(a.images.images[i], R::new(19, y + 7, 40, 44), s.fresh);
                     c.text(
@@ -262,7 +279,11 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         R::new(68, y + 4, 190, 22),
                         13,
                         500,
-                        if s.fresh { TEXT } else { DIM },
+                        if s.fresh {
+                            palette().text
+                        } else {
+                            palette().dim
+                        },
                         DT_LEFT,
                     );
                     c.text(
@@ -270,7 +291,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         R::new(68, y + 28, 205, 19),
                         11,
                         400,
-                        DIM,
+                        palette().dim,
                         DT_LEFT,
                     );
                     if let Some(percent) = s.percent.filter(|_| s.fresh) {
@@ -285,14 +306,18 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             R::new(288, y + 10, 34, 34),
                             fill.round() as u8,
                             s.charging == Some(true),
-                            if percent < 20 { WARN } else { GREEN },
+                            if percent < 20 {
+                                palette().amber
+                            } else {
+                                palette().green
+                            },
                         );
                         c.text(
                             &format!("{percent}%"),
                             R::new(260, y + 40, 90, 16),
                             10,
                             500,
-                            TEXT,
+                            palette().text,
                             DT_CENTER,
                         );
                     } else {
@@ -301,28 +326,35 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             R::new(260, y + 12, 82, 26),
                             11,
                             400,
-                            DIM,
+                            palette().dim,
                             DT_RIGHT,
                         );
                     }
                     y += 64;
                 }
                 if system > 0 {
-                    c.text("系统设备", R::new(20, y, 320, 18), 10, 600, DIM, DT_LEFT);
+                    c.text(
+                        "系统设备",
+                        R::new(20, y, 320, 18),
+                        10,
+                        600,
+                        palette().dim,
+                        DT_LEFT,
+                    );
                     y += 22;
                 }
                 for (row, &entry) in entries[hids..].iter().enumerate() {
                     let Command::System(i) = entry else { continue };
                     let device = &a.snapshot.system_devices[i];
                     if a.fx.flyout.hovered == Some(HoverTarget::Row(hids + row)) {
-                        c.capsule(R::new(9, y, 326, 60), HOVER, None);
+                        c.capsule(R::new(9, y, 326, 60), palette().hover, None);
                     }
                     c.text(
                         &device.name,
                         R::new(22, y + 5, 235, 22),
                         13,
                         500,
-                        TEXT,
+                        palette().text,
                         DT_LEFT,
                     );
                     c.text(
@@ -330,7 +362,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         R::new(22, y + 30, 220, 18),
                         11,
                         400,
-                        DIM,
+                        palette().dim,
                         DT_LEFT,
                     );
                     if let Some(percent) = device.state.percent {
@@ -342,14 +374,18 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             R::new(288, y + 10, 34, 34),
                             fill.round() as u8,
                             device.state.charging == Some(true),
-                            if percent < 20 { WARN } else { GREEN },
+                            if percent < 20 {
+                                palette().amber
+                            } else {
+                                palette().green
+                            },
                         );
                         c.text(
                             &format!("{percent}%"),
                             R::new(260, y + 40, 90, 16),
                             10,
                             500,
-                            TEXT,
+                            palette().text,
                             DT_CENTER,
                         );
                     } else {
@@ -358,7 +394,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                             R::new(248, y + 13, 95, 26),
                             11,
                             400,
-                            DIM,
+                            palette().dim,
                             DT_RIGHT,
                         );
                     }
@@ -371,37 +407,49 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     c.chevron(
                         R::new(343, list_top + 3, 12, 12),
                         ChevronDirection::Up,
-                        if scroll > 0 { DIM } else { BORDER },
+                        if scroll > 0 {
+                            palette().dim
+                        } else {
+                            palette().border
+                        },
                         1.2,
                     );
                     c.chevron(
                         R::new(343, footer - 15, 12, 12),
                         ChevronDirection::Down,
-                        if scroll < max_offset { DIM } else { BORDER },
+                        if scroll < max_offset {
+                            palette().dim
+                        } else {
+                            palette().border
+                        },
                         1.2,
                     );
-                    c.capsule(R::new(347, track_top, 3, track_height), BORDER, None);
+                    c.capsule(
+                        R::new(347, track_top, 3, track_height),
+                        palette().border,
+                        None,
+                    );
                     c.capsule(
                         R::new(343, thumb_y, 11, thumb_height),
                         if a.fx.flyout.scroll_drag.is_some() {
-                            RED
+                            palette().accent
                         } else {
-                            DIM
+                            palette().dim
                         },
                         None,
                     );
                 }
-                c.line(18, footer, 342, footer, BORDER, 1.);
+                c.line(18, footer, 342, footer, palette().border, 1.);
                 let labels = ["电量总览", "刷新电量"];
                 for (i, label) in labels.iter().enumerate() {
                     let rect = R::new(12 + i as i32 * 172, footer + 8, 164, 32);
                     let key = 0x2100 + i as u64;
                     let color = if a.fx.widget.pressed(key) {
-                        PRESSED
+                        palette().pressed
                     } else if a.fx.flyout.hovered == Some(HoverTarget::Footer(i)) {
-                        HOVER
+                        palette().hover
                     } else {
-                        PANEL
+                        palette().panel
                     };
                     c.capsule(rect, color, None);
                     c.text(
@@ -409,7 +457,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         rect,
                         11,
                         500,
-                        TEXT,
+                        palette().text,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
                 }

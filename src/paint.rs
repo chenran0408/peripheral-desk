@@ -11,17 +11,12 @@ use windows_sys::Win32::{
     UI::{Controls::*, WindowsAndMessaging::*},
 };
 
-pub const BG: u32 = 0xff0a0a0d;
-pub const PANEL: u32 = 0xff15151c;
-pub const FIELD: u32 = 0xff1c1c24;
-pub const BORDER: u32 = 0xff30303a;
-pub const TEXT: u32 = 0xfff2f2f5;
-pub const MUTED: u32 = 0xffa1a1ae;
-pub const DIM: u32 = 0xff737382;
-pub const RED: u32 = 0xffff3859;
-pub const ORANGE: u32 = 0xffff7542;
-pub const GREEN: u32 = 0xff38d58a;
-pub const AMBER: u32 = 0xffdcae65;
+pub mod theme;
+pub use theme::palette;
+
+pub const fn colorref(color: u32) -> u32 {
+    ((color >> 16) & 255) | (color & 0xff00) | ((color & 255) << 16)
+}
 
 /// Retain native string storage, selection and accessibility with custom colors.
 pub fn native_control_style(class: &str, style: u32) -> u32 {
@@ -33,7 +28,9 @@ pub fn native_control_style(class: &str, style: u32) -> u32 {
     }
 }
 pub unsafe fn theme_native_control(hwnd: HWND, class: &str, dpi: u32) {
-    let theme = if class == "COMBOBOX" {
+    let theme = if !theme::is_dark() {
+        "Explorer"
+    } else if class == "COMBOBOX" {
         "DarkMode_CFD"
     } else {
         "DarkMode_Explorer"
@@ -64,8 +61,11 @@ pub unsafe fn draw_native_choice(item: &DRAWITEMSTRUCT, dpi: u32, font: HFONT) -
     }
     let combo = item.CtlType == ODT_COMBOBOX;
     let selected = item.itemState & ODS_SELECTED != 0 && item.itemState & ODS_COMBOBOXEDIT == 0;
-    let colorref = |argb: u32| ((argb >> 16) & 255) | (argb & 0xff00) | ((argb & 255) << 16);
-    let background = CreateSolidBrush(colorref(if selected { BORDER } else { FIELD }));
+    let background = CreateSolidBrush(colorref(if selected {
+        palette().border
+    } else {
+        palette().field
+    }));
     FillRect(item.hDC, &item.rcItem, background);
     DeleteObject(background);
     if item.itemID == u32::MAX {
@@ -93,7 +93,7 @@ pub unsafe fn draw_native_choice(item: &DRAWITEMSTRUCT, dpi: u32, font: HFONT) -
     );
     let inset = (10 * dpi.max(96) / 96) as i32;
     if selected {
-        let accent = CreateSolidBrush(colorref(RED));
+        let accent = CreateSolidBrush(colorref(palette().accent));
         let stroke = (3 * dpi.max(96) / 96) as i32;
         let stripe = RECT {
             left: item.rcItem.left,
@@ -108,9 +108,9 @@ pub unsafe fn draw_native_choice(item: &DRAWITEMSTRUCT, dpi: u32, font: HFONT) -
     let previous_color = SetTextColor(
         item.hDC,
         colorref(if item.itemState & ODS_DISABLED != 0 {
-            DIM
+            palette().dim
         } else {
-            TEXT
+            palette().text
         }),
     );
     let previous_mode = SetBkMode(item.hDC, TRANSPARENT as i32);
@@ -187,30 +187,10 @@ impl Canvas {
         GdipAddPathArcI(path, r.x + r.w - d, r.y + r.h - d, d, d, 0., 90.);
         GdipAddPathArcI(path, r.x, r.y + r.h - d, d, d, 90., 90.);
         GdipClosePathFigure(path);
-        if color == RED {
-            let mut b = null_mut();
-            let bounds = Rect {
-                X: r.x,
-                Y: r.y,
-                Width: r.w,
-                Height: r.h,
-            };
-            GdipCreateLineBrushFromRectI(
-                &bounds,
-                RED,
-                ORANGE,
-                LinearGradientModeHorizontal,
-                WrapModeTileFlipXY,
-                &mut b,
-            );
-            GdipFillPath(self.graphics, b as _, path);
-            GdipDeleteBrush(b as _);
-        } else {
-            let mut b = null_mut();
-            GdipCreateSolidFill(color, &mut b);
-            GdipFillPath(self.graphics, b as _, path);
-            GdipDeleteBrush(b as _);
-        }
+        let mut brush = null_mut();
+        GdipCreateSolidFill(color, &mut brush);
+        GdipFillPath(self.graphics, brush as _, path);
+        GdipDeleteBrush(brush as _);
         if let Some(color) = border {
             let mut p = null_mut();
             GdipCreatePen1(color, 1., UnitPixel, &mut p);
@@ -472,7 +452,7 @@ impl Canvas {
             let alpha = (33 - n) as u32 * 2;
             self.ellipse(
                 R::new(cx - r, cy - r, r * 2, r * 2),
-                (alpha << 24) | 0x00ff3859,
+                (alpha << 24) | (palette().accent & 0x00ffffff),
             );
         }
     }
@@ -525,14 +505,22 @@ impl Canvas {
         GdipDisposeImageAttributes(attr);
     }
     pub unsafe fn ring(&self, r: R, percent: Option<u8>, active: bool) {
-        let track_color = if active { BORDER } else { DIM };
+        let track_color = if active {
+            palette().border
+        } else {
+            palette().dim
+        };
         self.arc(r, -90., 359.9, track_color, 8.);
         if let Some(p) = percent {
             let sweep = 360. * p.min(100) as f32 / 100.;
             let color = if active {
-                blend(RED, ORANGE, p.min(100) as f32 / 100.)
+                blend(
+                    palette().primary,
+                    palette().accent_light,
+                    p.min(100) as f32 / 100.,
+                )
             } else {
-                DIM
+                palette().dim
             };
             self.arc(r, -90., sweep, color, 8.);
         }
@@ -541,7 +529,11 @@ impl Canvas {
             R::new(r.x, r.y + r.h / 2 - 36, r.w, 52),
             38,
             300,
-            if active { TEXT } else { DIM },
+            if active {
+                palette().text
+            } else {
+                palette().dim
+            },
             DT_CENTER,
         );
         self.text(
@@ -549,7 +541,7 @@ impl Canvas {
             R::new(r.x, r.y + r.h / 2 + 12, r.w, 24),
             12,
             400,
-            DIM,
+            palette().dim,
             DT_CENTER,
         );
     }
@@ -653,10 +645,10 @@ pub unsafe fn tray_icon() -> windows_sys::Win32::UI::WindowsAndMessaging::HICON 
     }
     let old = SelectObject(dc, bitmap);
     let c = Canvas::new(dc, 96);
-    c.rect(R::new(0, 0, 32, 32), BG);
-    c.round(R::new(5, 9, 20, 14), 4, RED, None);
-    c.rect(R::new(25, 13, 3, 6), ORANGE);
-    c.line(11, 16, 19, 16, TEXT, 2.);
+    c.rect(R::new(0, 0, 32, 32), palette().bg);
+    c.round(R::new(5, 9, 20, 14), 4, palette().accent, None);
+    c.rect(R::new(25, 13, 3, 6), palette().accent_light);
+    c.line(11, 16, 19, 16, palette().on_primary, 2.);
     drop(c);
     GdiFlush();
     for p in std::slice::from_raw_parts_mut(pixels as *mut u32, 1024) {

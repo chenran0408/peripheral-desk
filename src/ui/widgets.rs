@@ -22,14 +22,9 @@ pub(crate) const FONT_MD: i32 = 14;
 pub(crate) const FONT_LG: i32 = 18;
 pub(crate) const FONT_XL: i32 = 24;
 
-pub(crate) const HOVER: u32 = 0xff1c1c24;
-pub(crate) const PRESSED: u32 = 0xff23232c;
 pub(crate) const SHADOW_1: u32 = 0x08000000;
 pub(crate) const SHADOW_2: u32 = 0x10000000;
 pub(crate) const SHADOW_3: u32 = 0x18000000;
-pub(crate) const SUCCESS: u32 = crate::paint::GREEN;
-pub(crate) const WARN: u32 = crate::paint::AMBER;
-pub(crate) const DANGER: u32 = crate::paint::RED;
 
 #[derive(Clone, Copy, Debug)]
 struct Tween {

@@ -1,5 +1,6 @@
 //! Scrollable host for native editors. The window owns its editor until destruction.
-use crate::{hid::wide, paint};
+use crate::hid::wide;
+use crate::paint::palette;
 use std::{
     cell::Cell,
     marker::PhantomData,
@@ -81,6 +82,11 @@ impl<T: EditorState> Embedded<T> {
                 std::io::Error::last_os_error()
             ));
         }
+        crate::paint::theme_native_control(
+            host,
+            "PeripheralDeskEditorViewport",
+            GetDpiForWindow(host),
+        );
         let (hwnd, state) = match create(host) {
             Ok(content) => content,
             Err(error) => {
@@ -297,7 +303,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) 
         WM_PAINT => {
             let mut ps = zeroed();
             let dc = BeginPaint(hwnd, &mut ps);
-            let brush = CreateSolidBrush(super::colorref(paint::BG));
+            let brush = CreateSolidBrush(super::colorref(palette().bg));
             FillRect(dc, &ps.rcPaint, brush);
             DeleteObject(brush);
             EndPaint(hwnd, &ps);

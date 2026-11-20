@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.4.12-preview.3
+
+- 外设盒换用 M HUB 的浅灰背景、灰白卡片和蓝色选中态。主窗口、编辑器、插件管理和托盘共用配色。在「偏好设置」可切换 M HUB 深色。
+- G75 Pro 在「设备调节 → 板载宏」可把按键、鼠标按放和延迟写入普通层的实体键。更新 G75 Pro 预览插件后使用。
+- G75 Pro 和初代 A5 Ultra 新增「本地模板」，可保存、选择、导入并应用配置。初代 A5 也能导入原版 M HUB 的六键模板。
+- 17 款迈从鼠标可在设备图上改键，并把按键设为 DPI 加档或减档。新增 K5 V2 插件；在插件管理中按需更新自己的型号。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.3/PeripheralDesk-0.4.12-preview.3-windows-x64-setup.exe) · [设备插件](https://github.com/chenran0408/peripheral-desk-drivers/releases/tag/v0.4.13-preview.50)
+
 ## 0.4.12-preview.2
 
 - 打开「设备调节」就能选择已连接的外设。两台同型号设备可按接收器分别选择，后台读电量时仍可打开设置或检查更新。

@@ -1,8 +1,9 @@
 //! Modal native G2 Pro lighting editor. Hardware work stays off the UI thread.
+use crate::paint::palette;
 use crate::{
     audio_lighting::{self, LightingConfig, LightingMode, LightingState},
     hid::wide,
-    paint::{self, Canvas, R},
+    paint::{Canvas, R},
 };
 use std::{
     mem::{size_of, zeroed},
@@ -280,14 +281,18 @@ impl Dialog {
         let mut ps: PAINTSTRUCT = zeroed();
         let dc = BeginPaint(hwnd, &mut ps);
         let canvas = Canvas::new(dc, self.dpi);
-        canvas.rect(R::new(0, 0, 880, 580), paint::BG);
-        canvas.gradient(R::new(0, 0, 880, 3), paint::RED, paint::ORANGE);
+        canvas.rect(R::new(0, 0, 880, 580), palette().bg);
+        canvas.gradient(
+            R::new(0, 0, 880, 3),
+            palette().accent,
+            palette().accent_light,
+        );
         canvas.text(
             "G2 Pro 灯光",
             R::new(28, 22, 600, 36),
             26,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -299,18 +304,18 @@ impl Dialog {
             R::new(28, 65, 700, 24),
             14,
             400,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.round(
             R::new(28, 112, 270, 346),
             16,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         let [r, g, b] = self.config.rgb;
         let rgb = 0xff000000 | (r as u32) << 16 | (g as u32) << 8 | b as u32;
-        canvas.ellipse(R::new(66, 150, 194, 194), paint::BG);
+        canvas.ellipse(R::new(66, 150, 194, 194), palette().bg);
         if self.config.mode == LightingMode::Rainbow && self.config.enabled {
             for i in 0..6 {
                 canvas.arc(
@@ -331,7 +336,7 @@ impl Dialog {
                 if self.config.enabled {
                     rgb
                 } else {
-                    paint::BORDER
+                    palette().border
                 },
                 10.,
             );
@@ -342,9 +347,9 @@ impl Dialog {
             56,
             600,
             if self.config.enabled {
-                paint::TEXT
+                palette().text
             } else {
-                paint::DIM
+                palette().dim
             },
             DT_CENTER,
         );
@@ -353,7 +358,7 @@ impl Dialog {
             R::new(58, 361, 210, 24),
             14,
             600,
-            paint::TEXT,
+            palette().text,
             DT_CENTER,
         );
         canvas.text(
@@ -361,14 +366,14 @@ impl Dialog {
             R::new(42, 396, 242, 23),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_CENTER,
         );
         canvas.round(
             R::new(320, 112, 532, 346),
             16,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         canvas.text(
             if self.quick_switch {
@@ -379,7 +384,7 @@ impl Dialog {
             R::new(344, 133, 250, 24),
             16,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -387,7 +392,7 @@ impl Dialog {
             R::new(344, 195, 440, 24),
             14,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -395,16 +400,16 @@ impl Dialog {
             R::new(344, 287, 175, 24),
             14,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
-        canvas.round(R::new(440, 279, 42, 36), 8, rgb, Some(paint::BORDER));
+        canvas.round(R::new(440, 279, 42, 36), 8, rgb, Some(palette().border));
         canvas.text(
             &format!("#{r:02X}{g:02X}{b:02X}"),
             R::new(494, 286, 160, 24),
             15,
             500,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -416,7 +421,7 @@ impl Dialog {
             R::new(344, 326, 480, 24),
             11,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         canvas.text(
@@ -428,7 +433,7 @@ impl Dialog {
             R::new(344, 376, 160, 24),
             14,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -437,9 +442,9 @@ impl Dialog {
             16,
             500,
             if self.config.mode == LightingMode::Static {
-                paint::DIM
+                palette().dim
             } else {
-                paint::TEXT
+                palette().text
             },
             DT_CENTER,
         );
@@ -454,9 +459,9 @@ impl Dialog {
             13,
             500,
             if self.actual_enabled.is_some() {
-                paint::GREEN
+                palette().green
             } else {
-                paint::MUTED
+                palette().muted
             },
             DT_LEFT,
         );
@@ -479,7 +484,7 @@ impl Dialog {
             R::new(28, 505, 820, 23),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         canvas.text(
@@ -487,7 +492,11 @@ impl Dialog {
             R::new(28, 541, 820, 28),
             12,
             400,
-            if self.error { paint::RED } else { paint::MUTED },
+            if self.error {
+                palette().error
+            } else {
+                palette().muted
+            },
             DT_LEFT,
         );
         drop(canvas);
@@ -521,9 +530,9 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             }
             // Clear every physical pixel, including antialiased rounded corners.
             let background = if (TOGGLE..=FASTER).contains(&(draw.CtlID as usize)) {
-                paint::PANEL
+                palette().panel
             } else {
-                paint::BG
+                palette().bg
             };
             let brush = CreateSolidBrush(
                 ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
@@ -540,14 +549,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(0, 0, width, height),
                 8,
                 if selected && !disabled {
-                    paint::RED
+                    palette().primary
                 } else {
-                    paint::FIELD
+                    palette().field
                 },
                 Some(if draw.itemState & ODS_FOCUS != 0 {
-                    paint::MUTED
+                    palette().muted
                 } else {
-                    paint::BORDER
+                    palette().border
                 }),
             );
             let text = if id == TOGGLE {
@@ -579,7 +588,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(4, 0, width - 8, height),
                 13,
                 500,
-                if disabled { paint::DIM } else { paint::TEXT },
+                if disabled {
+                    palette().dim
+                } else if selected {
+                    palette().on_primary
+                } else {
+                    palette().text
+                },
                 DT_CENTER,
             );
             1
@@ -645,7 +660,7 @@ pub unsafe fn open(owner: HWND) {
         DEFAULT_PITCH as u32,
         wide("Microsoft YaHei UI").as_ptr(),
     );
-    let brush = CreateSolidBrush(0x00261e1e);
+    let brush = CreateSolidBrush(crate::paint::colorref(palette().field));
     let mut dialog = Box::new(Dialog {
         config: LightingConfig::default(),
         actual_enabled: None,
@@ -702,7 +717,7 @@ pub unsafe fn open(owner: HWND) {
         DeleteObject(brush);
         return;
     }
-    let dark = 1i32;
+    let dark = i32::from(crate::paint::theme::is_dark());
     DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     for (id, text, r) in [
         (TOGGLE, "开启", R::new(724, 126, 100, 36)),

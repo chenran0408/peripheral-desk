@@ -1,4 +1,5 @@
 //! Native editor for reversible, desktop-resident keyboard macros.
+use crate::paint::palette;
 use crate::{
     controls::{self, Binding, BindingAction, MacroEvent},
     devices::REGISTRY,
@@ -445,42 +446,42 @@ impl Window {
         let mut ps: PAINTSTRUCT = zeroed();
         let dc = BeginPaint(hwnd, &mut ps);
         let canvas = Canvas::new(dc, self.dpi);
-        canvas.rect(R::new(0, 0, 1040, 730), paint::BG);
-        canvas.gradient(R::new(0, 0, 1040, 3), paint::RED, paint::ORANGE);
+        canvas.rect(R::new(0, 0, 1040, 730), palette().bg);
+        canvas.gradient(R::new(0, 0, 1040, 3), palette().accent, palette().amber);
         for (label, r, size, color) in [
-            ("软件宏", R::new(28, 21, 700, 37), 26, paint::TEXT),
+            ("软件宏", R::new(28, 21, 700, 37), 26, palette().text),
             (
                 "本机常驻执行 · 单次键盘动作 · 停用或退出恢复原按键",
                 R::new(28, 65, 980, 24),
                 14,
-                paint::MUTED,
+                palette().muted,
             ),
             (
                 "我的宏与恢复记录",
                 R::new(28, 109, 260, 24),
                 13,
-                paint::MUTED,
+                palette().muted,
             ),
-            ("名称", R::new(334, 109, 150, 24), 13, paint::MUTED),
-            ("触发按键", R::new(334, 188, 260, 24), 13, paint::MUTED),
-            ("播放步骤", R::new(334, 266, 350, 24), 13, paint::MUTED),
+            ("名称", R::new(334, 109, 150, 24), 13, palette().muted),
+            ("触发按键", R::new(334, 188, 260, 24), 13, palette().muted),
+            ("播放步骤", R::new(334, 266, 350, 24), 13, palette().muted),
             (
                 "每行：按下 A / 释放 A / 延时 50；Ctrl、Shift、F1–F12 或 HID:编号",
                 R::new(334, 298, 670, 24),
                 11,
-                paint::DIM,
+                palette().dim,
             ),
             (
                 "F13–F24 为保留触发；最多 128 步、总延时 30 秒。不能使用左键或物理 Fn。",
                 R::new(28, 633, 980, 23),
                 12,
-                paint::DIM,
+                palette().dim,
             ),
             (
                 "程序需保持运行。若退出时设备断开，重开此页可继续恢复原绑定。",
                 R::new(28, 661, 980, 23),
                 12,
-                paint::MUTED,
+                palette().muted,
             ),
         ] {
             canvas.text(label, r, size, 400, color, DT_LEFT);
@@ -498,9 +499,9 @@ impl Window {
                 14,
                 500,
                 if pending > 0 {
-                    paint::ORANGE
+                    palette().amber
                 } else {
-                    paint::GREEN
+                    palette().green
                 },
                 DT_RIGHT,
             );
@@ -530,8 +531,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
         }
         WM_ERASEBKGND => 1,
         WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
-            SetTextColor(w as HDC, 0x00f5f2f2);
-            SetBkColor(w as HDC, 0x00261e1e);
+            SetTextColor(w as HDC, crate::paint::colorref(palette().text));
+            SetBkColor(w as HDC, crate::paint::colorref(palette().field));
             window.brush as isize
         }
         WM_MEASUREITEM => i32::from(paint::measure_native_choice(
@@ -547,7 +548,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 return 0;
             }
             // Clear every physical pixel, including antialiased rounded corners.
-            let background = paint::BG;
+            let background = palette().bg;
             let brush = CreateSolidBrush(
                 ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
             );
@@ -561,14 +562,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(0, 0, width, height),
                 8,
                 if item.CtlID as usize == ENABLE && !disabled {
-                    paint::RED
+                    palette().primary
                 } else {
-                    paint::FIELD
+                    palette().field
                 },
                 Some(if item.itemState & ODS_FOCUS != 0 {
-                    paint::MUTED
+                    palette().muted
                 } else {
-                    paint::BORDER
+                    palette().border
                 }),
             );
             canvas.text(
@@ -576,7 +577,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(4, 0, width - 8, height),
                 13,
                 500,
-                if disabled { paint::DIM } else { paint::TEXT },
+                if disabled {
+                    palette().dim
+                } else if item.CtlID as usize == ENABLE {
+                    palette().on_primary
+                } else {
+                    palette().text
+                },
                 DT_CENTER,
             );
             1
@@ -655,7 +662,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         DEFAULT_PITCH as u32,
         wide("Microsoft YaHei UI").as_ptr(),
     );
-    let brush = CreateSolidBrush(0x00261e1e);
+    let brush = CreateSolidBrush(crate::paint::colorref(palette().field));
     let mut window = Box::new(Window {
         key: spec.key.into(),
         target: crate::plugin_manager::selected_device_target(spec.key),
@@ -708,7 +715,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         DeleteObject(brush);
         return;
     }
-    let dark = 1i32;
+    let dark = i32::from(crate::paint::theme::is_dark());
     DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     let child = |class: &str, value: &str, id: usize, r: R, style: u32| {
         let handle = CreateWindowExW(

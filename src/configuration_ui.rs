@@ -1,4 +1,5 @@
 //! Device configuration/diagnostic window. Import and hardware apply are separate.
+use crate::paint::palette;
 use crate::{
     configuration::{self, OperationReport},
     devices::{DeviceSpec, REGISTRY},
@@ -28,7 +29,7 @@ const EXPORT: usize = 202;
 const IMPORT: usize = 203;
 const APPLY: usize = 204;
 const DIAGNOSTIC: usize = 205;
-const MHUB_GUIDE: &str = "设备设置请前往「设备调节 → 迈从 M HUB」。本地档案可以在此导入和导出。";
+const MHUB_GUIDE: &str = "在「设备调节」选择要设置的迈从设备。本地档案可以在此导入和导出。";
 
 fn available_actions(device: Option<&DeviceSpec>) -> &'static [usize] {
     match device {
@@ -167,14 +168,18 @@ impl Window {
         let mut ps: PAINTSTRUCT = zeroed();
         let dc = BeginPaint(hwnd, &mut ps);
         let canvas = Canvas::new(dc, self.dpi);
-        canvas.rect(R::new(0, 0, 920, 650), paint::BG);
-        canvas.gradient(R::new(0, 0, 920, 3), paint::RED, paint::ORANGE);
+        canvas.rect(R::new(0, 0, 920, 650), palette().bg);
+        canvas.gradient(
+            R::new(0, 0, 920, 3),
+            palette().accent,
+            palette().accent_light,
+        );
         canvas.text(
             "配置与诊断",
             R::new(28, 24, 800, 38),
             26,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -182,7 +187,7 @@ impl Window {
             R::new(28, 68, 850, 24),
             14,
             400,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -190,14 +195,14 @@ impl Window {
             R::new(28, 111, 850, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.round(
             R::new(28, 198, 864, 164),
             14,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         let device_action = match self.device() {
             None => (
@@ -206,7 +211,7 @@ impl Window {
             ),
             Some(spec) if spec.mchose() => (
                 "迈从设备调节",
-                "在「设备调节 → 迈从 M HUB」中修改板载设置。",
+                "在「设备调节」选择对应设备，即可打开它的板载设置。",
             ),
             Some(_) => ("应用到设备", "读取原值，再写入支持恢复的差异项。"),
         };
@@ -223,13 +228,20 @@ impl Window {
             ),
             (311, device_action.0, device_action.1),
         ] {
-            canvas.text(title, R::new(48, y, 130, 24), 14, 600, paint::TEXT, DT_LEFT);
+            canvas.text(
+                title,
+                R::new(48, y, 130, 24),
+                14,
+                600,
+                palette().text,
+                DT_LEFT,
+            );
             canvas.text(
                 description,
                 R::new(190, y, 674, 24),
                 13,
                 400,
-                paint::MUTED,
+                palette().muted,
                 DT_LEFT,
             );
         }
@@ -238,7 +250,7 @@ impl Window {
             R::new(28, 446, 850, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -246,14 +258,18 @@ impl Window {
             R::new(28, 611, 864, 22),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         drop(canvas);
         EndPaint(hwnd, &ps);
     }
 }
-unsafe fn choose_file(hwnd: HWND, import: bool, filename: &str) -> Result<Option<PathBuf>, String> {
+pub(crate) unsafe fn choose_file(
+    hwnd: HWND,
+    import: bool,
+    filename: &str,
+) -> Result<Option<PathBuf>, String> {
     let mut file = [0u16; 32768];
     if !import {
         let text = wide(filename);
@@ -297,6 +313,50 @@ unsafe fn text(hwnd: HWND) -> String {
     let count = GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32);
     String::from_utf16_lossy(&buffer[..count.max(0) as usize])
 }
+pub(crate) unsafe fn draw_action_button(item: &DRAWITEMSTRUCT, dpi: u32, primary: usize) -> isize {
+    if item.CtlType != ODT_BUTTON {
+        return 0;
+    }
+    // Clear every physical pixel, including antialiased rounded corners.
+    let background = palette().bg;
+    let brush = CreateSolidBrush(
+        ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
+    );
+    FillRect(item.hDC, &item.rcItem, brush);
+    DeleteObject(brush);
+    let canvas = Canvas::new(item.hDC, dpi);
+    let width = (item.rcItem.right - item.rcItem.left) * 96 / dpi as i32;
+    let height = (item.rcItem.bottom - item.rcItem.top) * 96 / dpi as i32;
+    let disabled = item.itemState & ODS_DISABLED != 0;
+    canvas.round(
+        R::new(0, 0, width, height),
+        9,
+        if item.CtlID as usize == primary && !disabled {
+            palette().primary
+        } else {
+            palette().field
+        },
+        Some(if item.itemState & ODS_FOCUS != 0 {
+            palette().muted
+        } else {
+            palette().border
+        }),
+    );
+    canvas.text(
+        &text(item.hwndItem),
+        R::new(8, 0, width - 16, height),
+        14,
+        500,
+        if disabled {
+            palette().dim
+        } else {
+            palette().text
+        },
+        DT_CENTER,
+    );
+    1
+}
+
 unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if message == WM_NCCREATE {
         SetWindowLongPtrW(
@@ -318,8 +378,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
         }
         WM_ERASEBKGND => 1,
         WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT | WM_CTLCOLORSTATIC => {
-            SetTextColor(w as HDC, 0x00f5f2f2);
-            SetBkColor(w as HDC, 0x00261e1e);
+            SetTextColor(w as HDC, crate::paint::colorref(palette().text));
+            SetBkColor(w as HDC, crate::paint::colorref(palette().field));
             window.brush as isize
         }
         WM_MEASUREITEM => i32::from(paint::measure_native_choice(
@@ -331,43 +391,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             if paint::draw_native_choice(item, window.dpi, window.font) {
                 return 1;
             }
-            if item.CtlType != ODT_BUTTON {
-                return 0;
-            }
-            // Clear every physical pixel, including antialiased rounded corners.
-            let background = paint::BG;
-            let brush = CreateSolidBrush(
-                ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
-            );
-            FillRect(item.hDC, &item.rcItem, brush);
-            DeleteObject(brush);
-            let canvas = Canvas::new(item.hDC, window.dpi);
-            let width = (item.rcItem.right - item.rcItem.left) * 96 / window.dpi as i32;
-            let height = (item.rcItem.bottom - item.rcItem.top) * 96 / window.dpi as i32;
-            let disabled = item.itemState & ODS_DISABLED != 0;
-            canvas.round(
-                R::new(0, 0, width, height),
-                9,
-                if item.CtlID as usize == APPLY && !disabled {
-                    paint::RED
-                } else {
-                    paint::FIELD
-                },
-                Some(if item.itemState & ODS_FOCUS != 0 {
-                    paint::MUTED
-                } else {
-                    paint::BORDER
-                }),
-            );
-            canvas.text(
-                &text(item.hwndItem),
-                R::new(8, 0, width - 16, height),
-                14,
-                500,
-                if disabled { paint::DIM } else { paint::TEXT },
-                DT_CENTER,
-            );
-            1
+            draw_action_button(item, window.dpi, APPLY)
         }
         WM_COMMAND => {
             let id = w & 0xffff;
@@ -430,7 +454,7 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
         DEFAULT_PITCH as u32,
         wide("Microsoft YaHei UI").as_ptr(),
     );
-    let brush = CreateSolidBrush(0x00261e1e);
+    let brush = CreateSolidBrush(crate::paint::colorref(palette().field));
     let mut window = Box::new(Window {
         combo: null_mut(),
         log: null_mut(),
@@ -471,7 +495,7 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
         DeleteObject(brush);
         return;
     }
-    let dark = 1i32;
+    let dark = i32::from(crate::paint::theme::is_dark());
     DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     let child = |class: &str, label: &str, id: usize, r: R, style: u32| {
         let child = CreateWindowExW(

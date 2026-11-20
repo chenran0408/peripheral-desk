@@ -242,17 +242,54 @@ impl Keyboard {
         request[..5].copy_from_slice(&[0x13, command, 1, 0, layer << 4]);
         self.read_control_request(request, false)
     }
+    pub(crate) fn read_macro_page(&self, page: u8) -> Result<Vec<u8>> {
+        let mut request = [0; 20];
+        request[..7].copy_from_slice(&[0x13, 0x43, 1, 0, page << 4, 3, 2]);
+        let bytes = self.read_control_request(request, false)?;
+        if bytes.len() != 512 {
+            return Err("G75 宏页长度与固件回复不符".into());
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn read_macro_image(&self) -> Result<Vec<u8>> {
+        let mut image = self.read_macro_page(0)?;
+        image.extend(self.read_macro_page(1)?);
+        Ok(image)
+    }
+    pub(crate) fn write_macro_image(&self, desired: &[u8], original: &[u8]) -> Result<()> {
+        if original.len() != 1024 || desired.len() != 1024 {
+            return Err("G75 宏存储快照长度不符".into());
+        }
+        // The receiver numbers the 37 packets *within* each 512-byte page.
+        // Publish the directory on page zero after any referenced page-one data.
+        self.write_block_layer(3, 0x43, 1, &desired[512..], &original[512..])?;
+        if let Err(error) = self.write_block_layer(3, 0x43, 0, &desired[..512], &original[..512]) {
+            return match self.write_block_layer(3, 0x43, 1, &original[512..], &desired[512..]) {
+                Ok(()) => Err(error),
+                Err(restore) => Err(format!("{error}；第二宏页恢复失败：{restore}")),
+            };
+        }
+        Ok(())
+    }
     fn read_control_request(&self, mut request: [u8; 20], trace: bool) -> Result<Vec<u8>> {
-        for _ in 0..3 {
+        // Wireless reads can drop different sequence numbers in successive
+        // transmissions. Combine identical chunks from this request only.
+        let mut chunks = std::collections::BTreeMap::new();
+        let mut total = None;
+        for _ in 0..5 {
             self.send(&mut request)?;
             let deadline = Instant::now() + Duration::from_millis(1800);
-            let mut chunks = std::collections::BTreeMap::new();
-            let mut total = None;
             while Instant::now() < deadline {
                 let Some(packet) = self.frame()? else {
+                    if total.is_some_and(|n| chunks.len() == usize::from(n)) {
+                        return Ok(chunks.into_values().flatten().collect());
+                    }
+                    if total.is_some() {
+                        break;
+                    }
                     continue;
                 };
-                if packet[1] != request[1] {
+                if packet[1] != request[1] || packet[4] >> 4 != request[4] >> 4 {
                     continue;
                 }
                 if trace {
@@ -270,13 +307,27 @@ impl Keyboard {
                     return Err("键盘控制配置分包总数不一致".into());
                 }
                 total = Some(packet[2]);
-                chunks.insert(packet[3], packet[5..5 + length].to_vec());
-                if chunks.len() == packet[2] as usize {
+                let chunk = &packet[5..5 + length];
+                if chunks
+                    .insert(packet[3], chunk.to_vec())
+                    .is_some_and(|old| old != chunk)
+                {
+                    return Err("两次读取的配置内容不同，请重新读取".into());
+                }
+                // After filling a gap from a retry, let the device finish this
+                // transmission before starting the next page/layer request.
+                if chunks.len() == packet[2] as usize && packet[3] + 1 == packet[2] {
                     return Ok(chunks.into_values().flatten().collect());
                 }
             }
         }
-        Err("键盘控制配置分包不完整".into())
+        Err(format!(
+            "键盘配置 0x{:02X} 第 {} 层/页分包不完整（{}/{}）",
+            request[1],
+            request[4] >> 4,
+            chunks.len(),
+            total.unwrap_or(0)
+        ))
     }
     pub(crate) fn write_block_layer(
         &self,
@@ -289,13 +340,21 @@ impl Keyboard {
         if layer > 2
             || desired.len() != original.len()
             || desired.is_empty()
-            || desired.len().div_ceil(14) > 40
+            || (query == 0x43 && (command != 3 || layer > 1 || desired.len() != 512))
+            || (query != 0x43 && desired.len().div_ceil(14) > 40)
         {
             return Err("键盘控制配置结构不匹配".into());
         }
         if desired == original {
             return Ok(());
         }
+        let read = || {
+            if query == 0x43 {
+                self.read_macro_page(layer)
+            } else {
+                self.read_block_layer(query, layer)
+            }
+        };
         let write = |data: &[u8]| -> Result<()> {
             let total = data.len().div_ceil(14);
             for (index, block) in data.chunks(14).enumerate() {
@@ -325,10 +384,7 @@ impl Keyboard {
                     }
                     Ok(false)
                 }) {
-                    if self
-                        .read_block_layer(query, layer)
-                        .is_ok_and(|read| read == data)
-                    {
+                    if read().is_ok_and(|read| read == data) {
                         return Ok(());
                     }
                     return Err(format!("键盘控制配置第 {} 包未确认：{error}", index + 1));
@@ -336,7 +392,7 @@ impl Keyboard {
                 std::thread::sleep(Duration::from_millis(15));
             }
             std::thread::sleep(Duration::from_millis(150));
-            if self.read_block_layer(query, layer)? != data {
+            if read()? != data {
                 return Err("键盘控制配置完整读回不匹配".into());
             }
             Ok(())

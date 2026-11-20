@@ -1,10 +1,9 @@
 //! On-demand native driver-package manager. Package verification stays in the library.
+use crate::paint::palette;
 use crate::{
     hid::wide,
-    paint::{blend, Canvas, BG, BORDER, DIM, FIELD, MUTED, PANEL, R, TEXT},
-    ui::widgets::{
-        DANGER, HOVER, PRESSED, RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_4, SUCCESS, WARN,
-    },
+    paint::{blend, Canvas, R},
+    ui::widgets::{RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_4},
 };
 use peripheral_desk::plugin_manager::{self, CatalogBrowse, DriverPackage, InstalledDriver};
 use std::{
@@ -158,6 +157,7 @@ impl DriverRow<'_> {
                 "volume" => "音量",
                 "effects" => "音效",
                 "experimental-onboard-macros" => "板载宏（实验）",
+                "macro-section" => "独立读取板载宏",
                 "software-macro-trigger" => "常驻软件宏",
                 other => other,
             })
@@ -173,7 +173,7 @@ impl DriverRow<'_> {
         };
         let mut lines = Vec::new();
         if self.brand().eq_ignore_ascii_case("MCHOSE") || self.brand() == "迈从" {
-            lines.push("设备调节请打开「设备调节 → 迈从 M HUB」。".to_owned());
+            lines.push("在「设备调节」中选择对应的迈从设备。".to_owned());
         }
         lines.push(self.description.to_owned());
         if let Some(browse) = self.browse {
@@ -1350,15 +1350,26 @@ impl Manager {
         let old = SelectObject(dc, bitmap);
         {
             let c = Canvas::new(dc, self.dpi);
-            c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-            c.gradient_v(R::new(0, 0, WIDTH, 84), blend(BG, 0xff25131a, 0.8), BG);
-            c.text("插件管理", R::new(28, 13, 350, 32), 22, 600, TEXT, DT_LEFT);
+            c.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
+            c.gradient_v(
+                R::new(0, 0, WIDTH, 84),
+                blend(palette().bg, palette().accent_surface, 0.8),
+                palette().bg,
+            );
+            c.text(
+                "插件管理",
+                R::new(28, 13, 350, 32),
+                22,
+                600,
+                palette().text,
+                DT_LEFT,
+            );
             c.text(
                 "查找型号，按需安装设备插件",
                 R::new(28, 48, 360, 22),
                 13,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -1366,39 +1377,56 @@ impl Manager {
                 R::new(404, 28, 74, 24),
                 12,
                 500,
-                MUTED,
+                palette().muted,
                 DT_RIGHT,
             );
-            c.round(R::new(24, 88, 584, 428), RADIUS_LG, PANEL, Some(BORDER));
+            c.round(
+                R::new(24, 88, 584, 428),
+                RADIUS_LG,
+                palette().panel,
+                Some(palette().border),
+            );
             let results = if self.inventory.is_some() {
                 format!("设备型号  ·  {} 个结果", self.browser.visible.len())
             } else {
                 "设备型号".into()
             };
-            c.text(&results, R::new(48, 211, 280, 23), 13, 500, TEXT, DT_LEFT);
+            c.text(
+                &results,
+                R::new(48, 211, 280, 23),
+                13,
+                500,
+                palette().text,
+                DT_LEFT,
+            );
             c.text(
                 "安装状态",
                 R::new(431, 211, 145, 23),
                 12,
                 400,
-                MUTED,
+                palette().muted,
                 DT_RIGHT,
             );
-            c.round(R::new(618, 88, 398, 428), RADIUS_LG, PANEL, Some(BORDER));
-            c.round(R::new(628, 203, 370, 299), RADIUS_MD, FIELD, None);
+            c.round(
+                R::new(618, 88, 398, 428),
+                RADIUS_LG,
+                palette().panel,
+                Some(palette().border),
+            );
+            c.round(R::new(628, 203, 370, 299), RADIUS_MD, palette().field, None);
             if let Some(row) = self.selected() {
                 let stamp = match row.recommendation {
-                    Some(Recommendation::Clear) => ("已识别", SUCCESS),
-                    Some(Recommendation::Ambiguous) => ("需核对型号", WARN),
-                    None if !row.catalog_available => ("仅本机已安装", MUTED),
-                    None => ("目录中的型号", MUTED),
+                    Some(Recommendation::Clear) => ("已识别", palette().green),
+                    Some(Recommendation::Ambiguous) => ("需核对型号", palette().amber),
+                    None if !row.catalog_available => ("仅本机已安装", palette().muted),
+                    None => ("目录中的型号", palette().muted),
                 };
                 c.text(
                     row.brand(),
                     R::new(634, 103, 210, 22),
                     12,
                     500,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT,
                 );
                 c.text(
@@ -1414,7 +1442,7 @@ impl Manager {
                     R::new(634, 133, 362, 32),
                     19,
                     600,
-                    TEXT,
+                    palette().text,
                     DT_LEFT | DT_END_ELLIPSIS,
                 );
                 let version = if row.catalog_available {
@@ -1427,7 +1455,7 @@ impl Manager {
                     R::new(634, 173, 362, 22),
                     13,
                     400,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT | DT_END_ELLIPSIS,
                 );
             } else {
@@ -1436,7 +1464,7 @@ impl Manager {
                     R::new(634, 104, 362, 32),
                     19,
                     600,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 );
             }
@@ -1461,13 +1489,20 @@ impl Manager {
             } else {
                 "点击列表行或按空格勾选型号".into()
             };
-            c.text(&summary, R::new(28, 571, 984, 18), 12, 400, MUTED, DT_LEFT);
+            c.text(
+                &summary,
+                R::new(28, 571, 984, 18),
+                12,
+                400,
+                palette().muted,
+                DT_LEFT,
+            );
             c.text(
                 "安装、更新、卸载或回退成功后自动重启；部分失败时先保留结果，可点击“重启生效”。",
                 R::new(28, 590, 984, 22),
                 13,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
             c.text(
@@ -1481,10 +1516,19 @@ impl Manager {
                 R::new(28, 612, 984, 21),
                 12,
                 400,
-                if self.error { DANGER } else { DIM },
+                if self.error {
+                    palette().error
+                } else {
+                    palette().dim
+                },
                 DT_LEFT,
             );
-            c.round(R::new(24, 634, 992, 52), RADIUS_MD, FIELD, Some(BORDER));
+            c.round(
+                R::new(24, 634, 992, 52),
+                RADIUS_MD,
+                palette().field,
+                Some(palette().border),
+            );
         }
         BitBlt(dest, 0, 0, area.right, area.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old);
@@ -1498,9 +1542,9 @@ impl Manager {
         };
         // Clear every physical pixel, including antialiased rounded corners.
         let background = if matches!(child.id, REFRESH | OFFLINE | CHANNEL | PREVIEW) {
-            BG
+            palette().bg
         } else {
-            PANEL
+            palette().panel
         };
         let brush = CreateSolidBrush(
             ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
@@ -1519,32 +1563,32 @@ impl Manager {
         c.rect(
             R::new(0, 0, width, height),
             if matches!(child.id, REFRESH | OFFLINE | CHANNEL | PREVIEW) {
-                BG
+                palette().bg
             } else {
-                PANEL
+                palette().panel
             },
         );
         let pressed = item.itemState & ODS_SELECTED != 0;
         let hovered = item.itemState & ODS_HOTLIGHT != 0;
         let fill = if disabled {
-            FIELD
+            palette().field
         } else if pressed {
-            PRESSED
+            palette().pressed
         } else if active {
-            crate::paint::RED
+            palette().primary
         } else if hovered {
-            HOVER
+            palette().hover
         } else {
-            FIELD
+            palette().field
         };
         c.round(
             R::new(0, 0, width - 1, height - 1),
             RADIUS_MD,
             fill,
             Some(if item.itemState & ODS_FOCUS != 0 {
-                MUTED
+                palette().muted
             } else {
-                BORDER
+                palette().border
             }),
         );
         c.text(
@@ -1552,7 +1596,13 @@ impl Manager {
             R::new(0, 0, width, height),
             14,
             if active { 600 } else { 400 },
-            if disabled { DIM } else { TEXT },
+            if disabled {
+                palette().dim
+            } else if active && !pressed {
+                palette().on_primary
+            } else {
+                palette().text
+            },
             DT_CENTER,
         );
     }
@@ -1565,7 +1615,7 @@ impl Manager {
         let dc = CreateCompatibleDC(item.hDC);
         let bitmap = CreateCompatibleBitmap(item.hDC, physical_width, physical_height);
         let previous = SelectObject(dc, bitmap);
-        let brush = CreateSolidBrush(colorref(PANEL));
+        let brush = CreateSolidBrush(colorref(palette().panel));
         let bounds = RECT {
             left: 0,
             top: 0,
@@ -1591,28 +1641,43 @@ impl Manager {
                     R::new(0, 2, width - 2, height - 4),
                     RADIUS_MD,
                     if checked {
-                        blend(FIELD, DANGER, 0.12)
+                        blend(palette().field, palette().accent, 0.12)
                     } else if focus {
-                        FIELD
+                        palette().field
                     } else {
-                        PANEL
+                        palette().panel
                     },
                     Some(if checked {
-                        DANGER
+                        palette().accent
                     } else if focus && item.itemState & ODS_FOCUS != 0 {
-                        WARN
+                        palette().amber
                     } else {
-                        BORDER
+                        palette().border
                     }),
                 );
                 c.round(
                     R::new(8, 11, 18, 18),
                     5,
-                    if checked { DANGER } else { PANEL },
-                    Some(if row.catalog_available { MUTED } else { BORDER }),
+                    if checked {
+                        palette().accent
+                    } else {
+                        palette().panel
+                    },
+                    Some(if row.catalog_available {
+                        palette().muted
+                    } else {
+                        palette().border
+                    }),
                 );
                 if checked {
-                    c.text("✓", R::new(8, 10, 18, 20), 13, 600, TEXT, DT_CENTER);
+                    c.text(
+                        "✓",
+                        R::new(8, 10, 18, 20),
+                        13,
+                        600,
+                        palette().text,
+                        DT_CENTER,
+                    );
                 }
                 let recommendation = self
                     .inventory
@@ -1621,12 +1686,16 @@ impl Manager {
                 c.ellipse(
                     R::new(40, 17, 6, 6),
                     match recommendation {
-                        Some(Recommendation::Clear) => SUCCESS,
-                        Some(Recommendation::Ambiguous) => WARN,
-                        None => DIM,
+                        Some(Recommendation::Clear) => palette().green,
+                        Some(Recommendation::Ambiguous) => palette().amber,
+                        None => palette().dim,
                     },
                 );
-                let color = if disabled { DIM } else { TEXT };
+                let color = if disabled {
+                    palette().dim
+                } else {
+                    palette().text
+                };
                 c.text(
                     row.name,
                     R::new(56, 4, width - 220, height - 8),
@@ -1645,9 +1714,9 @@ impl Manager {
                     12,
                     400,
                     match installed {
-                        Some(Installation::Broken(_)) => WARN,
-                        Some(Installation::Present(_)) => SUCCESS,
-                        _ => DIM,
+                        Some(Installation::Broken(_)) => palette().amber,
+                        Some(Installation::Present(_)) => palette().green,
+                        _ => palette().dim,
                     },
                     DT_RIGHT | DT_END_ELLIPSIS,
                 );
@@ -1657,7 +1726,7 @@ impl Manager {
                     R::new(12, 4, width - 24, height - 8),
                     13,
                     400,
-                    MUTED,
+                    palette().muted,
                     DT_LEFT,
                 );
             }
@@ -1764,16 +1833,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
             0
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => {
-            SetTextColor(w as HDC, colorref(TEXT));
+            SetTextColor(w as HDC, colorref(palette().text));
             if message == WM_CTLCOLORLISTBOX
                 || (message == WM_CTLCOLORSTATIC
                     && matches!(GetDlgCtrlID(l as HWND), BRAND_LABEL | SEARCH_LABEL))
             {
-                SetBkColor(w as HDC, colorref(PANEL));
-                SetDCBrushColor(w as HDC, colorref(PANEL));
+                SetBkColor(w as HDC, colorref(palette().panel));
+                SetDCBrushColor(w as HDC, colorref(palette().panel));
                 GetStockObject(DC_BRUSH) as isize
             } else {
-                SetBkColor(w as HDC, colorref(FIELD));
+                SetBkColor(w as HDC, colorref(palette().field));
                 manager.brush as isize
             }
         }
@@ -1860,7 +1929,7 @@ unsafe fn open_inner(owner: HWND, check_updates: bool, brand: Option<&str>) -> S
     let mut manager = Box::new(Manager {
         dpi,
         font,
-        brush: CreateSolidBrush(colorref(FIELD)),
+        brush: CreateSolidBrush(colorref(palette().field)),
         children: Vec::new(),
         inventory: None,
         selected: 0,
@@ -1911,7 +1980,7 @@ unsafe fn open_inner(owner: HWND, check_updates: bool, brand: Option<&str>) -> S
         manager.as_mut() as *mut Manager as _,
     );
     if !hwnd.is_null() {
-        let dark = 1i32;
+        let dark = i32::from(crate::paint::theme::is_dark());
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_USE_IMMERSIVE_DARK_MODE as u32,

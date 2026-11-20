@@ -1,4 +1,5 @@
 use super::*;
+use crate::paint::palette;
 
 pub(super) const WIDTH: i32 = 728;
 pub(super) const HEIGHT: i32 = 476;
@@ -44,6 +45,19 @@ pub(crate) unsafe fn open_embedded(owner: HWND, model: usize, bounds: RECT) -> R
 
 pub(crate) unsafe fn resize_embedded(bounds: RECT) {
     PAGE.with(|page| page.resize(bounds));
+}
+
+pub(crate) unsafe fn reload_after_template() {
+    PAGE.with(|page| {
+        let hwnd = page.content();
+        if !hwnd.is_null() {
+            let editor = &mut *(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Editor);
+            let control = editor.visual_selected();
+            editor.restore_selection = (control != u16::MAX).then_some(control);
+            editor.macro_control = None;
+            editor.begin(hwnd, None);
+        }
+    });
 }
 
 pub(crate) unsafe fn embedded_writing() -> bool {
@@ -114,8 +128,15 @@ pub(super) fn control_rect(id: i32, default: R) -> R {
 
 impl Editor {
     pub(super) unsafe fn paint_embedded(&self, canvas: &Canvas) {
-        canvas.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-        canvas.text("按键设置", R::new(24, 14, 360, 39), 25, 600, TEXT, DT_LEFT);
+        canvas.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
+        canvas.text(
+            "按键设置",
+            R::new(24, 14, 360, 39),
+            25,
+            600,
+            palette().text,
+            DT_LEFT,
+        );
         let subtitle = self
             .state
             .as_ref()
@@ -130,27 +151,46 @@ impl Editor {
                     )
                 },
             );
-        canvas.text(&subtitle, R::new(24, 54, 650, 23), 14, 400, MUTED, DT_LEFT);
+        canvas.text(
+            &subtitle,
+            R::new(24, 54, 650, 23),
+            14,
+            400,
+            palette().muted,
+            DT_LEFT,
+        );
         canvas.text(
             "物理按键 / 分层",
             R::new(24, 80, 216, 22),
             14,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
-        canvas.round(R::new(254, 80, 450, 280), 12, PANEL, Some(BORDER));
+        canvas.round(
+            R::new(254, 80, 450, 280),
+            12,
+            palette().panel,
+            Some(palette().border),
+        );
         let binding = self.binding();
         let title = binding
             .map(|binding| format!("{} · 第 {} 层", binding.label, binding.layer))
             .unwrap_or_else(|| "尚无可用键位".into());
-        canvas.text(&title, R::new(276, 89, 400, 28), 18, 600, TEXT, DT_LEFT);
+        canvas.text(
+            &title,
+            R::new(276, 89, 400, 28),
+            18,
+            600,
+            palette().text,
+            DT_LEFT,
+        );
         canvas.text(
             "操作类型",
             R::new(276, 128, 300, 22),
             13,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -158,7 +198,7 @@ impl Editor {
             R::new(276, 198, 372, 22),
             13,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         if let Some(binding) = binding {
@@ -168,7 +208,7 @@ impl Editor {
                 R::new(276, 312, 408, 36),
                 13,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT | DT_WORDBREAK,
             );
         }

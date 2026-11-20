@@ -7,9 +7,41 @@ pub enum BindingAction {
     Keyboard { usage: u16, modifiers: u8 },
     Consumer(u16),
     DpiCycle,
+    DpiUp,
+    DpiDown,
     Macro(u16),
     Unknown(Vec<u8>),
 }
+/// Decode the six button entries shared by first-generation A5 firmware and M HUB exports.
+#[cfg(any(feature = "desktop", feature = "driver-runtime"))]
+pub(crate) fn a5_binding(button: usize, bytes: [u8; 4]) -> BindingAction {
+    let value = u32::from_be_bytes([0, bytes[1], bytes[2], bytes[3]]);
+    match (bytes[0] & 15, value) {
+        (0, 0) => match button {
+            0 => BindingAction::Mouse(1),
+            1 => BindingAction::Mouse(3),
+            2 => BindingAction::Mouse(2),
+            3 => BindingAction::Mouse(5),
+            4 => BindingAction::Mouse(4),
+            _ => BindingAction::DpiCycle,
+        },
+        (1, 0x010000) => BindingAction::Mouse(1),
+        (1, 0x020000) => BindingAction::Mouse(2),
+        (1, 0x040000) => BindingAction::Mouse(3),
+        (1, 0x080000) => BindingAction::Mouse(4),
+        (1, 0x100000) => BindingAction::Mouse(5),
+        (2, _) if bytes[3] == 0 && (4..=0xe7).contains(&bytes[2]) => BindingAction::Keyboard {
+            usage: bytes[2] as u16,
+            modifiers: bytes[1],
+        },
+        (3, _) if bytes[2..] == [0, 0] => BindingAction::Consumer(bytes[1] as u16),
+        (4, _) => BindingAction::Macro(button as u16),
+        (5, 0x010000) => BindingAction::DpiCycle,
+        (9, 0xffffff) => BindingAction::Disabled,
+        _ => BindingAction::Unknown(bytes.to_vec()),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Binding {
     pub control: u16,
@@ -50,6 +82,7 @@ pub struct KeyColor {
 pub enum ControlSection {
     Layer(u8),
     Colors,
+    Macros,
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlState {

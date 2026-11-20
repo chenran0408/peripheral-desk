@@ -1,4 +1,5 @@
 //! Native EQ preset library: local naming plus verified device application.
+use crate::paint::palette;
 use crate::{
     audio_fx,
     devices::REGISTRY,
@@ -232,14 +233,18 @@ impl Dialog {
         GetClientRect(hwnd, &mut client);
         let width = client.right * 96 / self.dpi as i32;
         let height = client.bottom * 96 / self.dpi as i32;
-        canvas.rect(R::new(0, 0, width, height), paint::BG);
-        canvas.gradient(R::new(0, 0, width, 3), paint::RED, paint::ORANGE);
+        canvas.rect(R::new(0, 0, width, height), palette().bg);
+        canvas.gradient(
+            R::new(0, 0, width, 3),
+            palette().accent,
+            palette().accent_light,
+        );
         canvas.text(
             "EQ 预设库",
             R::new(28, 22, 500, 36),
             26,
             600,
-            paint::TEXT,
+            palette().text,
             DT_LEFT,
         );
         canvas.text(
@@ -247,7 +252,7 @@ impl Dialog {
             R::new(28, 63, 750, 24),
             14,
             400,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -255,14 +260,14 @@ impl Dialog {
             R::new(28, 100, 235, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.round(
             R::new(282, 124, 650, 278),
             14,
-            paint::PANEL,
-            Some(paint::BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         if let Some(preset) = self
             .selected()
@@ -273,7 +278,7 @@ impl Dialog {
                 R::new(306, 139, 470, 30),
                 20,
                 600,
-                paint::TEXT,
+                palette().text,
                 DT_LEFT,
             );
             let enabled = preset.values.get(&crate::model::Tuning::EqEnabled) == Some(&1);
@@ -286,17 +291,17 @@ impl Dialog {
                 R::new(770, 145, 140, 22),
                 12,
                 400,
-                paint::MUTED,
+                palette().muted,
                 DT_RIGHT,
             );
             let zero_y = 260;
-            canvas.line(310, zero_y, 904, zero_y, paint::BORDER, 1.);
+            canvas.line(310, zero_y, 904, zero_y, palette().border, 1.);
             canvas.text(
                 "+20",
                 R::new(297, 185, 32, 20),
                 10,
                 400,
-                paint::DIM,
+                palette().dim,
                 DT_LEFT,
             );
             canvas.text(
@@ -304,7 +309,7 @@ impl Dialog {
                 R::new(297, 324, 32, 20),
                 10,
                 400,
-                paint::DIM,
+                palette().dim,
                 DT_LEFT,
             );
             let mut previous = None;
@@ -313,15 +318,15 @@ impl Dialog {
                 let x = 344 + index as i32 * 59;
                 let y = zero_y - gain * 3;
                 if let Some((px, py)) = previous {
-                    canvas.line(px, py, x, y, paint::RED, 2.5);
+                    canvas.line(px, py, x, y, palette().accent, 2.5);
                 }
-                canvas.ellipse(R::new(x - 4, y - 4, 8, 8), paint::ORANGE);
+                canvas.ellipse(R::new(x - 4, y - 4, 8, 8), palette().accent_light);
                 canvas.text(
                     &format!("{gain:+}"),
                     R::new(x - 22, 348, 44, 20),
                     11,
                     600,
-                    paint::TEXT,
+                    palette().text,
                     DT_CENTER,
                 );
                 canvas.text(
@@ -329,7 +334,7 @@ impl Dialog {
                     R::new(x - 22, 370, 44, 20),
                     10,
                     400,
-                    paint::DIM,
+                    palette().dim,
                     DT_CENTER,
                 );
                 previous = Some((x, y));
@@ -340,7 +345,7 @@ impl Dialog {
                 R::new(314, 220, 580, 30),
                 18,
                 400,
-                paint::MUTED,
+                palette().muted,
                 DT_CENTER,
             );
         }
@@ -349,7 +354,7 @@ impl Dialog {
             R::new(28, 423, 400, 22),
             13,
             600,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         let record = self
@@ -363,7 +368,7 @@ impl Dialog {
             R::new(28, 498, 890, 24),
             13,
             400,
-            paint::MUTED,
+            palette().muted,
             DT_LEFT,
         );
         canvas.text(
@@ -371,7 +376,11 @@ impl Dialog {
             R::new(28, 528, 890, 44),
             13,
             400,
-            if self.error { paint::RED } else { paint::GREEN },
+            if self.error {
+                palette().error
+            } else {
+                palette().green
+            },
             DT_LEFT | DT_WORDBREAK | DT_TOP,
         );
         canvas.text(
@@ -379,7 +388,7 @@ impl Dialog {
             R::new(28, 582, 890, 21),
             12,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         canvas.text(
@@ -387,7 +396,7 @@ impl Dialog {
             R::new(28, 605, 890, 21),
             11,
             400,
-            paint::DIM,
+            palette().dim,
             DT_LEFT,
         );
         drop(canvas);
@@ -421,8 +430,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
         }
         WM_ERASEBKGND => 1,
         WM_CTLCOLORLISTBOX | WM_CTLCOLOREDIT => {
-            SetTextColor(w as HDC, 0x00f5f2f2);
-            SetBkColor(w as HDC, 0x00261e1e);
+            SetTextColor(w as HDC, crate::paint::colorref(palette().text));
+            SetBkColor(w as HDC, crate::paint::colorref(palette().field));
             dialog.brush as isize
         }
         WM_MEASUREITEM => i32::from(paint::measure_native_choice(
@@ -438,7 +447,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 return 0;
             }
             // Clear every physical pixel, including antialiased rounded corners.
-            let background = paint::BG;
+            let background = palette().bg;
             let brush = CreateSolidBrush(
                 ((background >> 16) & 0xff) | (background & 0xff00) | ((background & 0xff) << 16),
             );
@@ -453,14 +462,14 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(0, 0, width, height),
                 9,
                 if active && !disabled {
-                    paint::RED
+                    palette().primary
                 } else {
-                    paint::FIELD
+                    palette().field
                 },
                 Some(if item.itemState & ODS_FOCUS != 0 {
-                    paint::MUTED
+                    palette().muted
                 } else {
-                    paint::BORDER
+                    palette().border
                 }),
             );
             canvas.text(
@@ -468,7 +477,13 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
                 R::new(8, 0, width - 16, height),
                 13,
                 500,
-                if disabled { paint::DIM } else { paint::TEXT },
+                if disabled {
+                    palette().dim
+                } else if active {
+                    palette().on_primary
+                } else {
+                    palette().text
+                },
                 DT_CENTER,
             );
             1
@@ -557,7 +572,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         DEFAULT_PITCH as u32,
         wide("Microsoft YaHei UI").as_ptr(),
     );
-    let brush = CreateSolidBrush(0x00261e1e);
+    let brush = CreateSolidBrush(crate::paint::colorref(palette().field));
     let mut dialog = Box::new(Dialog {
         library,
         list: null_mut(),
@@ -607,7 +622,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
         DeleteObject(brush);
         return;
     }
-    let dark = 1i32;
+    let dark = i32::from(crate::paint::theme::is_dark());
     DwmSetWindowAttribute(hwnd, 20, (&dark as *const i32).cast(), 4);
     let child = |class: &str, text: &str, id: usize, r: R, style: u32| {
         let handle = CreateWindowExW(

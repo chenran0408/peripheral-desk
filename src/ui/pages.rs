@@ -1,11 +1,12 @@
 //! Painting for battery monitoring, device controls and application preferences.
 use super::widgets::{FONT_LG, FONT_MD, RADIUS_LG, RADIUS_MD};
 use super::{widget_key, App, Command, Page, CARD, ENTRY, GHOST, HOME_CONTENT_Y, SIDEBAR};
+use crate::paint::palette;
 use crate::{
     backend::{self, Action},
     devices::{Kind, REGISTRY},
     model::Tuning,
-    paint::{Canvas, R, *},
+    paint::{Canvas, R},
     system_battery,
 };
 use std::mem::zeroed;
@@ -129,11 +130,11 @@ fn kind_name(kind: Kind) -> &'static str {
 }
 pub(super) fn connection_color(s: &backend::State) -> u32 {
     if s.fresh {
-        GREEN
+        palette().green
     } else if s.present {
-        AMBER
+        palette().amber
     } else {
-        DIM
+        palette().dim
     }
 }
 pub(super) fn power(s: &backend::State) -> &'static str {
@@ -150,14 +151,14 @@ pub(super) fn power(s: &backend::State) -> &'static str {
 
 impl App {
     pub(super) unsafe fn sidebar_overlay(&self, c: &Canvas) {
-        c.gradient_v(R::new(0, 0, SIDEBAR, self.height), 0xff111117, 0xff0e0e12);
-        c.line(SIDEBAR, 0, SIDEBAR, self.height, BORDER, 1.);
+        c.rect(R::new(0, 0, SIDEBAR, self.height), palette().sidebar_bg);
+        c.line(SIDEBAR, 0, SIDEBAR, self.height, palette().border, 1.);
         c.text(
             "外设盒",
             R::new(20, 20, SIDEBAR - 40, 30),
             18,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.text(
@@ -165,18 +166,18 @@ impl App {
             R::new(20, 46, SIDEBAR - 40, 18),
             10,
             500,
-            DIM,
+            palette().dim,
             DT_LEFT,
         );
     }
 
     pub(super) unsafe fn device_summary(&self, c: &Canvas, m: usize) {
-        c.rect(R::new(SIDEBAR + 1, 66, 189, self.height - 66), BG);
+        c.rect(R::new(SIDEBAR + 1, 66, 189, self.height - 66), palette().bg);
         let s = &self.snapshot.devices[m];
         let spec = &REGISTRY[m];
         let panel = R::new(SIDEBAR + 16, 88, 158, (self.height - 172).max(400));
         c.soft_shadow(panel, 12);
-        c.round(panel, RADIUS_MD, PANEL, Some(BORDER));
+        c.round(panel, RADIUS_MD, palette().panel, Some(palette().border));
         if s.fresh {
             c.glow(panel.x + panel.w / 2, panel.y + 68, 56);
         }
@@ -190,7 +191,7 @@ impl App {
             R::new(panel.x + 12, panel.y + 132, 134, 20),
             10,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -198,7 +199,7 @@ impl App {
             R::new(panel.x + 12, panel.y + 156, 134, 42),
             13,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.ellipse(
@@ -210,7 +211,7 @@ impl App {
             R::new(panel.x + 26, panel.y + 202, 120, 34),
             10,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.line(
@@ -218,7 +219,7 @@ impl App {
             panel.y + 248,
             panel.x + panel.w - 14,
             panel.y + 248,
-            BORDER,
+            palette().border,
             1.,
         );
         c.text(
@@ -226,7 +227,7 @@ impl App {
             R::new(panel.x + 14, panel.y + 264, panel.w - 28, 24),
             12,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
     }
@@ -270,8 +271,8 @@ impl App {
             let center = x + (bw - 10) / 2;
             let value = self.tuning_value(m, *key);
             let available = value.is_some() && self.snapshot.devices[m].fresh;
-            c.line(center, top, center, bottom, BORDER, 5.);
-            c.line(center - 7, middle, center + 7, middle, DIM, 1.);
+            c.line(center, top, center, bottom, palette().border, 5.);
+            c.line(center - 7, middle, center + 7, middle, palette().dim, 1.);
             if let Some(v) = value {
                 let y = bottom - (v as f32 / 40. * (bottom - top) as f32).round() as i32;
                 c.line(
@@ -279,13 +280,21 @@ impl App {
                     middle,
                     center,
                     y,
-                    if available { RED } else { DIM },
+                    if available {
+                        palette().accent
+                    } else {
+                        palette().dim
+                    },
                     5.,
                 );
                 c.round(
                     R::new(center - 9, y - 6, 18, 12),
                     5,
-                    if available { ORANGE } else { DIM },
+                    if available {
+                        palette().accent_light
+                    } else {
+                        palette().dim
+                    },
                     None,
                 );
             }
@@ -296,7 +305,7 @@ impl App {
                 R::new(x - 5, detail_y(239), bw, 25),
                 12,
                 400,
-                MUTED,
+                palette().muted,
                 DT_CENTER,
             );
             c.text(
@@ -304,31 +313,38 @@ impl App {
                 R::new(x - 5, detail_y(556) + 6, bw, 22),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_CENTER,
             );
         }
     }
     pub(super) unsafe fn background(&self, c: &Canvas) {
-        c.rect(R::new(0, 0, self.width, self.height), BG);
+        c.rect(R::new(0, 0, self.width, self.height), palette().bg);
         c.gradient_v(
             R::new(SIDEBAR + 1, 0, self.width - SIDEBAR - 1, 66),
-            crate::paint::blend(BG, 0xff25131a, self.fx.nav.value()),
-            BG,
+            crate::paint::blend(palette().bg, palette().accent_surface, self.fx.nav.value()),
+            palette().bg,
         );
-        c.line(SIDEBAR + 24, 65, self.width - 28, 65, 0xff19191f, 1.);
+        c.line(SIDEBAR + 24, 65, self.width - 28, 65, palette().border, 1.);
     }
 
     unsafe fn page_heading(&self, c: &Canvas, title: &str, description: &str) {
         let left = SIDEBAR + 24;
         let width = self.width - left - 28;
-        c.text(title, R::new(left, 84, width, 38), 26, 600, TEXT, DT_LEFT);
+        c.text(
+            title,
+            R::new(left, 84, width, 38),
+            26,
+            600,
+            palette().text,
+            DT_LEFT,
+        );
         c.text(
             description,
             R::new(left + 1, 125, width, 22),
             13,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
     }
@@ -345,13 +361,13 @@ impl App {
             self.height - HOME_CONTENT_Y - 86,
         );
         let center_y = panel.y + panel.h / 2;
-        c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
+        c.round(panel, RADIUS_LG, palette().panel, Some(palette().border));
         c.text(
             "暂无电量设备",
             R::new(panel.x + 24, center_y - 98, panel.w - 48, 42),
             24,
             600,
-            TEXT,
+            palette().text,
             DT_CENTER,
         );
         c.text(
@@ -359,7 +375,7 @@ impl App {
             R::new(panel.x + 24, center_y - 50, panel.w - 48, 30),
             14,
             400,
-            MUTED,
+            palette().muted,
             DT_CENTER,
         );
     }
@@ -429,13 +445,13 @@ impl App {
         let w = self.width - x - 28;
         let y = HOME_CONTENT_Y;
         let panel = R::new(x, y, w, 176);
-        c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
+        c.round(panel, RADIUS_LG, palette().panel, Some(palette().border));
         c.text(
             "剩余电量",
             R::new(x + 28, y + 22, w - 260, 25),
             14,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -443,7 +459,7 @@ impl App {
             R::new(x + 26, y + 51, w - 265, 70),
             44,
             500,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.text(
@@ -451,7 +467,7 @@ impl App {
             R::new(x + 28, y + 128, w - 265, 24),
             13,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         if let Some(m) = battery.model {
@@ -472,20 +488,20 @@ impl App {
         c.round(
             R::new(x, rows_top, w, rows.len() as i32 * row_h + 12),
             RADIUS_LG,
-            PANEL,
-            Some(BORDER),
+            palette().panel,
+            Some(palette().border),
         );
         for (i, (label, value)) in rows.iter().enumerate() {
             let y = rows_top + 6 + i as i32 * row_h;
             if i > 0 {
-                c.line(x + 24, y, x + w - 24, y, BORDER, 1.);
+                c.line(x + 24, y, x + w - 24, y, palette().border, 1.);
             }
             c.text(
                 label,
                 R::new(x + 26, y, 130, row_h),
                 13,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -493,7 +509,7 @@ impl App {
                 R::new(x + 172, y, w - 200, row_h),
                 15,
                 500,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
         }
@@ -506,23 +522,35 @@ impl App {
         let rx = 394;
         let rw = self.width - rx - 28;
         let cx = rx + 30;
-        c.text(spec.name, R::new(rx, 78, rw, 34), 23, 600, TEXT, DT_LEFT);
+        c.text(
+            spec.name,
+            R::new(rx, 78, rw, 34),
+            23,
+            600,
+            palette().text,
+            DT_LEFT,
+        );
         c.text(
             spec.validation,
             R::new(rx + 1, 113, rw, 22),
             12,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
-        c.round(R::new(rx, 145, rw, h - 227), RADIUS_LG, PANEL, Some(BORDER));
+        c.round(
+            R::new(rx, 145, rw, h - 227),
+            RADIUS_LG,
+            palette().panel,
+            Some(palette().border),
+        );
         if self.show_evidence {
             c.text(
                 "适配信息",
                 R::new(cx, 175, rw - 60, 36),
                 22,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             let links = &spec.evidence["connections"];
@@ -559,14 +587,21 @@ impl App {
                 ("验证固件", firmware, 438, 42),
                 ("验证记录", report, 508, (h - 610).max(92)),
             ] {
-                c.line(cx, y - 12, rx + rw - 30, y - 12, BORDER, 1.);
-                c.text(label, R::new(cx, y, 92, 26), 13, 400, MUTED, DT_LEFT);
+                c.line(cx, y - 12, rx + rw - 30, y - 12, palette().border, 1.);
+                c.text(
+                    label,
+                    R::new(cx, y, 92, 26),
+                    13,
+                    400,
+                    palette().muted,
+                    DT_LEFT,
+                );
                 c.text(
                     value,
                     R::new(cx + 100, y + 4, rw - 160, height),
                     14,
                     500,
-                    TEXT,
+                    palette().text,
                     DT_LEFT | DT_WORDBREAK,
                 );
             }
@@ -578,7 +613,7 @@ impl App {
                 R::new(cx, 179, rw - 60, 38),
                 22,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -586,7 +621,7 @@ impl App {
                 R::new(cx, 237, rw - 60, 72),
                 14,
                 400,
-                MUTED,
+                palette().muted,
                 DT_LEFT | DT_WORDBREAK,
             );
             return;
@@ -601,7 +636,7 @@ impl App {
                 R::new(cx, 175, rw - 60, 36),
                 22,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             let mut rows = vec![("连接", connection(s, self.images.installed[m]).to_owned())];
@@ -659,14 +694,21 @@ impl App {
             let spacing = ((h - 340) / rows.len() as i32).clamp(39, 52);
             for (i, (label, value)) in rows.iter().enumerate() {
                 let y = 230 + i as i32 * spacing;
-                c.line(cx, y - 6, rx + rw - 30, y - 6, BORDER, 1.);
-                c.text(label, R::new(cx, y, 110, 36), 13, 400, MUTED, DT_LEFT);
+                c.line(cx, y - 6, rx + rw - 30, y - 6, palette().border, 1.);
+                c.text(
+                    label,
+                    R::new(cx, y, 110, 36),
+                    13,
+                    400,
+                    palette().muted,
+                    DT_LEFT,
+                );
                 c.text(
                     value,
                     R::new(cx + 126, y, rw - 188, 36),
                     15,
                     500,
-                    TEXT,
+                    palette().text,
                     DT_LEFT,
                 );
             }
@@ -682,7 +724,7 @@ impl App {
                 R::new(cx, detail_y(101), 300, 30),
                 FONT_LG,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -690,7 +732,7 @@ impl App {
                 R::new(cx, detail_y(137), rw - 60, 24),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
             c.text(
@@ -701,7 +743,11 @@ impl App {
                 R::new(rx + rw - 230, detail_y(97), 170, 52),
                 38,
                 300,
-                if s.fresh { TEXT } else { DIM },
+                if s.fresh {
+                    palette().text
+                } else {
+                    palette().dim
+                },
                 DT_RIGHT,
             );
             c.text(
@@ -709,33 +755,48 @@ impl App {
                 R::new(rx + rw - 53, detail_y(115), 30, 24),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
             let slider = self.slider;
             let y = slider.y + slider.h / 2;
-            c.line(slider.x, y, slider.x + slider.w, y, BORDER, 7.);
+            c.line(slider.x, y, slider.x + slider.w, y, palette().border, 7.);
             if let (Some(dpi), Some((min, max))) = (self.value(m), spec.dpi_range) {
                 let pos = slider.x
                     + ((dpi.saturating_sub(min)) as f32 / (max - min) as f32 * slider.w as f32)
                         as i32;
-                c.line(slider.x, y, pos, y, if s.fresh { RED } else { DIM }, 7.);
+                c.line(
+                    slider.x,
+                    y,
+                    pos,
+                    y,
+                    if s.fresh {
+                        palette().accent
+                    } else {
+                        palette().dim
+                    },
+                    7.,
+                );
                 c.ellipse(
                     R::new(pos - 15, y - 15, 30, 30),
                     if s.fresh { 0x25ff3859 } else { 0x255e5e6d },
                 );
                 c.ellipse(
                     R::new(pos - 9, y - 9, 18, 18),
-                    if s.fresh { ORANGE } else { DIM },
+                    if s.fresh {
+                        palette().accent_light
+                    } else {
+                        palette().dim
+                    },
                 );
-                c.ellipse(R::new(pos - 4, y - 4, 8, 8), TEXT);
+                c.ellipse(R::new(pos - 4, y - 4, 8, 8), palette().text);
             }
             c.text(
                 "移动滑块可连续调整；点击 − / + 精调",
                 R::new(cx, detail_y(286), rw - 60, 24),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
         } else if spec.key == "mchose-g75-pro" {
@@ -744,7 +805,7 @@ impl App {
                 R::new(cx, detail_y(101), 300, 32),
                 FONT_LG,
                 600,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -752,18 +813,25 @@ impl App {
                 R::new(cx, detail_y(137), rw - 60, 24),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
         }
-        c.line(cx, detail_y(337), rx + rw - 30, detail_y(337), BORDER, 1.);
+        c.line(
+            cx,
+            detail_y(337),
+            rx + rw - 30,
+            detail_y(337),
+            palette().border,
+            1.,
+        );
         if !spec.rates_for(s.wired).is_empty() {
             c.text(
                 "回报率",
                 R::new(cx, detail_y(354), 135, 29),
                 15,
                 500,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -771,7 +839,7 @@ impl App {
                 R::new(cx, detail_y(382), 135, 22),
                 11,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
         }
@@ -781,7 +849,7 @@ impl App {
                 R::new(cx, detail_y(421), 135, 29),
                 15,
                 500,
-                MUTED,
+                palette().muted,
                 DT_LEFT,
             );
             c.text(
@@ -789,7 +857,7 @@ impl App {
                 R::new(cx, detail_y(451), 135, 22),
                 11,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
         }
@@ -799,7 +867,7 @@ impl App {
             detail_y(492) + lower_section,
             rx + rw - 30,
             detail_y(492) + lower_section,
-            BORDER,
+            palette().border,
             1.,
         );
         c.text(
@@ -807,7 +875,7 @@ impl App {
             R::new(cx, detail_y(513) + lower_section, 200, 23),
             15,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -820,21 +888,21 @@ impl App {
             R::new(cx, detail_y(542) + lower_section, rw - 70, 22),
             13,
             400,
-            DIM,
+            palette().dim,
             DT_LEFT,
         );
         c.round(
             R::new(cx, h - 238, rw - 60, 64),
             12,
-            0xff20151c,
-            Some(0xff3c202b),
+            palette().accent_surface,
+            Some(palette().accent_border),
         );
         c.text(
             "自动保存",
             R::new(cx + 18, h - 230, rw - 96, 24),
             13,
             600,
-            RED,
+            palette().accent,
             DT_LEFT,
         );
         c.text(
@@ -842,10 +910,10 @@ impl App {
             R::new(cx + 18, h - 204, rw - 96, 22),
             12,
             400,
-            DIM,
+            palette().dim,
             DT_LEFT,
         );
-        c.round(R::new(cx, h - 160, rw - 60, 42), 10, FIELD, None);
+        c.round(R::new(cx, h - 160, rw - 60, 42), 10, palette().field, None);
         c.text(
             if !s.present {
                 "设备未连接，设置暂不可用"
@@ -859,7 +927,11 @@ impl App {
             R::new(cx + 16, h - 153, rw - 90, 27),
             12,
             400,
-            if s.fresh { MUTED } else { DIM },
+            if s.fresh {
+                palette().muted
+            } else {
+                palette().dim
+            },
             DT_LEFT,
         );
     }
@@ -884,7 +956,7 @@ impl App {
             R::new(cx, detail_y(101), 350, 32),
             FONT_LG,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.text(
@@ -902,7 +974,7 @@ impl App {
             R::new(cx, detail_y(138), rw - 60, 23),
             13,
             400,
-            DIM,
+            palette().dim,
             DT_LEFT,
         );
         if !audio && self.settings_pages(m) > 1 {
@@ -911,7 +983,7 @@ impl App {
                 R::new(rx + rw - 174, detail_y(101), 72, 34),
                 12,
                 400,
-                MUTED,
+                palette().muted,
                 DT_CENTER,
             );
         }
@@ -922,7 +994,7 @@ impl App {
                 R::new(cx, y, 210, 27),
                 FONT_MD,
                 500,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
             c.text(
@@ -940,10 +1012,10 @@ impl App {
                 R::new(cx, y + 31, rw - 60, 22),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
-            c.line(cx, y + 58, rx + rw - 30, y + 58, BORDER, 1.);
+            c.line(cx, y + 58, rx + rw - 30, y + 58, palette().border, 1.);
         }
         if audio && self.audio_page == 1 {
             self.eq_panel(c, m);
@@ -953,7 +1025,12 @@ impl App {
         } else {
             h - 182
         };
-        c.round(R::new(cx, notice_y, rw - 60, 60), RADIUS_MD, FIELD, None);
+        c.round(
+            R::new(cx, notice_y, rw - 60, 60),
+            RADIUS_MD,
+            palette().field,
+            None,
+        );
         c.text(
             if audio {
                 if self.snapshot.devices[m].settings_error.is_empty() {
@@ -967,7 +1044,7 @@ impl App {
             R::new(cx + 18, notice_y + 10, rw - 96, 24),
             13,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -983,7 +1060,7 @@ impl App {
             R::new(cx + 18, notice_y + 34, rw - 96, 20),
             12,
             400,
-            DIM,
+            palette().dim,
             DT_LEFT,
         );
     }
@@ -995,7 +1072,7 @@ impl App {
             R::new(left, 88, 500, 36),
             24,
             600,
-            TEXT,
+            palette().text,
             DT_LEFT,
         );
         c.text(
@@ -1003,10 +1080,15 @@ impl App {
             R::new(left + 2, 126, width - 4, 22),
             13,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
-        c.round(R::new(left, 168, width, 532), 14, PANEL, Some(BORDER));
+        c.round(
+            R::new(left, 168, width, 532),
+            14,
+            palette().panel,
+            Some(palette().border),
+        );
         for (y, title, hint) in [
             (202, "自动刷新", "选择读取间隔，较长间隔可减少设备唤醒"),
             (297, "低电阈值", "仅在未充电且读数有效时提醒"),
@@ -1018,17 +1100,31 @@ impl App {
             ),
             (576, "开机启动", "登录 Windows 后在托盘运行"),
         ] {
-            c.text(title, R::new(left + 24, y, 210, 25), 14, 600, TEXT, DT_LEFT);
+            c.text(
+                title,
+                R::new(left + 24, y, 210, 25),
+                14,
+                600,
+                palette().text,
+                DT_LEFT,
+            );
             c.text(
                 hint,
                 R::new(left + 24, y + 25, width - 48, 21),
                 12,
                 400,
-                DIM,
+                palette().dim,
                 DT_LEFT,
             );
             if y < 550 {
-                c.line(left + 24, y + 90, left + width - 24, y + 90, BORDER, 1.);
+                c.line(
+                    left + 24,
+                    y + 90,
+                    left + width - 24,
+                    y + 90,
+                    palette().border,
+                    1.,
+                );
             }
         }
     }
@@ -1038,7 +1134,7 @@ impl App {
         let height = item.rcItem.bottom - item.rcItem.top;
         let bitmap = CreateCompatibleBitmap(item.hDC, width, height);
         let old = SelectObject(dc, bitmap);
-        let brush = CreateSolidBrush(0x000d0a0a);
+        let brush = CreateSolidBrush(crate::paint::colorref(palette().bg));
         FillRect(dc, &item.rcItem, brush);
         DeleteObject(brush);
         let mut buffered = *item;
@@ -1053,7 +1149,7 @@ impl App {
         let Some(b) = self.controls.iter().find(|b| b.hwnd == item.hwndItem) else {
             return;
         };
-        let brush = CreateSolidBrush(0x000d0a0a);
+        let brush = CreateSolidBrush(crate::paint::colorref(palette().bg));
         FillRect(item.hDC, &item.rcItem, brush);
         DeleteObject(brush);
         let c = Canvas::new(item.hDC, self.dpi);
@@ -1068,12 +1164,21 @@ impl App {
         if b.style == CARD {
             let over = hover || self.fx.widget.hover(widget_key(b.command));
             let fill = if over {
-                crate::ui::widgets::HOVER
+                palette().hover
             } else {
-                PANEL
+                palette().panel
             };
             let focus = item.itemState & ODS_FOCUS != 0;
-            c.round(r, RADIUS_LG, fill, Some(if focus { RED } else { BORDER }));
+            c.round(
+                r,
+                RADIUS_LG,
+                fill,
+                Some(if focus {
+                    palette().accent
+                } else {
+                    palette().border
+                }),
+            );
             if let Some(battery) = self.battery_view(b.command) {
                 self.paint_battery_card(&c, r, &battery);
             } else {
@@ -1082,7 +1187,7 @@ impl App {
             return;
         }
         if b.style == ENTRY {
-            c.rect(R::new(0, 0, b.rect.w, b.rect.h), 0xff111117);
+            c.rect(R::new(0, 0, b.rect.w, b.rect.h), palette().sidebar_bg);
             let active = match b.command {
                 Command::Home => {
                     matches!(self.page, Page::Home | Page::Battery(_) | Page::System(_))
@@ -1101,31 +1206,44 @@ impl App {
             let key = widget_key(b.command);
             let over = hover || self.fx.widget.hover(key);
             let fill = if active {
-                0xff29232b
+                palette().accent_surface
             } else if over {
-                crate::paint::blend(PANEL, crate::ui::widgets::HOVER, self.fx.widget.value(key))
+                crate::paint::blend(palette().panel, palette().hover, self.fx.widget.value(key))
             } else {
-                0xff111117
+                palette().sidebar_bg
             };
             c.round(
                 r,
                 8,
                 fill,
-                Some(if active { 0xff4a3038 } else { 0xff111117 }),
+                Some(if active {
+                    palette().accent_border
+                } else {
+                    palette().sidebar_bg
+                }),
             );
             if active {
-                c.round(R::new(2, 8, 3, r.h - 16), 1, RED, None);
+                c.round(R::new(2, 8, 3, r.h - 16), 1, palette().accent, None);
             }
             c.text(
                 &b.label,
                 R::new(14, 3, r.w - 28, r.h - 6),
                 14,
                 if active { 600 } else { 500 },
-                if active { TEXT } else { MUTED },
+                if active {
+                    palette().text
+                } else {
+                    palette().muted
+                },
                 DT_LEFT,
             );
             if item.itemState & ODS_FOCUS != 0 {
-                c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 7, 0, Some(MUTED));
+                c.round(
+                    R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
+                    7,
+                    0,
+                    Some(palette().muted),
+                );
             }
             return;
         }
@@ -1137,7 +1255,11 @@ impl App {
         };
         c.rect(
             R::new(0, 0, b.rect.w, b.rect.h),
-            if inside_panel { PANEL } else { BG },
+            if inside_panel {
+                palette().panel
+            } else {
+                palette().bg
+            },
         );
         if b.rect.y < 65 {
             c.gradient_v(
@@ -1147,25 +1269,34 @@ impl App {
                     self.width - SIDEBAR - 1,
                     66,
                 ),
-                crate::paint::blend(BG, 0xff25131a, self.fx.nav.value()),
-                BG,
+                crate::paint::blend(palette().bg, palette().accent_surface, self.fx.nav.value()),
+                palette().bg,
             );
         }
         let disabled = item.itemState & ODS_DISABLED != 0;
         let selected = self.selected(b.command);
         let color = if disabled {
-            0xff18181f
+            palette().panel
         } else if selected {
-            RED
+            palette().primary
         } else if item.itemState & ODS_SELECTED != 0 {
-            0xff33303a
+            palette().pressed
         } else if hover {
-            0xff292931
+            palette().hover
         } else {
-            FIELD
+            palette().field
         };
         if b.style != GHOST || selected || hover || item.itemState & ODS_SELECTED != 0 {
-            c.round(r, 11, color, Some(if selected { RED } else { BORDER }));
+            c.round(
+                r,
+                11,
+                color,
+                Some(if selected {
+                    palette().accent
+                } else {
+                    palette().border
+                }),
+            );
         }
         c.text(
             &b.label,
@@ -1179,16 +1310,21 @@ impl App {
             },
             if selected { 500 } else { 400 },
             if disabled {
-                DIM
+                palette().dim
             } else if selected {
-                TEXT
+                palette().on_primary
             } else {
-                MUTED
+                palette().muted
             },
             DT_CENTER,
         );
         if item.itemState & ODS_FOCUS != 0 {
-            c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 9, 0, Some(MUTED));
+            c.round(
+                R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
+                9,
+                0,
+                Some(palette().muted),
+            );
         }
     }
     unsafe fn paint_battery_card(&self, c: &Canvas, r: R, battery: &BatteryView<'_>) {
@@ -1200,7 +1336,7 @@ impl App {
             R::new(x, 15, w, 22),
             12,
             500,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -1208,7 +1344,11 @@ impl App {
             R::new(x, 45, w, 31),
             20,
             600,
-            if active { TEXT } else { MUTED },
+            if active {
+                palette().text
+            } else {
+                palette().muted
+            },
             DT_LEFT,
         );
         let center = (80 + r.h - 55) / 2;
@@ -1229,7 +1369,11 @@ impl App {
             R::new(x, center - 31, value_w, 50),
             32,
             500,
-            if active { TEXT } else { MUTED },
+            if active {
+                palette().text
+            } else {
+                palette().muted
+            },
             DT_LEFT,
         );
         c.text(
@@ -1237,14 +1381,14 @@ impl App {
             R::new(x + 1, center + 18, value_w, 22),
             12,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
-        c.line(x, r.h - 48, r.w - x, r.h - 48, BORDER, 1.);
+        c.line(x, r.h - 48, r.w - x, r.h - 48, palette().border, 1.);
         c.ellipse(
             R::new(x, r.h - 27, 6, 6),
             if battery.is_level {
-                GREEN
+                palette().green
             } else {
                 connection_color(battery.state)
             },
@@ -1254,7 +1398,7 @@ impl App {
             R::new(x + 14, r.h - 41, w - 110, 33),
             12,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -1262,7 +1406,7 @@ impl App {
             R::new(r.w - 110, r.h - 41, 90, 33),
             13,
             500,
-            TEXT,
+            palette().text,
             DT_RIGHT,
         );
     }
@@ -1298,24 +1442,31 @@ impl App {
         };
         let x = 20;
         let w = r.w - x * 2;
-        c.text(&category, R::new(x, 15, w, 22), 12, 500, MUTED, DT_LEFT);
-        c.text(name, R::new(x, 45, w, 38), 22, 600, TEXT, DT_LEFT);
+        c.text(
+            &category,
+            R::new(x, 15, w, 22),
+            12,
+            500,
+            palette().muted,
+            DT_LEFT,
+        );
+        c.text(name, R::new(x, 45, w, 38), 22, 600, palette().text, DT_LEFT);
         let mid = (84 + r.h - 48) / 2;
         c.text(
             &capabilities,
             R::new(x, mid - 19, w, 55),
             15,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT | DT_WORDBREAK,
         );
-        c.line(x, r.h - 48, r.w - x, r.h - 48, BORDER, 1.);
+        c.line(x, r.h - 48, r.w - x, r.h - 48, palette().border, 1.);
         c.text(
             &footer,
             R::new(x, r.h - 41, w - 140, 33),
             12,
             400,
-            MUTED,
+            palette().muted,
             DT_LEFT,
         );
         c.text(
@@ -1323,7 +1474,7 @@ impl App {
             R::new(r.w - 158, r.h - 41, 138, 33),
             13,
             500,
-            TEXT,
+            palette().text,
             DT_RIGHT,
         );
     }

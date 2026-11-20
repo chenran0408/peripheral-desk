@@ -1,5 +1,6 @@
 use super::*;
 use crate::controls_ui::viewport;
+use crate::paint::palette;
 
 pub(super) const WIDTH: i32 = 728;
 pub(super) const HEIGHT: i32 = 520;
@@ -67,20 +68,53 @@ impl Dialog {
     }
 
     pub(super) unsafe fn paint_embedded(&self, canvas: &Canvas) {
-        use paint::{BG, BORDER, DIM, MUTED, PANEL, RED, TEXT};
-        canvas.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
-        canvas.text("灯效设置", R::new(24, 14, 380, 39), 25, 600, TEXT, DT_LEFT);
-        canvas.text(&self.name, R::new(24, 54, 650, 23), 14, 400, MUTED, DT_LEFT);
-        canvas.round(R::new(24, 82, 680, 276), 12, PANEL, Some(BORDER));
+        canvas.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
+        canvas.text(
+            "灯效设置",
+            R::new(24, 14, 380, 39),
+            25,
+            600,
+            palette().text,
+            DT_LEFT,
+        );
+        canvas.text(
+            &self.name,
+            R::new(24, 54, 650, 23),
+            14,
+            400,
+            palette().muted,
+            DT_LEFT,
+        );
+        canvas.round(
+            R::new(24, 82, 680, 276),
+            12,
+            palette().panel,
+            Some(palette().border),
+        );
         let switch = match self.actual_enabled {
             Some(true) => "当前开启",
             Some(false) => "当前关闭",
             None => "尚未读取",
         };
-        let label =
-            |title: &str, x, y| canvas.text(title, R::new(x, y, 80, 26), 13, 500, MUTED, DT_LEFT);
+        let label = |title: &str, x, y| {
+            canvas.text(
+                title,
+                R::new(x, y, 80, 26),
+                13,
+                500,
+                palette().muted,
+                DT_LEFT,
+            )
+        };
         label("灯效开关", 42, 98);
-        canvas.text(switch, R::new(116, 98, 165, 26), 15, 500, TEXT, DT_LEFT);
+        canvas.text(
+            switch,
+            R::new(116, 98, 165, 26),
+            15,
+            500,
+            palette().text,
+            DT_LEFT,
+        );
         label("模式", 42, 151);
         label("颜色", 42, 249);
         if let Some(config) = self
@@ -90,17 +124,24 @@ impl Dialog {
         {
             let [r, g, b] = config.rgb;
             let color = u32::from_be_bytes([255, r, g, b]);
-            canvas.round(R::new(116, 249, 30, 26), 6, color, Some(BORDER));
+            canvas.round(R::new(116, 249, 30, 26), 6, color, Some(palette().border));
             canvas.text(
                 &format!("#{r:02X}{g:02X}{b:02X}"),
                 R::new(154, 249, 86, 26),
                 14,
                 500,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
         } else {
-            canvas.text("—", R::new(116, 249, 110, 26), 14, 500, DIM, DT_LEFT);
+            canvas.text(
+                "—",
+                R::new(116, 249, 110, 26),
+                14,
+                500,
+                palette().dim,
+                DT_LEFT,
+            );
         }
         if self.show_direction() {
             label("流动方向", 401, 249);
@@ -127,7 +168,7 @@ impl Dialog {
                 R::new(x + 74, 310, 90, 26),
                 14,
                 500,
-                TEXT,
+                palette().text,
                 DT_LEFT,
             );
         }
@@ -136,7 +177,7 @@ impl Dialog {
             R::new(24, 374, 680, 35),
             13,
             400,
-            DIM,
+            palette().dim,
             DT_LEFT | DT_WORDBREAK,
         );
         canvas.text(
@@ -144,7 +185,11 @@ impl Dialog {
             R::new(24, 412, 680, 50),
             13,
             400,
-            if self.error { RED } else { MUTED },
+            if self.error {
+                palette().error
+            } else {
+                palette().muted
+            },
             DT_LEFT | DT_WORDBREAK,
         );
     }
