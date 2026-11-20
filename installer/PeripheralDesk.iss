@@ -7,16 +7,11 @@
 #ifndef OutputPath
   #error OutputPath is required
 #endif
-#ifndef EditionSuffix
-  #define EditionSuffix ""
-#endif
 [Setup]
 AppId={{56DAD926-7445-47AB-9FB7-9810D269BA7E}
 AppName=外设盒
-#ifdef WithMHub
-AppVerName=外设盒 · 迈从驱动中心 {#AppVersion}（非商业版）
+AppVerName=外设盒 {#AppVersion}
 InfoBeforeFile={#BundleDir}\MHUB-NOTICE.txt
-#endif
 AppVersion={#AppVersion}
 AppPublisher=外设盒 contributors
 AppPublisherURL=https://github.com/chenran0408/peripheral-desk
@@ -29,7 +24,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0
 OutputDir={#OutputPath}
-OutputBaseFilename=PeripheralDesk-{#AppVersion}-windows-x64{#EditionSuffix}-setup
+OutputBaseFilename=PeripheralDesk-{#AppVersion}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

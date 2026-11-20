@@ -14,6 +14,11 @@ $argsForSetup = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',"/DIR=`"$target
 Run-Installer $setup $argsForSetup
 $exe = Join-Path $target 'PeripheralDesk.exe'
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Installed EXE missing.' }
+$hub = Join-Path $target 'mhub-builtin'
+$manifest = Get-Content -Raw -LiteralPath (Join-Path $hub 'manifest.json') | ConvertFrom-Json
+if ($manifest.app_version -ne $Version -or (Get-FileHash -LiteralPath (Join-Path $hub 'payload.zip')).Hash -ne $manifest.sha256) {
+    throw 'The installer did not install the local driver center for this application version.'
+}
 if ((Get-FileHash -LiteralPath $exe).Hash -ne (Get-FileHash -LiteralPath (Join-Path $projectRoot 'target/release/peripheral-desk.exe')).Hash) { throw 'Installer EXE differs from release build.' }
 $data = Join-Path $target 'data'
 New-Item -ItemType Directory -Path $data -Force | Out-Null

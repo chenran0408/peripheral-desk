@@ -1,10 +1,12 @@
 # 更新记录
 
-## 0.4.11-preview.13
+## 0.4.11-preview.14
 
-- 新增外设盒自己的迈从驱动中心。界面、型号表和设备设置都从本机加载。官网更新不会覆盖改键修复或个人修改。
-- 修复 G75 Pro 再次改键回到出厂映射的问题。继续改第二个键或切换按键层时，会保留键盘上已有的映射和宏。
-- 迈从用户下载以 mhub-setup.exe 结尾的安装包即可离线打开。标准版也能在驱动中心菜单里按需安装资源包。厂商账号、商城、社区及在线固件升级未接入本地驱动中心。
+- 一个安装程序即可使用外设盒和本地迈从驱动中心。驱动中心的界面、设备资料和改键修复都保存在电脑上，官网更新不会改动它们。
+- 修复 G75 Pro 再次改键时回到出厂映射的问题。改第二个键、重新打开页面或切换按键层时，会保留已有的映射和宏。
+- 资源的安装、更新和版本选择都在外设盒内完成。仍按型号安装设备插件。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.14/PeripheralDesk-0.4.11-preview.14-windows-x64-setup.exe) · [查看 M HUB 功能对照及限制](https://github.com/chenran0408/peripheral-desk/blob/v0.4.11-preview.14/docs/MHUB-COMPATIBILITY.md)
 
 ## 0.4.11-preview.12
 

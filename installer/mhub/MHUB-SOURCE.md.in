@@ -17,10 +17,12 @@
 
 网页源码包中的 `upstream/` 是本版收录的官方部署文件。`edits/` 列出实际交付的更改及新增文件，便于直接比较。`project/src/mhub/fixes/` 包含 G75 修复源码，`project/src/mhub/hub/` 包含外设盒的网页入口、样式与脚本。打包时由脚本将这些修改应用到库存原版。`resources.json` 列出官方文件原始地址、原版与交付内容的 SHA-256；由外设盒新增的文件只列交付摘要。完整项目在上方同版本源码链接。
 
-在 Windows 上解压网页源码包。下载发布页相同版本的标准绿色版，使用该发布页的 `SHA256SUMS.txt` 核对绿色版。安装 Python 3.11 或更新版本、Rust（含 MSVC x64 构建工具）和 Inno Setup 6。打开 Visual Studio 的 x64 Native Tools 命令提示符，前往解压根目录，将绿色版 ZIP 放在当前目录，并将命令中的 `--iscc` 换成本机的编译器路径。
+维护者可在项目根目录按顺序运行 `scripts/build-desktop.ps1`、`scripts/package.ps1` 和 `scripts/installer.ps1`，生成随附驱动中心的完整安装程序。最后一步使用项目锁定的厂商原版文件和本项目的公开修改重建网页。
+
+也可以在 Windows 上解压网页源码包，直接使用本包的 `upstream/` 重建。准备同次发布的程序更新文件 `PeripheralDesk-@VERSION@-windows-x64.zip`，用 `SHA256SUMS.txt` 核对该文件。安装 Python 3.11 或更新版本、Rust（含 MSVC x64 构建工具）和 Inno Setup 6。打开 Visual Studio 的 x64 Native Tools 命令提示符，前往解压根目录，将更新文件放在当前目录，并将命令中的 `--iscc` 换成本机的编译器路径。
 
 ```powershell
 python project/scripts/package-mhub.py --workspace upstream --core-zip PeripheralDesk-@VERSION@-windows-x64.zip --output build --work temp --iscc "C:/Program Files (x86)/Inno Setup 6/ISCC.exe"
 ```
 
-如需加入自己的网页改动，请在命令末尾增加 `--overlay 你的改动目录`。输出目录包含安装版、绿色版、可单独安装的网页资源包、网页源码与校验清单。使用原文件和相同的 Python/zlib 压缩版本，可重建相同内容摘要的 `mhub-builtin/payload.zip`。
+如需加入自己的网页改动，请在命令末尾增加 `--overlay 你的改动目录`。普通用户下载安装程序即可。免安装 ZIP 提供相同内容，资源包由外设盒管理。使用原文件和相同的 Python/zlib 压缩版本，可重建相同内容摘要的 `mhub-builtin/payload.zip`。

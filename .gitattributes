@@ -3,4 +3,6 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.png binary
+src/mhub/hub/** text eol=lf
+src/mhub/fixes/*.js text eol=lf
 THIRD_PARTY_LICENSES/** -text

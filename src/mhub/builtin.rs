@@ -14,6 +14,7 @@ struct Manifest {
     schema: u32,
     build: String,
     sha256: String,
+    app_version: Option<String>,
 }
 
 pub(super) fn package() -> Option<PathBuf> {
@@ -83,7 +84,7 @@ fn extract<R: Read + Seek>(input: R, stage: &Path, build: &str) -> Result<(), St
     Ok(())
 }
 
-pub(super) fn prepare(source: &Path, root: &Path) -> Result<PathBuf, String> {
+fn manifest(source: &Path) -> Result<Manifest, String> {
     let manifest: Manifest = serde_json::from_reader(
         File::open(source.join("manifest.json"))
             .map_err(|e| format!("无法读取内置网页清单：{e}"))?,
@@ -93,9 +94,40 @@ pub(super) fn prepare(source: &Path, root: &Path) -> Result<PathBuf, String> {
     {
         return Err("内置网页版本或校验值无效".into());
     }
+    Ok(manifest)
+}
+
+pub(super) fn is_current(source: &Path) -> bool {
+    manifest(source)
+        .is_ok_and(|info| info.app_version.as_deref() == Some(env!("CARGO_PKG_VERSION")))
+}
+
+pub(super) fn installed_version(workspace: &Path) -> Option<String> {
+    fs::read_to_string(workspace.join("_peripheral_desk/notices/app-version.txt")).ok()
+}
+
+// Identical content can be published with multiple core releases. An older
+// installer must never invalidate a receipt from the currently running core.
+fn record_version(dest: PathBuf, version: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(version) = version {
+        let prior = installed_version(&dest);
+        if prior.is_none()
+            || (version == env!("CARGO_PKG_VERSION") && prior.as_deref() != Some(version))
+        {
+            crate::storage::atomic_write(
+                &dest.join("_peripheral_desk/notices/app-version.txt"),
+                version.as_bytes(),
+            )?;
+        }
+    }
+    Ok(dest)
+}
+
+pub(super) fn prepare(source: &Path, root: &Path) -> Result<PathBuf, String> {
+    let manifest = manifest(source)?;
     let dest = root.join(format!("builtin-{}", manifest.sha256));
     if dest.join("index.html").is_file() {
-        return Ok(dest);
+        return record_version(dest, manifest.app_version.as_deref());
     }
     let mut payload =
         File::open(source.join("payload.zip")).map_err(|e| format!("无法读取内置网页包：{e}"))?;
@@ -126,7 +158,7 @@ pub(super) fn prepare(source: &Path, root: &Path) -> Result<PathBuf, String> {
     if stage.is_dir() {
         let _ = fs::remove_dir_all(stage);
     }
-    result.map(|()| dest)
+    result.and_then(|()| record_version(dest, manifest.app_version.as_deref()))
 }
 
 #[cfg(test)]
@@ -174,7 +206,22 @@ mod tests {
         fs::write(package.join("payload.zip"), b"broken").unwrap();
         assert!(prepare(&package, &root).unwrap_err().contains("校验失败"));
         fs::write(package.join("payload.zip"), second_zip).unwrap();
+        let mf = package.join("manifest.json");
+        let mut meta: serde_json::Value = serde_json::from_slice(&fs::read(&mf).unwrap()).unwrap();
+        meta["app_version"] = env!("CARGO_PKG_VERSION").into();
+        fs::write(&mf, meta.to_string()).unwrap();
         let second = prepare(&package, &root).unwrap();
+        assert_eq!(
+            installed_version(&second).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        meta["app_version"] = "0.4.0".into();
+        fs::write(&mf, meta.to_string()).unwrap();
+        prepare(&package, &root).unwrap();
+        assert_eq!(
+            installed_version(&second).as_deref(),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
         assert_ne!(first, second);
         assert_eq!(fs::read(first.join("index.html")).unwrap(), b"my edits");
         assert_eq!(fs::read(second.join("index.html")).unwrap(), b"second");

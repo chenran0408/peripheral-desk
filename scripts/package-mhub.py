@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the optional noncommercial M HUB edition from a released Windows core."""
+"""Build the Peripheral Desk Windows distribution with its local MCHOSE driver center."""
 import argparse
 import filecmp
 import hashlib
@@ -107,7 +107,7 @@ def fork_site(originals, directory, rustc):
             if name not in originals or not filecmp.cmp(path, originals[name], shallow=False)}
 
 
-def payload(files, target):
+def payload(files, target, version):
     parser = EntryPoint()
     if "index.html" not in files:
         raise ValueError("Select the web workspace containing index.html")
@@ -123,7 +123,7 @@ def payload(files, target):
             info.compress_type = zipfile.ZIP_DEFLATED
             with source.open("rb") as data, output.open(info, "w") as member:
                 shutil.copyfileobj(data, member)
-    manifest = {"schema": 1, "build": parser.build, "sha256": sha256(archive)}
+    manifest = {"schema": 1, "app_version": version, "build": parser.build, "sha256": sha256(archive)}
     (target / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"{parser.build}: {len(files)} files, {archive.stat().st_size:,} bytes, SHA-256 {manifest['sha256']}")
     return manifest
@@ -169,7 +169,7 @@ def extract_core(core_zip, staging):
     with zipfile.ZipFile(core_zip) as archive:
         members = {item.filename.replace("\\", "/"): item for item in archive.infolist()}
         if "PeripheralDesk.exe" not in members or CORE_DOCS - members.keys():
-            raise ValueError("The input ZIP must be a standard Peripheral Desk core release")
+            raise ValueError("The input ZIP must be a Peripheral Desk core update package")
         for name, item in members.items():
             if item.is_dir():
                 continue
@@ -189,7 +189,7 @@ def main():
     parser.add_argument("--workspace", type=Path, required=True, help="Unmodified upstream M HUB frontend, including index.html")
     parser.add_argument("--vendor-extra", type=Path, action="append", default=[], help="Extra files from official servers, rooted like the workspace")
     parser.add_argument("--overlay", type=Path, action="append", default=[], help="Replacement and additional frontend files, in priority order (last wins)")
-    parser.add_argument("--core-zip", type=Path, required=True, help="Verified standard core ZIP from the version release")
+    parser.add_argument("--core-zip", type=Path, required=True, help="Core update ZIP produced by scripts/package.ps1")
     parser.add_argument("--output", type=Path, required=True, help="Destination for the installer, portable ZIP, editable source and checksums")
     parser.add_argument("--work", type=Path, required=True, help="Temporary staging directory")
     parser.add_argument("--iscc", default=shutil.which("ISCC.exe"), help="Inno Setup 6 compiler")
@@ -208,7 +208,7 @@ def main():
         extract_core(args.core_zip, staging)
         originals, overrides = inputs(args.workspace.resolve(), args.vendor_extra, args.overlay)
         edits = fork_site(originals, Path(temp).resolve(), args.rustc) | overrides
-        manifest = payload(originals | edits, staging / "mhub-builtin")
+        manifest = payload(originals | edits, staging / "mhub-builtin", version)
         sources = Path(temp) / f"PeripheralDesk-{version}-mhub-web-source.zip"
         source_bundle(sources, staging, originals, edits, manifest, version)
         resources = Path(temp) / f"PeripheralDesk-{version}-mhub-resources.zip"
@@ -217,20 +217,22 @@ def main():
                 archive.write(staging / "mhub-builtin" / name, name)
             for name in ["MHUB-SOURCE.md", "MHUB-NOTICE.txt", "MiSans-License.pdf"]:
                 archive.write(staging / name, name)
-        basename = f"PeripheralDesk-{version}-windows-x64-mhub"
-        portable = Path(shutil.make_archive(str(Path(temp) / basename), "zip", staging))
+        basename = f"PeripheralDesk-{version}-windows-x64"
+        portable = Path(shutil.make_archive(str(Path(temp) / f"{basename}-portable"), "zip", staging))
         subprocess.run([
             args.iscc, "/Q", f"/DAppVersion={version}", f"/DBundleDir={staging.resolve()}",
-            f"/DOutputPath={Path(temp).resolve()}", "/DEditionSuffix=-mhub", "/DWithMHub=1",
+            f"/DOutputPath={Path(temp).resolve()}",
             str(PROJECT / "installer/PeripheralDesk.iss"),
         ], check=True)
         installer = Path(temp) / f"{basename}-setup.exe"
         lines = []
-        for artifact in (installer, portable, sources, resources):
+        for artifact in (installer, portable, sources, resources, args.core_zip):
             lines.append(f"{sha256(artifact)}  {artifact.name}")
             print(f"{artifact.name}: {artifact.stat().st_size:,} bytes")
-            shutil.copy2(artifact, args.output / artifact.name)
-        (args.output / f"{basename}-SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="ascii")
+            destination = args.output / artifact.name
+            if artifact.resolve() != destination.resolve():
+                shutil.copy2(artifact, destination)
+        (args.output / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
 if __name__ == "__main__":

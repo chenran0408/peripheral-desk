@@ -3,6 +3,7 @@ use windows::core::Interface;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
 const OPEN_BUILTIN: usize = 2105;
+const UPDATE_NOTICE: usize = 2106;
 pub(super) const INSTALL: usize = 2102;
 const LOCAL: usize = 2103;
 const DIRECTORY: usize = 2104;
@@ -151,7 +152,11 @@ unsafe fn open_path(path: &std::path::Path, edit: bool) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
+unsafe fn navigate_local(
+    hwnd: HWND,
+    web: &ICoreWebView2,
+    path: &std::path::Path,
+) -> Result<(), String> {
     workspace::prepare_user_hooks(path)?;
     let web3: ICoreWebView2_3 = web.cast().map_err(|e| e.to_string())?;
     web3.SetVirtualHostNameToFolderMapping(
@@ -164,7 +169,19 @@ unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<
     web.Navigate(PCWSTR(
         wide(&format!("{}index.html", workspace::LOCAL_SITE)).as_ptr(),
     ))
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let bar = GetMenu(hwnd);
+    DeleteMenu(bar, UPDATE_NOTICE as u32, MF_BYCOMMAND);
+    if builtin::installed_version(path).as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+        AppendMenuW(
+            bar,
+            MF_STRING,
+            UPDATE_NOTICE,
+            wide(concat!("获取 ", env!("CARGO_PKG_VERSION"), " 版驱动中心…")).as_ptr(),
+        );
+    }
+    DrawMenuBar(hwnd);
+    Ok(())
 }
 
 pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
@@ -174,7 +191,13 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
             hwnd,
             Some(builtin::package().ok_or("此版本未附带驱动中心资源，请选择安装或更新")?),
         ),
-        INSTALL => prepare(hwnd, None),
+        INSTALL | UPDATE_NOTICE => {
+            // A full install already contains the matching release and also works offline.
+            prepare(
+                hwnd,
+                builtin::package().filter(|source| builtin::is_current(source)),
+            )
+        }
         RELOAD => {
             let mut uri = PWSTR::null();
             web.Source(&mut uri).map_err(|e| e.to_string())?;
@@ -186,10 +209,10 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
             }
             .map_err(|e| e.to_string())
         }
-        LOCAL => open_local(&web, &workspace::selected()?, "local"),
+        LOCAL => open_local(hwnd, &web, &workspace::selected()?, "local"),
         SELECT_COPY => {
             if let Some(path) = choose_previous(hwnd)? {
-                open_local(&web, &path, "local")?;
+                open_local(hwnd, &web, &path, "local")?;
             }
             Ok(())
         }
@@ -240,12 +263,13 @@ fn remember_mode(mode: &str) -> Result<(), String> {
 }
 
 unsafe fn open_local(
+    hwnd: HWND,
     web: &ICoreWebView2,
     path: &std::path::Path,
     mode: &str,
 ) -> Result<(), String> {
     BUILTIN_RESULT.take();
-    navigate_local(web, path)?;
+    navigate_local(hwnd, web, path)?;
     let build = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -272,7 +296,7 @@ unsafe fn prepare(hwnd: HWND, package: Option<PathBuf>) -> Result<(), String> {
         .spawn(move || {
             let result = match package {
                 Some(dir) => builtin::prepare(&dir, &root).map(|p| (p, "builtin")),
-                None => release_resources::install(&root).map(|p| (p, "local")),
+                None => release_resources::install(&root).map(|p| (p, "managed")),
             };
             if tx.send(result).is_ok() {
                 PostMessageW(window as HWND, BUILTIN_READY, 0, 0);
@@ -288,21 +312,28 @@ unsafe fn show_install(web: &ICoreWebView2) -> windows::core::Result<()> {
     web.Navigate(PCWSTR(wide(SETUP_PAGE).as_ptr()))
 }
 
-pub(super) unsafe fn builtin_ready() -> Result<(), String> {
+pub(super) unsafe fn builtin_ready(hwnd: HWND) -> Result<(), String> {
     let result = BUILTIN_RESULT.with_borrow(|r| r.as_ref().and_then(|rx| rx.try_recv().ok()));
     if let Some(result) = result {
         BUILTIN_RESULT.take();
         let web = browser()?;
-        match result {
-            Ok((path, mode)) => open_local(&web, &path, mode)?,
-            Err(error) => {
-                let mut source = PWSTR::null();
-                web.Source(&mut source).map_err(|e| e.to_string())?;
-                if !take_pwstr(source).starts_with(workspace::LOCAL_SITE) {
-                    show_install(&web).map_err(|e| e.to_string())?;
-                }
+        if let Err(error) = result.and_then(|(path, mode)| open_local(hwnd, &web, &path, mode)) {
+            let mut source = PWSTR::null();
+            web.Source(&mut source).map_err(|e| e.to_string())?;
+            if take_pwstr(source).starts_with(workspace::LOCAL_SITE) {
                 return Err(error);
             }
+            if let Ok(previous) = workspace::selected() {
+                match open_local(hwnd, &web, &previous, "local") {
+                    Ok(()) => return Err(format!("{error}。已恢复之前的本地驱动中心。")),
+                    Err(restore) => {
+                        show_install(&web).map_err(|e| e.to_string())?;
+                        return Err(format!("{error}。之前的版本也未能打开：{restore}"));
+                    }
+                }
+            }
+            show_install(&web).map_err(|e| e.to_string())?;
+            return Err(error);
         }
     }
     Ok(())
@@ -320,10 +351,12 @@ fn initial_choice(
     bundle: Option<PathBuf>,
     selected: Option<PathBuf>,
 ) -> Initial {
+    let current_bundle = bundle.as_deref().is_some_and(builtin::is_current);
     match (mode, bundle, selected) {
         (Some("local" | "official") | None, _, Some(p)) => Initial::Local(p),
-        (_, Some(p), _) => Initial::Bundled(p),
-        (_, None, Some(p)) => Initial::Local(p),
+        (_, Some(p), _) if current_bundle => Initial::Bundled(p),
+        (_, _, Some(p)) => Initial::Local(p),
+        (_, Some(p), None) => Initial::Bundled(p),
         _ => Initial::Install,
     }
 }
@@ -338,7 +371,7 @@ pub(super) unsafe fn open_initial(hwnd: HWND, web: &ICoreWebView2) -> windows::c
         workspace::selected().ok(),
     );
     let result = match choice {
-        Initial::Local(path) => navigate_local(web, &path).and_then(|()| {
+        Initial::Local(path) => navigate_local(hwnd, web, &path).and_then(|()| {
             if mode.as_deref() == Some("official") {
                 remember_mode("local")
             } else {
@@ -440,5 +473,36 @@ mod tests {
             Initial::Install
         );
         assert_eq!(initial_choice(None, None, None), Initial::Install);
+    }
+    #[test]
+    fn core_update_keeps_the_working_copy_until_current_resources_are_available() {
+        use std::{
+            fs,
+            time::{SystemTime, UNIX_EPOCH},
+        };
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let pkg = std::env::temp_dir().join(format!("pd-hub-menu-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(&pkg).unwrap();
+        let selected = PathBuf::from("previous-workspace");
+        let route = |mode| initial_choice(Some(mode), Some(pkg.clone()), Some(selected.clone()));
+        let mut metadata =
+            serde_json::json!({"schema":1,"build":"main-Abc12_XY.js","sha256":"ab".repeat(32)});
+        for legacy in [true, false] {
+            if !legacy {
+                metadata["app_version"] = "0.4.11-preview.12".into();
+            }
+            fs::write(pkg.join("manifest.json"), metadata.to_string()).unwrap();
+            assert_eq!(route("managed"), Initial::Local(selected.clone()));
+            assert_eq!(route("builtin"), Initial::Local(selected.clone()));
+        }
+        metadata["app_version"] = env!("CARGO_PKG_VERSION").into();
+        fs::write(pkg.join("manifest.json"), metadata.to_string()).unwrap();
+        assert_eq!(route("managed"), Initial::Bundled(pkg.clone()));
+        assert_eq!(route("builtin"), Initial::Bundled(pkg.clone()));
+        assert_eq!(route("local"), Initial::Local(selected));
+        fs::remove_dir_all(pkg).unwrap();
     }
 }

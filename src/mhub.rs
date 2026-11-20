@@ -368,7 +368,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         menu::BUILTIN_READY => {
-            let result = menu::builtin_ready();
+            let result = menu::builtin_ready(hwnd);
             if result.is_err() {
                 SetWindowTextW(hwnd, wide(TITLE).as_ptr());
             }

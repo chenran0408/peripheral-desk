@@ -13,7 +13,7 @@ Workflow and interaction references, with no bundled source:
 Product names and images belong to their respective owners. They identify the
 supported hardware and do not indicate endorsement. See SOURCES.md.
 
-The optional MCHOSE driver center includes the manufacturer's deployed M HUB frontend.
+The bundled MCHOSE driver center includes the manufacturer's deployed M HUB frontend.
 Its noncommercial use conditions, source, modifications and font license accompany
 the resources and are described in MHUB-NOTICE.txt and MHUB-SOURCE.md.
 

@@ -6,10 +6,10 @@ Rust + Win32 原生 Windows 外设设置与电量工具。黑灰色界面、红�
 
 ## 下载与使用
 
-在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载 ZIP 便携版并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开“驱动仓库”，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
+在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载以 `-portable.zip` 结尾的便携包并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开“驱动仓库”，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
 
 - 在驱动商店按品牌或型号搜索，选中需要的插件后统一安装。共用接收器会提示核对型号。可在[按厂商查找外设](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/catalog/README.md)查看各连接方式的支持记录。
-- 迈从用户可以直接下载 [内置迈从驱动中心的安装包](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.13/PeripheralDesk-0.4.11-preview.13-windows-x64-mhub-setup.exe)。标准版可从迈从设备详情或驱动商店点击“打开驱动中心”，在应用内按需安装相同资源。需要 Microsoft Edge WebView2。
+- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.14/PeripheralDesk-0.4.11-preview.14-windows-x64-setup.exe)。安装后自带本地迈从驱动中心，从迈从设备详情或驱动商店打开。便携包提供相同功能。Windows 需有 Microsoft Edge WebView2。
 - 驱动中心从本机加载。首次连接时选择自己的设备。型号表、网页、改键修复和后续更新均由外设盒提供；在驱动中心菜单中可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
 - 首页选择设备：在线亮色、离线暗色、接收器在线但无有效读数时显示待唤醒。
 - 左键托盘图标显示设备电量；右键可打开主页、刷新或退出。

@@ -1,18 +1,17 @@
+param([string]$Work, [string]$Compiler)
+
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $version = (Select-String -LiteralPath (Join-Path $projectRoot 'Cargo.toml') -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
-$bundle = Join-Path $projectRoot "dist/PeripheralDesk-$version-windows-x64"
 $dist = Join-Path $projectRoot 'dist'
-if (-not (Test-Path -LiteralPath (Join-Path $bundle 'PeripheralDesk.exe'))) { throw 'Run package.ps1 before building the installer.' }
-if (Test-Path -LiteralPath (Join-Path $bundle 'data')) { throw 'Installer payload must not contain user data.' }
-$compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-$compilerPath = if ($compiler) { $compiler.Source } else { Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe' }
-if (-not (Test-Path -LiteralPath $compilerPath)) { throw 'Inno Setup 6 is required; GitHub Windows runners include it.' }
-& $compilerPath "/DAppVersion=$version" "/DBundleDir=$bundle" "/DOutputPath=$dist" (Join-Path $projectRoot 'installer/PeripheralDesk.iss')
-if ($LASTEXITCODE -ne 0) { throw 'Installer compilation failed.' }
-$files = @("PeripheralDesk-$version-windows-x64.zip", "PeripheralDesk-$version-windows-x64-setup.exe")
-$lines = foreach ($name in $files) {
-    $hash = (Get-FileHash -LiteralPath (Join-Path $dist $name) -Algorithm SHA256).Hash.ToLowerInvariant()
-    "$hash  $name"
+$core = Join-Path $dist "PeripheralDesk-$version-windows-x64.zip"
+if (!(Test-Path -LiteralPath $core)) { throw 'Run scripts/package.ps1 before building the installer.' }
+if (!$Work) { $Work = Join-Path $projectRoot 'work/mhub-package' }
+if (!$Compiler) {
+    $command = Get-Command ISCC.exe -ErrorAction SilentlyContinue
+    $Compiler = if ($command) { $command.Source }
+        elseif (Test-Path -LiteralPath 'D:/Dev/Toolchains/InnoSetup/ISCC.exe') { 'D:/Dev/Toolchains/InnoSetup/ISCC.exe' }
+        else { Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe' }
 }
-$lines | Set-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt') -Encoding ascii
+if (!(Test-Path -LiteralPath $Compiler)) { throw 'Provide -Compiler with the path to Inno Setup 6 ISCC.exe.' }
+& (Join-Path $PSScriptRoot 'pack-reviewed-hub.ps1') -SourceLock (Join-Path $projectRoot 'installer/mhub/source.lock.json') -CoreZip $core -Output $dist -Work $Work -Compiler $Compiler

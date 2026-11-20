@@ -2,7 +2,7 @@
 
 ## Local MCHOSE driver center
 
-The optional edition uses the MCHOSE M HUB public web build with entry module `main-DbMO5C6u.js`. The downloadable source archive records the original URL and SHA-256 of each file, the exact changes shipped by Peripheral Desk, and the build instructions. The use conditions reported from the manufacturer's official user group allow use in source-available, noncommercial projects and prohibit use for profit. MCHOSE assets and third-party components retain their respective terms. [Original M HUB](https://www.mchose.com.cn/) · [Source archive and release](https://github.com/chenran0408/peripheral-desk/releases/tag/v0.4.11-preview.13)
+The bundled driver center uses the MCHOSE M HUB public web build with entry module `main-DbMO5C6u.js`. The downloadable source archive records the original URL and SHA-256 of each file, the exact changes shipped by Peripheral Desk, and the build instructions. The use conditions reported from the manufacturer's official user group allow use in source-available, noncommercial projects and prohibit use for profit. MCHOSE assets and third-party components retain their respective terms. [Original M HUB](https://www.mchose.com.cn/) · [Source archive and release](https://github.com/chenran0408/peripheral-desk/releases/tag/v0.4.11-preview.14)
 
 ## Protocol research
 
