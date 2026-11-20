@@ -27,6 +27,9 @@ impl AccessoryLighting {
 pub struct State {
     #[serde(default)]
     pub key: String,
+    /// Anonymous physical receiver that produced this reading (absent in old snapshots).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
     pub present: bool,
     pub fresh: bool,
     pub percent: Option<u8>,

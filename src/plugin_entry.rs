@@ -15,9 +15,9 @@ const RAZER: &str = "razer-deathadder-v3-pro";
 const MCHOSE: &str = "mchose-a5-ultra";
 const G75: &str = "mchose-g75-pro";
 const HECATE: &str = "hecate-g2-pro";
-type Open = fn() -> Result<Box<dyn DeviceSession>>;
-type ControlsRead = fn() -> Result<ControlState>;
-type ControlsApply = fn(&ControlAction) -> Result<ControlState>;
+type Open = fn(Option<&str>) -> Result<Box<dyn DeviceSession>>;
+type ControlsRead = fn(Option<&str>) -> Result<ControlState>;
+type ControlsApply = fn(Option<&str>, &ControlAction) -> Result<ControlState>;
 type Extra = fn(&str, &Value) -> Result<Value>;
 struct Endpoint {
     key: &'static str,
@@ -78,13 +78,14 @@ fn spec(key: &str) -> Result<&'static DeviceSpec> {
 // the original first-interface policy. Neither path uses the all-device opener.
 fn connect<T>(
     key: &str,
+    instance: Option<&str>,
     open: fn(&Interface, &'static DeviceSpec) -> Result<T>,
     state: bool,
 ) -> Result<T> {
     let spec = spec(key)?;
     let mut interfaces: Vec<_> = crate::hid::enumerate()?
         .into_iter()
-        .filter(|i| spec.matches(i))
+        .filter(|i| spec.matches(i) && instance.is_none_or(|id| i.instance_id() == id))
         .collect();
     if !state {
         return open(interfaces.first().ok_or("设备尚未连接")?, spec);
@@ -118,16 +119,16 @@ impl DeviceSession for FixedMouse {
         (self.apply)(&self.channel, action)
     }
 }
-fn open_razer() -> Result<Box<dyn DeviceSession>> {
+fn open_razer(instance: Option<&str>) -> Result<Box<dyn DeviceSession>> {
     Ok(Box::new(FixedMouse {
-        channel: connect(RAZER, Channel::new_razer, true)?,
+        channel: connect(RAZER, instance, Channel::new_razer, true)?,
         read: Channel::read_razer,
         apply: Channel::apply_razer,
     }))
 }
-fn open_mchose() -> Result<Box<dyn DeviceSession>> {
+fn open_mchose(instance: Option<&str>) -> Result<Box<dyn DeviceSession>> {
     Ok(Box::new(FixedMouse {
-        channel: connect(MCHOSE, Channel::new_mchose, true)?,
+        channel: connect(MCHOSE, instance, Channel::new_mchose, true)?,
         read: Channel::read_mchose,
         apply: Channel::apply_mchose,
     }))
@@ -149,9 +150,10 @@ fn keyboard(i: &Interface, _: &'static DeviceSpec) -> Result<crate::keyboard::Ke
     keyboard.verify_model()?;
     Ok(keyboard)
 }
-fn open_g75() -> Result<Box<dyn DeviceSession>> {
+fn open_g75(instance: Option<&str>) -> Result<Box<dyn DeviceSession>> {
     connect(
         G75,
+        instance,
         |i, s| {
             Ok(Box::new(FixedKeyboard {
                 keyboard: keyboard(i, s)?,
@@ -161,55 +163,63 @@ fn open_g75() -> Result<Box<dyn DeviceSession>> {
         true,
     )
 }
-fn open_hecate() -> Result<Box<dyn DeviceSession>> {
+fn open_hecate(instance: Option<&str>) -> Result<Box<dyn DeviceSession>> {
     connect(
         HECATE,
+        instance,
         |_, _| Ok(Box::new(crate::adapters::audio::AudioSession::open()?) as Box<dyn DeviceSession>),
         true,
     )
 }
-fn refreshed(read: ControlsRead) -> Result<ControlState> {
-    read().map_err(|error| format!("设置已写入并核对，但刷新失败，请重新读取设备：{error}"))
+fn refreshed(read: ControlsRead, instance: Option<&str>) -> Result<ControlState> {
+    read(instance).map_err(|error| format!("设置已写入并核对，但刷新失败，请重新读取设备：{error}"))
 }
-fn read_razer_controls() -> Result<ControlState> {
-    crate::adapters::razer_controls::read(&connect(RAZER, Channel::new_razer, false)?)
+fn read_razer_controls(instance: Option<&str>) -> Result<ControlState> {
+    crate::adapters::razer_controls::read(&connect(RAZER, instance, Channel::new_razer, false)?)
 }
-fn apply_razer_controls(action: &ControlAction) -> Result<ControlState> {
-    crate::adapters::razer_controls::apply(&connect(RAZER, Channel::new_razer, false)?, action)?;
-    refreshed(read_razer_controls)
+fn apply_razer_controls(instance: Option<&str>, action: &ControlAction) -> Result<ControlState> {
+    crate::adapters::razer_controls::apply(
+        &connect(RAZER, instance, Channel::new_razer, false)?,
+        action,
+    )?;
+    refreshed(read_razer_controls, instance)
 }
-fn read_mchose_controls() -> Result<ControlState> {
-    crate::adapters::mchose_controls::read(&connect(MCHOSE, Channel::new_mchose, false)?)
+fn read_mchose_controls(instance: Option<&str>) -> Result<ControlState> {
+    crate::adapters::mchose_controls::read(&connect(MCHOSE, instance, Channel::new_mchose, false)?)
 }
-fn apply_mchose_controls(action: &ControlAction) -> Result<ControlState> {
-    crate::adapters::mchose_controls::apply(&connect(MCHOSE, Channel::new_mchose, false)?, action)?;
-    refreshed(read_mchose_controls)
+fn apply_mchose_controls(instance: Option<&str>, action: &ControlAction) -> Result<ControlState> {
+    crate::adapters::mchose_controls::apply(
+        &connect(MCHOSE, instance, Channel::new_mchose, false)?,
+        action,
+    )?;
+    refreshed(read_mchose_controls, instance)
 }
-fn read_g75_controls() -> Result<ControlState> {
-    crate::keyboard_controls::read(&connect(G75, keyboard, false)?)
+fn read_g75_controls(instance: Option<&str>) -> Result<ControlState> {
+    crate::keyboard_controls::read(&connect(G75, instance, keyboard, false)?)
 }
-fn apply_g75_controls(action: &ControlAction) -> Result<ControlState> {
-    crate::keyboard_controls::apply(&connect(G75, keyboard, false)?, action)?;
-    refreshed(read_g75_controls)
+fn apply_g75_controls(instance: Option<&str>, action: &ControlAction) -> Result<ControlState> {
+    crate::keyboard_controls::apply(&connect(G75, instance, keyboard, false)?, action)?;
+    refreshed(read_g75_controls, instance)
 }
 fn dispatch(endpoint: &Endpoint, device_key: &str, input: &str) -> Result<Value> {
     let request = parse(input)?;
     if device_key != endpoint.key {
         return Err("该驱动不认识请求的设备型号".into());
     }
+    let instance = crate::hid::request_instance(&request)?;
     let operation = request
         .get("op")
         .and_then(Value::as_str)
         .ok_or("缺少驱动操作类型")?;
     match operation {
         "read-state" => {
-            let mut state = (endpoint.open)()?.read()?;
+            let mut state = (endpoint.open)(instance)?.read()?;
             state.key = device_key.into();
             value(state)
         }
         "apply-setting" => {
             let action = field(&request, "action")?;
-            let session = (endpoint.open)()?;
+            let session = (endpoint.open)(instance)?;
             spec(endpoint.key)?.validate(action, &session.read()?)?;
             session.apply(action)?;
             Ok(Value::Null)
@@ -222,12 +232,12 @@ fn dispatch(endpoint: &Endpoint, device_key: &str, input: &str) -> Result<Value>
                 None
             };
             let Some((read, apply)) = endpoint.controls else {
-                connect(endpoint.key, |_, _| Ok(()), false)?;
+                connect(endpoint.key, instance, |_, _| Ok(()), false)?;
                 return Err("该设备没有键位或逐键灯设置".into());
             };
             value(match action {
-                Some(action) => apply(&action)?,
-                None => read()?,
+                Some(action) => apply(instance, &action)?,
+                None => read(instance)?,
             })
         }
         _ => endpoint.extra.ok_or("该驱动尚未提供此操作")?(operation, &request),

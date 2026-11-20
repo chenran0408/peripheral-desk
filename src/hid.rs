@@ -1,5 +1,6 @@
 use crate::protocol::Result;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use std::{
     mem::{size_of, zeroed},
     ptr::{null, null_mut},
@@ -26,6 +27,95 @@ pub struct Interface {
     pub input_len: u16,
     pub output_len: u16,
     pub product: String,
+}
+
+/// An anonymous Windows device container, shared by its HID collections.
+/// No PnP path, serial number or user-defined device name leaves this layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceTarget {
+    pub id: String,
+    pub label: String,
+}
+
+impl Interface {
+    pub fn instance_id(&self) -> String {
+        use windows_sys::Win32::Devices::Properties::{
+            DEVPKEY_Device_ContainerId, DEVPKEY_Device_InstanceId, DEVPROP_TYPE_GUID,
+        };
+        let mut instance = [0u16; MAX_DEVICE_ID_LEN as usize];
+        let mut size = std::mem::size_of_val(&instance) as u32;
+        let (mut kind, mut node) = (0, 0);
+        let mut hash = Sha256::new();
+        unsafe {
+            if CM_Get_Device_Interface_PropertyW(
+                wide(&self.path).as_ptr(),
+                &DEVPKEY_Device_InstanceId,
+                &mut kind,
+                instance.as_mut_ptr().cast(),
+                &mut size,
+                0,
+            ) == CR_SUCCESS
+                && CM_Locate_DevNodeW(&mut node, instance.as_ptr(), 0) == CR_SUCCESS
+            {
+                let mut container = [0u8; 16];
+                size = container.len() as u32;
+                if CM_Get_DevNode_PropertyW(
+                    node,
+                    &DEVPKEY_Device_ContainerId,
+                    &mut kind,
+                    container.as_mut_ptr(),
+                    &mut size,
+                    0,
+                ) == CR_SUCCESS
+                    && kind == DEVPROP_TYPE_GUID
+                    && size == 16
+                    && container != [0; 16]
+                    && container != [0xff; 16]
+                {
+                    hash.update(container);
+                    return format!("{:x}", hash.finalize());
+                }
+                let mut parent = 0;
+                if CM_Get_Parent(&mut parent, node, 0) == CR_SUCCESS
+                    && CM_Get_Device_IDW(parent, instance.as_mut_ptr(), instance.len() as u32, 0)
+                        == CR_SUCCESS
+                {
+                    let len = instance
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(instance.len());
+                    hash.update(
+                        String::from_utf16_lossy(&instance[..len])
+                            .to_lowercase()
+                            .as_bytes(),
+                    );
+                    return format!("{:x}", hash.finalize());
+                }
+            }
+        }
+        // Some virtual HID collections have no device container.
+        hash.update(self.path.to_lowercase().as_bytes());
+        format!("{:x}", hash.finalize())
+    }
+
+    pub fn target(&self) -> DeviceTarget {
+        let id = self.instance_id();
+        let label = format!("{:04X}:{:04X} · {}", self.vid, self.pid, &id[..8]);
+        DeviceTarget { id, label }
+    }
+}
+
+/// Optional ABI 1 request extension. Only a missing field selects the legacy route.
+pub fn request_instance(request: &serde_json::Value) -> Result<Option<&str>> {
+    request
+        .get("target_instance")
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|id| id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+                .ok_or_else(|| "目标设备标识无效".to_string())
+        })
+        .transpose()
 }
 
 pub struct Device(HANDLE);
