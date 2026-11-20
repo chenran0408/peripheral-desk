@@ -649,6 +649,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         TRAY => {
+            if matches!(l as u32, WM_LBUTTONUP | WM_RBUTTONUP) && tray::focus_active_dialog(hwnd) {
+                return 0;
+            }
             match l as u32 {
                 WM_LBUTTONUP => a.show_battery(hwnd),
                 WM_RBUTTONUP => a.menu(hwnd),

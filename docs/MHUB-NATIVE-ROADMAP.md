@@ -20,7 +20,7 @@
 
 ## 本轮交付范围
 
-主程序 `0.4.12-preview.1` 与 G75 Pro、初代 A5 Ultra、K5 Ultra 三款 `0.4.13-preview.48` 插件共同提供本次升级。其他已装插件可沿用。普通用户从「设备调节」按实物进入；「偏好设置 → 写入记录」保留本次运行最近的设备写入结果。插件作者可参考[可点选设备图与分层读取](NATIVE-CONTROL-SURFACES.md)和[32 个迈从型号的功能对照](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-EDITORS.md)。
+主程序 `0.4.12-preview.2` 与 G75 Pro、初代 A5 Ultra、K5 Ultra 三款 `0.4.13-preview.49` 插件共同提供本次升级。其他已装插件可沿用。普通用户从「设备调节」按实物进入；「偏好设置 → 写入记录」保留本次运行最近的设备写入结果。插件作者可参考[可点选设备图与分层读取](NATIVE-CONTROL-SURFACES.md)和[32 个迈从型号的功能对照](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-EDITORS.md)。
 
 - G75 普通层先单独读回，切到 Fn、Fn2 或逐键颜色时再读取对应部分。模拟实物已从 Win32 编辑器连续拖放两次后立即切页，两笔修改读回、其余层保持原值。原版网页的 G75 写入也会在离页后返回结果。
 - 初代 A5 Ultra 保留现有性能设置和六个物理按键。两台同型号的定向写入、拔除后的隔离通过模拟接收器验证。常驻宏恢复与设备配置导入均使用打开时选定的设备。

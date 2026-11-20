@@ -9,7 +9,7 @@ Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看�
 在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载以 `-portable.zip` 结尾的便携包并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开「插件管理」，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
 
 - 在「插件管理」按品牌或型号搜索，选中需要的插件后统一安装。共用接收器会提示核对型号。可在[按厂商查找外设](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/catalog/README.md)查看各连接方式的支持记录。
-- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.1/PeripheralDesk-0.4.12-preview.1-windows-x64-setup.exe)，覆盖安装会保留配置。便携包提供相同功能。原生设备页直接打开，进入「本地 M HUB」时才需要 Microsoft Edge WebView2。
+- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.2/PeripheralDesk-0.4.12-preview.2-windows-x64-setup.exe)，覆盖安装会保留配置。便携包提供相同功能。原生设备页直接打开，进入「本地 M HUB」时才需要 Microsoft Edge WebView2。
 - 在「设备调节」点选自己的实物。G75 Pro 直接打开键盘图，初代 A5 Ultra 可调指针或点图改键。其他品牌也按设备进入，驱动插件在「插件管理」按品牌查找；更多迈从功能可在右上角「本地 M HUB」打开。
 - 驱动中心从本机加载。在内置版中，匹配的迈从设备由 Windows 直接连接。连接多台时，优先打开从电量页点选或上次用过的型号。型号表、网页、改键修复和后续更新均由外设盒提供；在右上角「M HUB 菜单」可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
 - 「电量」显示可报告电池状态的外设，点设备查看本次或上次读数。G2 Pro 等有线外设可在「设备调节」找到。

@@ -1,6 +1,6 @@
 # 迈从驱动中心能做什么
 
-安装 Windows x64 安装程序后，在「设备调节」点选自己的设备。G75 Pro 和初代 A5 Ultra 的常用原生编辑器需要对应型号插件，可在「插件管理」安装。要用其他原厂编辑器，打开「本地 M HUB」或设备页的「更多原厂功能」。内置网页离线可用。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.1/PeripheralDesk-0.4.12-preview.1-windows-x64-setup.exe) · [本地工作区用法](MHUB-WORKSPACE.md)
+安装 Windows x64 安装程序后，在「设备调节」点选自己的设备。G75 Pro 和初代 A5 Ultra 的常用原生编辑器需要对应型号插件，可在「插件管理」安装。要用其他原厂编辑器，打开「本地 M HUB」或设备页的「更多原厂功能」。内置网页离线可用。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.2/PeripheralDesk-0.4.12-preview.2-windows-x64-setup.exe) · [本地工作区用法](MHUB-WORKSPACE.md)
 
 Windows 直连的设备范围、原版功能和验证记录见[本地连接说明](MHUB-NATIVE-TRANSPORT.md)。
 

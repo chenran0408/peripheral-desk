@@ -2,6 +2,7 @@
 use crate::{
     controls::{self, BindingAction, ControlAction, MacroEvent},
     devices::REGISTRY,
+    hid::DeviceTarget,
     protocol::Result,
     storage,
 };
@@ -110,7 +111,11 @@ fn validate(library: &Library, key: &str) -> Result<()> {
     for recovery in &library.recovery {
         if recovery.id == 0
             || !recoveries.insert(recovery.id)
-            || !slots.insert((recovery.control, recovery.layer))
+            || !slots.insert((
+                recovery.target_instance.as_ref(),
+                recovery.control,
+                recovery.layer,
+            ))
             || !triggers.insert(recovery.trigger_usage)
             || !(104..=115).contains(&recovery.trigger_usage)
             || recovery.layer > 2
@@ -342,10 +347,8 @@ impl Runtime {
             notice: self.notice.clone(),
         })
     }
-    fn enable(&mut self, key: &str, id: u64) -> Result<()> {
-        let selected = crate::plugin_manager::selected_device_target(key)
-            .ok_or("请在设备列表中选择实际设备，读取状态后再启用软件宏")?;
-        crate::plugin_manager::with_device_target(key, Some(&selected), || {
+    fn enable(&mut self, key: &str, id: u64, selected: &DeviceTarget) -> Result<()> {
+        crate::plugin_manager::with_device_target(key, Some(selected), || {
             self.enable_for(key, id, &selected.id)
         })
     }
@@ -354,11 +357,10 @@ impl Runtime {
         if self.active.values().any(|a| a.key == key && a.id == id) {
             return Err("该软件宏已在常驻运行".into());
         }
-        if library
-            .recovery
-            .iter()
-            .any(|r| !self.active.values().any(|a| a.key == key && a.id == r.id))
-        {
+        if library.recovery.iter().any(|r| {
+            r.target_instance.as_deref().is_none_or(|id| id == instance)
+                && !self.active.values().any(|a| a.key == key && a.id == r.id)
+        }) {
             return Err("该设备还有待恢复绑定，请先点击停用/恢复".into());
         }
         let definition = library
@@ -367,11 +369,11 @@ impl Runtime {
             .find(|d| d.id == id)
             .cloned()
             .ok_or("未找到软件宏")?;
-        if library
-            .recovery
-            .iter()
-            .any(|r| r.control == definition.control && r.layer == definition.layer)
-        {
+        if library.recovery.iter().any(|r| {
+            r.target_instance.as_deref().is_none_or(|id| id == instance)
+                && r.control == definition.control
+                && r.layer == definition.layer
+        }) {
             return Err("该按键已有活动宏，先停用再编辑".into());
         }
         let state = controls::read(model(key)?)?;
@@ -559,7 +561,7 @@ enum Operation {
     List(String),
     Save(String, Option<u64>, u16, u8, String, Vec<MacroEvent>),
     Delete(String, u64),
-    Enable(String, u64),
+    Enable(String, u64, DeviceTarget),
     Disable(String, u64),
     Device(String),
     Shutdown,
@@ -657,8 +659,8 @@ fn manager() -> Result<&'static Manager> {
                                     persist(&library)?;
                                     Ok(Reply::Done)
                                 }
-                                Operation::Enable(key, id) => {
-                                    runtime.enable(&key, id)?;
+                                Operation::Enable(key, id, target) => {
+                                    runtime.enable(&key, id, &target)?;
                                     Ok(Reply::Done)
                                 }
                                 Operation::Disable(key, id) => {
@@ -741,7 +743,12 @@ pub fn delete(key: &str, id: u64) -> Result<()> {
     request(Operation::Delete(key.into(), id)).map(|_| ())
 }
 pub fn enable(key: &str, id: u64) -> Result<()> {
-    request(Operation::Enable(key.into(), id)).map(|_| ())
+    let target =
+        crate::plugin_manager::selected_device_target(key).ok_or("请先选择要启用软件宏的设备")?;
+    enable_target(key, id, &target)
+}
+pub fn enable_target(key: &str, id: u64, target: &DeviceTarget) -> Result<()> {
+    request(Operation::Enable(key.into(), id, target.clone())).map(|_| ())
 }
 pub fn disable(key: &str, id: u64) -> Result<()> {
     request(Operation::Disable(key.into(), id)).map(|_| ())
@@ -838,6 +845,25 @@ mod tests {
         assert!(validate_events(&[key(4, true)]).is_err());
         assert!(validate_events(&[MacroEvent::Delay(30000), MacroEvent::Delay(1)]).is_err());
         assert!(validate_events(&vec![MacroEvent::Delay(1); 129]).is_err());
+    }
+    #[test]
+    fn same_button_on_two_receivers_has_separate_recovery() {
+        let key = "mchose-a5-ultra";
+        let entry = |id: u64, target: &str, usage: u16| {
+            serde_json::json!({
+                "id": id, "target_instance": target, "control": 3, "layer": 0,
+                "trigger_usage": usage, "original": {"Mouse": 5}
+            })
+        };
+        let mut data: Library = serde_json::from_value(serde_json::json!({
+            "schema": 1, "device": key, "recovery": [
+                entry(1, "left", 104), entry(2, "right", 105)
+            ]
+        }))
+        .unwrap();
+        assert!(validate(&data, key).is_ok());
+        data.recovery[1].target_instance = Some("left".into());
+        assert!(validate(&data, key).is_err());
     }
     #[test]
     fn imported_macros_cannot_replace_local_recovery_or_auto_enable() {

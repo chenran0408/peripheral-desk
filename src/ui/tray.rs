@@ -422,6 +422,11 @@ pub(super) unsafe extern "system" fn flyout_proc(
             0
         }
         WM_LBUTTONUP => {
+            if focus_active_dialog(main) {
+                a.fx.flyout.closing = Some(Instant::now());
+                a.fx_wake(main);
+                return 0;
+            }
             let x = a.logical(l as i16 as i32);
             let y = a.logical((l >> 16) as i16 as i32);
             if a.fx.flyout.scroll_drag.take().is_some() {
@@ -586,6 +591,17 @@ fn copy_wide<const N: usize>(dest: &mut [u16; N], text: &str) {
     for (d, c) in dest[..N - 1].iter_mut().zip(text.encode_utf16()) {
         *d = c;
     }
+}
+
+pub(super) unsafe fn focus_active_dialog(owner: HWND) -> bool {
+    if IsWindowEnabled(owner) != 0 {
+        return false;
+    }
+    let dialog = GetLastActivePopup(owner);
+    if !dialog.is_null() && dialog != owner {
+        SetForegroundWindow(dialog);
+    }
+    true
 }
 
 pub(super) unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {

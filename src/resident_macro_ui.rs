@@ -42,6 +42,7 @@ struct Outcome {
 }
 struct Window {
     key: String,
+    target: Option<crate::hid::DeviceTarget>,
     model: usize,
     dpi: u32,
     font: HFONT,
@@ -313,6 +314,7 @@ impl Window {
         }
         let selected = self.selected;
         let key = self.key.clone();
+        let target = self.target.clone();
         let model = self.model;
         if [ENABLE, DISABLE, DELETE].contains(&id) && selected.is_none() {
             self.status("先选择一个已保存的软件宏或待恢复记录。");
@@ -357,7 +359,11 @@ impl Window {
                         "定义已保存；尚未启用，也未播放。".into()
                     }
                     ENABLE => {
-                        resident_macros::enable(&key, selected.unwrap())?;
+                        resident_macros::enable_target(
+                            &key,
+                            selected.unwrap(),
+                            target.as_ref().ok_or("请先选择要启用软件宏的设备")?,
+                        )?;
                         "软件宏已启用：按所选设备键播放一次，需保持主程序常驻。".into()
                     }
                     DISABLE => {
@@ -374,21 +380,23 @@ impl Window {
                 let state = resident_macros::list(&key)?;
                 let bindings = if id == RELOAD {
                     Some(
-                        controls::read(model)?
-                            .bindings
-                            .into_iter()
-                            .filter(|b| {
-                                b.editable
-                                    && !matches!(
-                                        b.action,
-                                        BindingAction::Mouse(1)
-                                            | BindingAction::Unknown(_)
-                                            | BindingAction::Macro(_)
-                                    )
-                                    && !(key == "mchose-a5-ultra" && b.control == 0)
-                                    && !(key == "razer-deathadder-v3-pro" && b.control == 1)
-                            })
-                            .collect(),
+                        crate::plugin_manager::with_device_target(&key, target.as_ref(), || {
+                            controls::read(model)
+                        })?
+                        .bindings
+                        .into_iter()
+                        .filter(|b| {
+                            b.editable
+                                && !matches!(
+                                    b.action,
+                                    BindingAction::Mouse(1)
+                                        | BindingAction::Unknown(_)
+                                        | BindingAction::Macro(_)
+                                )
+                                && !(key == "mchose-a5-ultra" && b.control == 0)
+                                && !(key == "razer-deathadder-v3-pro" && b.control == 1)
+                        })
+                        .collect(),
                     )
                 } else {
                     None
@@ -650,6 +658,7 @@ pub unsafe fn open(owner: HWND, model: usize) {
     let brush = CreateSolidBrush(0x00261e1e);
     let mut window = Box::new(Window {
         key: spec.key.into(),
+        target: crate::plugin_manager::selected_device_target(spec.key),
         model,
         dpi,
         font,
