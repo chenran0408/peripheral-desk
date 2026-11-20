@@ -1,4 +1,4 @@
-//! The local MCHOSE driver center runs in a separate WebView2 COM apartment.
+//! The local MCHOSE editor is a child of the main window on its UI apartment.
 mod bootstrap;
 mod builtin;
 mod fixes;
@@ -8,21 +8,20 @@ mod resources;
 mod workspace;
 use crate::hid::wide;
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     os::windows::ffi::OsStrExt,
     path::PathBuf,
     ptr::{null, null_mut},
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    },
+    rc::{Rc, Weak},
+    sync::mpsc,
     thread,
 };
 use webview2_com::{
-    take_pwstr, wait_with_pump, CreateCoreWebView2ControllerCompletedHandler,
+    take_pwstr, CreateCoreWebView2ControllerCompletedHandler,
     CreateCoreWebView2EnvironmentCompletedHandler, Microsoft::Web::WebView2::Win32::*,
-    NavigationCompletedEventHandler, NavigationStartingEventHandler,
-    NewWindowRequestedEventHandler, PermissionRequestedEventHandler,
+    MoveFocusRequestedEventHandler, NavigationCompletedEventHandler,
+    NavigationStartingEventHandler, NewWindowRequestedEventHandler,
+    PermissionRequestedEventHandler,
 };
 use windows::{
     core::{PCWSTR, PWSTR},
@@ -33,81 +32,118 @@ use windows::{
 };
 use windows_sys::Win32::{
     Foundation::{GetLastError, ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, RECT, WPARAM},
-    Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
     System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::*,
+    UI::{
+        Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_SHIFT},
+        WindowsAndMessaging::*,
+    },
 };
 
 const SETUP_PAGE: &str = "https://setup.peripheraldesk.test/mchose";
 const TITLE: &str = "外设盒 · 迈从驱动中心";
-const STARTING: usize = 1;
-static WINDOW: AtomicUsize = AtomicUsize::new(0);
 pub const CLOSED_MESSAGE: u32 = WM_APP + 0x4d;
+const SHOW_MENU: u32 = WM_APP + 0x4e;
+
+struct Host(HWND);
 
 thread_local! {
+    static APARTMENT: Cell<bool> = const { Cell::new(false) };
+    static HOST: RefCell<Option<Rc<Host>>> = const { RefCell::new(None) };
     static CONTROLLER: RefCell<Option<ICoreWebView2Controller>> = const { RefCell::new(None) };
+    static ERROR: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// While the driver center owns the session, local MCHOSE polling and controls are paused.
+fn host_window() -> HWND {
+    HOST.with_borrow(|host| host.as_ref().map_or(null_mut(), |host| host.0))
+}
+
 pub fn active() -> bool {
-    WINDOW.load(Ordering::Acquire) != 0
+    !host_window().is_null()
 }
 
-/// Returns immediately. The owner receives CLOSED_MESSAGE after the controller has closed.
-pub fn open(owner: HWND) -> Result<(), String> {
-    if let Err(current) = WINDOW.compare_exchange(0, STARTING, Ordering::AcqRel, Ordering::Acquire)
-    {
-        if current != STARTING {
-            let window = current as HWND;
-            unsafe {
-                if IsIconic(window) != 0 {
-                    ShowWindowAsync(window, SW_RESTORE);
-                }
-                SetForegroundWindow(window);
-            }
+pub fn take_error() -> Option<String> {
+    ERROR.take()
+}
+
+/// # Safety
+/// Call on the main UI thread with the target window from the current message.
+pub unsafe fn owns_input(target: HWND) -> bool {
+    let hwnd = host_window();
+    !hwnd.is_null() && (hwnd == target || IsChild(hwnd, target) != 0)
+}
+
+pub fn set_bounds(bounds: RECT) {
+    let hwnd = host_window();
+    if !hwnd.is_null() {
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                null_mut(),
+                bounds.left,
+                bounds.top,
+                (bounds.right - bounds.left).max(0),
+                (bounds.bottom - bounds.top).max(0),
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
         }
+    }
+}
+
+pub fn parent_moved() {
+    if let Some(controller) = CONTROLLER.with_borrow(Clone::clone) {
+        unsafe {
+            let _ = controller.NotifyParentWindowPositionChanged();
+        }
+    }
+}
+
+pub fn show_menu(x: i32, y: i32) {
+    let hwnd = host_window();
+    if !hwnd.is_null() {
+        unsafe {
+            PostMessageW(hwnd, SHOW_MENU, x as usize, y as isize);
+        }
+    }
+}
+
+pub fn close() {
+    let hwnd = host_window();
+    if !hwnd.is_null() {
+        unsafe {
+            DestroyWindow(hwnd);
+        }
+    }
+}
+
+pub fn shutdown() {
+    close();
+    if APARTMENT.replace(false) {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
+
+/// The child exists immediately; environment and controller creation complete on the UI thread.
+///
+/// # Safety
+/// The owner must be a live window on the calling UI thread.
+pub unsafe fn open(owner: HWND, bounds: RECT) -> Result<(), String> {
+    if active() {
+        set_bounds(bounds);
         return Ok(());
     }
-    let owner_id = owner as usize;
-    thread::Builder::new()
-        .name("M HUB".into())
-        .spawn(move || {
-            let result = run(owner_id as HWND);
-            WINDOW.store(0, Ordering::Release);
-            unsafe {
-                if owner_id != 0 {
-                    PostMessageW(owner_id as HWND, CLOSED_MESSAGE, 0, 0);
-                }
-                if let Err(error) = result {
-                    MessageBoxW(
-                        null_mut(),
-                        wide(&error).as_ptr(),
-                        wide(TITLE).as_ptr(),
-                        MB_OK | MB_ICONERROR,
-                    );
-                }
-            }
-        })
-        .map(|_| ())
-        .map_err(|error| {
-            WINDOW.store(0, Ordering::Release);
-            format!("无法启动迈从驱动中心：{error}")
-        })
-}
-
-fn run(owner: HWND) -> Result<(), String> {
-    unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok() }.map_err(|e| e.to_string())?;
-    let result = run_window(owner);
-    unsafe { CoUninitialize() };
-    result
-}
-
-fn run_window(owner: HWND) -> Result<(), String> {
     let local = std::env::var_os("LOCALAPPDATA").ok_or("无法定位当前用户的 M HUB 配置目录")?;
     let profile = PathBuf::from(local).join("PeripheralDesk").join("MHub");
     std::fs::create_dir_all(&profile).map_err(|e| format!("无法创建 M HUB 配置目录：{e}"))?;
     let profile: Vec<u16> = profile.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {
+        if !APARTMENT.get() {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+                .ok()
+                .map_err(|e| format!("无法初始化驱动中心：{e}"))?;
+            APARTMENT.set(true);
+        }
         let module = GetModuleHandleW(null());
         let class = wide("PeripheralDeskMHub");
         let wc = WNDCLASSW {
@@ -115,45 +151,21 @@ fn run_window(owner: HWND) -> Result<(), String> {
             lpfnWndProc: Some(window_proc),
             lpszClassName: class.as_ptr(),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-            hbrBackground: windows_sys::Win32::Graphics::Gdi::GetSysColorBrush(
-                windows_sys::Win32::Graphics::Gdi::COLOR_WINDOW,
-            ),
             ..Default::default()
         };
         if RegisterClassW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        let mut monitor = MONITORINFO {
-            cbSize: size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let (x, y, width, height) = if GetMonitorInfoW(
-            MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST),
-            &mut monitor,
-        ) != 0
-        {
-            let rect = monitor.rcWork;
-            let dx = (rect.right - rect.left) / 20;
-            let dy = (rect.bottom - rect.top) / 20;
-            (
-                rect.left + dx,
-                rect.top + dy,
-                rect.right - rect.left - 2 * dx,
-                rect.bottom - rect.top - 2 * dy,
-            )
-        } else {
-            (CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT)
-        };
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
             wide("正在打开迈从驱动中心…").as_ptr(),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBLE,
-            x,
-            y,
-            width,
-            height,
-            null_mut(),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+            bounds.left,
+            bounds.top,
+            (bounds.right - bounds.left).max(0),
+            (bounds.bottom - bounds.top).max(0),
+            owner,
             null_mut(),
             module,
             null(),
@@ -161,39 +173,38 @@ fn run_window(owner: HWND) -> Result<(), String> {
         if hwnd.is_null() {
             return Err(std::io::Error::last_os_error().to_string());
         }
-        menu::create(hwnd);
-        WINDOW.store(hwnd as usize, Ordering::Release);
-        if let Err(error) = attach(hwnd, &profile) {
-            // Closing the window during startup cancels the pending WebView2 callback.
-            if IsWindow(hwnd) == 0 {
-                return Ok(());
-            }
+        let host = Rc::new(Host(hwnd));
+        let session = Rc::downgrade(&host);
+        HOST.set(Some(host));
+        ERROR.take();
+        if let Err(error) = begin_environment(session, &profile) {
             DestroyWindow(hwnd);
-            return Err(format!(
-                "无法载入迈从驱动中心。请检查 Microsoft Edge WebView2 运行时后重新打开。\n{error}"
-            ));
-        }
-        let mut msg = MSG::default();
-        loop {
-            match GetMessageW(&mut msg, null_mut(), 0, 0) {
-                -1 => return Err(std::io::Error::last_os_error().to_string()),
-                0 => return Ok(()),
-                _ => {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
+            return Err(startup_error(&error));
         }
     }
+    Ok(())
 }
 
-unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
-    let (tx, rx) = mpsc::channel();
+fn startup_error(error: &windows::core::Error) -> String {
+    format!("无法载入迈从驱动中心。请检查 Microsoft Edge WebView2 运行时后重新打开。\n{error}")
+}
+
+unsafe fn async_failure(hwnd: HWND, error: &windows::core::Error) {
+    ERROR.set(Some(startup_error(error)));
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+}
+
+unsafe fn begin_environment(session: Weak<Host>, profile: &[u16]) -> windows::core::Result<()> {
     let completion =
         CreateCoreWebView2EnvironmentCompletedHandler::create(Box::new(move |result, env| {
-            let _ = tx.send(
-                result.and_then(|()| env.ok_or_else(|| windows::core::Error::from(E_POINTER))),
-            );
+            if let Some(host) = session.upgrade() {
+                let result = result
+                    .and_then(|()| env.ok_or_else(|| E_POINTER.into()))
+                    .and_then(|env| begin_controller(&host, env));
+                if let Err(error) = result {
+                    async_failure(host.0, &error);
+                }
+            }
             Ok(())
         }));
     CreateCoreWebView2EnvironmentWithOptions(
@@ -201,21 +212,41 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
         PCWSTR(profile.as_ptr()),
         None,
         &completion,
-    )?;
-    let env = wait_with_pump(rx)??;
+    )
+}
 
-    let (tx, rx) = mpsc::channel();
+unsafe fn begin_controller(
+    host: &Rc<Host>,
+    env: ICoreWebView2Environment,
+) -> windows::core::Result<()> {
+    let session = Rc::downgrade(host);
+    let environment = env.clone();
     let completion =
         CreateCoreWebView2ControllerCompletedHandler::create(Box::new(move |result, view| {
-            let _ = tx.send(
-                result.and_then(|()| view.ok_or_else(|| windows::core::Error::from(E_POINTER))),
-            );
+            let Some(host) = session.upgrade() else {
+                if let Some(controller) = view {
+                    let _ = controller.Close();
+                }
+                return Ok(());
+            };
+            let result = result
+                .and_then(|()| view.ok_or_else(|| E_POINTER.into()))
+                .and_then(|controller| attach(host.0, &environment, controller));
+            if let Err(error) = result {
+                async_failure(host.0, &error);
+            }
             Ok(())
         }));
-    env.CreateCoreWebView2Controller(ComWindow(hwnd), &completion)?;
-    let controller = wait_with_pump(rx)??;
+    env.CreateCoreWebView2Controller(ComWindow(host.0), &completion)
+}
+
+unsafe fn attach(
+    hwnd: HWND,
+    env: &ICoreWebView2Environment,
+    controller: ICoreWebView2Controller,
+) -> windows::core::Result<()> {
     let web = controller.CoreWebView2()?;
-    resources::attach(hwnd, &web, &env)?;
+    resources::attach(hwnd, &web, env)?;
     let settings = web.Settings()?;
     settings.SetAreHostObjectsAllowed(false)?;
     settings.SetIsWebMessageEnabled(false)?;
@@ -333,7 +364,25 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
     controller.SetZoomFactor(menu::saved_zoom())?;
     controller.SetIsVisible(true)?;
     menu::open_initial(hwnd, &web)?;
-    let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    controller.add_MoveFocusRequested(
+        &MoveFocusRequestedEventHandler::create(Box::new(move |_, args| {
+            if let Some(args) = args {
+                let mut reason = COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC;
+                args.Reason(&mut reason)?;
+                let back = reason == COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS;
+                let next = GetNextDlgTabItem(GetParent(hwnd), hwnd, i32::from(back));
+                if !next.is_null() && next != hwnd {
+                    args.SetHandled(true)?;
+                    SetFocus(next);
+                }
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
+    if windows_sys::Win32::UI::Input::KeyboardAndMouse::GetFocus() == hwnd {
+        let _ = controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    }
     CONTROLLER.set(Some(controller));
     Ok(())
 }
@@ -359,6 +408,10 @@ unsafe fn resize(hwnd: HWND, controller: &ICoreWebView2Controller) -> windows::c
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
+        SHOW_MENU => {
+            menu::popup(hwnd, w as i32, l as i32);
+            0
+        }
         WM_INITMENUPOPUP if (l >> 16) == 0 => {
             menu::update_menu(w as HMENU);
             0
@@ -368,7 +421,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         menu::BUILTIN_READY => {
-            let result = menu::builtin_ready(hwnd);
+            let result = menu::builtin_ready();
             if result.is_err() {
                 SetWindowTextW(hwnd, wide(TITLE).as_ptr());
             }
@@ -379,20 +432,24 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             if let Some(controller) = CONTROLLER.with_borrow(Clone::clone) {
                 let _ = match msg {
                     WM_SIZE => resize(hwnd, &controller),
-                    WM_SETFOCUS => {
-                        controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
-                    }
+                    WM_SETFOCUS => controller.MoveFocus(if GetKeyState(VK_SHIFT as i32) < 0 {
+                        COREWEBVIEW2_MOVE_FOCUS_REASON_PREVIOUS
+                    } else {
+                        COREWEBVIEW2_MOVE_FOCUS_REASON_NEXT
+                    }),
                     _ => controller.NotifyParentWindowPositionChanged(),
                 };
             }
             0
         }
         WM_DESTROY => {
+            HOST.take();
+            menu::close();
             resources::close();
             if let Some(controller) = CONTROLLER.take() {
                 let _ = controller.Close();
             }
-            PostQuitMessage(0);
+            PostMessageW(GetParent(hwnd), CLOSED_MESSAGE, 0, 0);
             0
         }
         _ => DefWindowProcW(hwnd, msg, w, l),

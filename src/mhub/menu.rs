@@ -24,8 +24,12 @@ thread_local! {
     static BUILTIN_RESULT: RefCell<Option<mpsc::Receiver<Prepared>>> = const {RefCell::new(None)};
 }
 
-pub(super) unsafe fn create(hwnd: HWND) {
-    let bar = CreateMenu();
+pub(super) fn close() {
+    BUILTIN_RESULT.take();
+}
+
+pub(super) unsafe fn popup(hwnd: HWND, x: i32, y: i32) {
+    let bar = CreatePopupMenu();
     for (name, items) in [
         (
             "驱动中心(&W)",
@@ -62,7 +66,21 @@ pub(super) unsafe fn create(hwnd: HWND) {
         }
         AppendMenuW(bar, MF_POPUP, submenu as usize, wide(name).as_ptr());
     }
-    SetMenu(hwnd, bar);
+    if workspace::selected()
+        .is_ok_and(|p| builtin::installed_version(&p).as_deref() != Some(env!("CARGO_PKG_VERSION")))
+    {
+        AppendMenuW(
+            bar,
+            MF_STRING,
+            UPDATE_NOTICE,
+            wide(concat!("获取 ", env!("CARGO_PKG_VERSION"), " 版驱动中心…")).as_ptr(),
+        );
+    }
+    let id = TrackPopupMenu(bar, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, 0, hwnd, null());
+    DestroyMenu(bar);
+    if id > 0 {
+        PostMessageW(hwnd, WM_COMMAND, id as usize, 0);
+    }
 }
 
 pub(super) unsafe fn update_menu(menu: HMENU) {
@@ -152,11 +170,7 @@ unsafe fn open_path(path: &std::path::Path, edit: bool) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn navigate_local(
-    hwnd: HWND,
-    web: &ICoreWebView2,
-    path: &std::path::Path,
-) -> Result<(), String> {
+unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
     workspace::prepare_user_hooks(path)?;
     let web3: ICoreWebView2_3 = web.cast().map_err(|e| e.to_string())?;
     web3.SetVirtualHostNameToFolderMapping(
@@ -170,17 +184,6 @@ unsafe fn navigate_local(
         wide(&format!("{}index.html", workspace::LOCAL_SITE)).as_ptr(),
     ))
     .map_err(|e| e.to_string())?;
-    let bar = GetMenu(hwnd);
-    DeleteMenu(bar, UPDATE_NOTICE as u32, MF_BYCOMMAND);
-    if builtin::installed_version(path).as_deref() != Some(env!("CARGO_PKG_VERSION")) {
-        AppendMenuW(
-            bar,
-            MF_STRING,
-            UPDATE_NOTICE,
-            wide(concat!("获取 ", env!("CARGO_PKG_VERSION"), " 版驱动中心…")).as_ptr(),
-        );
-    }
-    DrawMenuBar(hwnd);
     Ok(())
 }
 
@@ -209,10 +212,10 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
             }
             .map_err(|e| e.to_string())
         }
-        LOCAL => open_local(hwnd, &web, &workspace::selected()?, "local"),
+        LOCAL => open_local(&web, &workspace::selected()?, "local"),
         SELECT_COPY => {
             if let Some(path) = choose_previous(hwnd)? {
-                open_local(hwnd, &web, &path, "local")?;
+                open_local(&web, &path, "local")?;
             }
             Ok(())
         }
@@ -250,7 +253,7 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
 pub(super) unsafe fn report(hwnd: HWND, result: Result<(), String>) {
     if let Err(e) = result {
         MessageBoxW(
-            hwnd,
+            GetAncestor(hwnd, GA_ROOT),
             wide(&e).as_ptr(),
             wide(TITLE).as_ptr(),
             MB_OK | MB_ICONERROR,
@@ -263,13 +266,12 @@ fn remember_mode(mode: &str) -> Result<(), String> {
 }
 
 unsafe fn open_local(
-    hwnd: HWND,
     web: &ICoreWebView2,
     path: &std::path::Path,
     mode: &str,
 ) -> Result<(), String> {
     BUILTIN_RESULT.take();
-    navigate_local(hwnd, web, path)?;
+    navigate_local(web, path)?;
     let build = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -312,19 +314,19 @@ unsafe fn show_install(web: &ICoreWebView2) -> windows::core::Result<()> {
     web.Navigate(PCWSTR(wide(SETUP_PAGE).as_ptr()))
 }
 
-pub(super) unsafe fn builtin_ready(hwnd: HWND) -> Result<(), String> {
+pub(super) unsafe fn builtin_ready() -> Result<(), String> {
     let result = BUILTIN_RESULT.with_borrow(|r| r.as_ref().and_then(|rx| rx.try_recv().ok()));
     if let Some(result) = result {
         BUILTIN_RESULT.take();
         let web = browser()?;
-        if let Err(error) = result.and_then(|(path, mode)| open_local(hwnd, &web, &path, mode)) {
+        if let Err(error) = result.and_then(|(path, mode)| open_local(&web, &path, mode)) {
             let mut source = PWSTR::null();
             web.Source(&mut source).map_err(|e| e.to_string())?;
             if take_pwstr(source).starts_with(workspace::LOCAL_SITE) {
                 return Err(error);
             }
             if let Ok(previous) = workspace::selected() {
-                match open_local(hwnd, &web, &previous, "local") {
+                match open_local(&web, &previous, "local") {
                     Ok(()) => return Err(format!("{error}。已恢复之前的本地驱动中心。")),
                     Err(restore) => {
                         show_install(&web).map_err(|e| e.to_string())?;
@@ -371,7 +373,7 @@ pub(super) unsafe fn open_initial(hwnd: HWND, web: &ICoreWebView2) -> windows::c
         workspace::selected().ok(),
     );
     let result = match choice {
-        Initial::Local(path) => navigate_local(hwnd, web, &path).and_then(|()| {
+        Initial::Local(path) => navigate_local(web, &path).and_then(|()| {
             if mode.as_deref() == Some("official") {
                 remember_mode("local")
             } else {
@@ -394,7 +396,7 @@ unsafe fn choose_previous(hwnd: HWND) -> Result<Option<PathBuf>, String> {
     let directory = workspace::local_wide(&root);
     let mut dialog = OPENFILENAMEW {
         lStructSize: size_of::<OPENFILENAMEW>() as u32,
-        hwndOwner: hwnd,
+        hwndOwner: GetAncestor(hwnd, GA_ROOT),
         lpstrFile: file.as_mut_ptr(),
         nMaxFile: file.len() as u32,
         lpstrTitle: title.as_ptr(),

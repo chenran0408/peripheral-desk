@@ -21,6 +21,7 @@ use windows_sys::Win32::{
 
 pub(crate) mod fx;
 mod navigation;
+mod onboard;
 mod pages;
 mod pointer_editor;
 mod tray;
@@ -66,6 +67,7 @@ struct PointerSample {
     rate_indices: Option<[u8; 2]>,
 }
 enum WorkUpdate {
+    Board(usize, Result<onboard::Profiles, String>),
     Device(usize, backend::State),
     Pointer(usize, Result<Box<PointerSample>, String>),
     Finished(WorkResult),
@@ -85,6 +87,8 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 enum Page {
     Home,
     Drivers,
+    MHub,
+    Onboard(usize),
     Battery(usize),
     Device(usize),
     System(usize),
@@ -117,6 +121,9 @@ enum Command {
     CoreUpdate,
     PresetLibrary,
     MHub,
+    HubMenu,
+    OpenBoard(usize),
+    Board(onboard::Op),
     Evidence,
     HeadsetLighting,
     GenericLighting,
@@ -152,6 +159,9 @@ struct App {
     pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
     hub_open: bool,
+    hub_requested: bool,
+    board: onboard::Board,
+    board_requested: bool,
     show_evidence: bool,
     pointer_sample: Option<(usize, Box<PointerSample>)>,
     pointer_requested: bool,
@@ -240,6 +250,9 @@ pub fn run(hidden: bool, battery: bool) {
             pending: None,
             modal_open: false,
             hub_open: false,
+            hub_requested: false,
+            board: onboard::Board::default(),
+            board_requested: false,
             show_evidence: false,
             pointer_sample: None,
             pointer_requested: false,
@@ -308,11 +321,12 @@ pub fn run(hidden: bool, battery: bool) {
                 SendMessageW(hwnd, BATTERY, 0, 0);
                 continue;
             }
-            if IsDialogMessageW(hwnd, &msg) == 0 {
+            if crate::mhub::owns_input(msg.hwnd) || IsDialogMessageW(hwnd, &msg) == 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
         }
+        crate::mhub::shutdown();
         DestroyIcon(icon);
         CloseHandle(mutex);
     }
@@ -345,6 +359,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             SetTimer(hwnd, 1, a.snapshot.interval * 1000, None);
             a.tray(hwnd);
             a.begin(hwnd, None);
+            0
+        }
+        WM_MOVE => {
+            crate::mhub::parent_moved();
             0
         }
         WM_SIZE => {
@@ -439,8 +457,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 a.hub_open = false;
                 a.pointer_requested = matches!(a.page,Page::Device(m) if REGISTRY[m].supports("polling-rate-read") || REGISTRY[m].supports("dpi-stages-read"));
                 crate::plugin_manager::set_web_driver_devices(Vec::new());
-                a.layout(hwnd);
+                let error = crate::mhub::take_error();
+                if a.page == Page::MHub {
+                    a.navigate(hwnd, Page::Drivers);
+                }
                 a.begin(hwnd, None);
+                if let Some(error) = error {
+                    message(&format!("迈从 M HUB 打开失败：{error}"));
+                }
             }
             0
         }
@@ -554,7 +578,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_KEYDOWN if w == VK_ESCAPE as usize => {
             if !a.modal_open {
-                let parent = if matches!(a.page, Page::Device(_)) {
+                let parent = if matches!(a.page, Page::Device(_) | Page::MHub | Page::Onboard(_)) {
                     Page::Drivers
                 } else {
                     Page::Home
@@ -573,6 +597,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_QUERYENDSESSION => i32::from(
             !a.modal_open
+                && !a.board.saving
                 && a.inflight.is_none()
                 && a.profile_notice.is_none()
                 && a.queued.is_empty(),
@@ -587,10 +612,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             if !a.queued.is_empty() {
                 a.set_status("待保存的设置将在后台完成", false);
             }
+            if a.page == Page::MHub {
+                a.navigate(hwnd, Page::Drivers);
+            }
             ShowWindow(hwnd, SW_HIDE);
             0
         }
         WM_DESTROY => {
+            crate::mhub::close();
             KillTimer(hwnd, 1);
             KillTimer(hwnd, 2);
             if !a.flyout.is_null() {
@@ -717,6 +746,33 @@ impl App {
             );
         }
         match self.page {
+            Page::MHub => {
+                self.add(
+                    hwnd,
+                    "‹  设备调节",
+                    R::new(SIDEBAR + 16, 16, 110, 34),
+                    GHOST,
+                    Command::Drivers,
+                );
+                self.add(
+                    hwnd,
+                    "M HUB 菜单",
+                    R::new(w - 246, 16, 128, 34),
+                    GHOST,
+                    Command::HubMenu,
+                );
+                crate::mhub::set_bounds(self.hub_bounds(hwnd));
+            }
+            Page::Onboard(m) => {
+                self.add(
+                    hwnd,
+                    "‹  设备调节",
+                    R::new(SIDEBAR + 16, 16, 110, 34),
+                    GHOST,
+                    Command::Drivers,
+                );
+                self.board_layout(hwnd, m);
+            }
             Page::Home | Page::Drivers => {
                 let power = self.page == Page::Home;
                 let entries = if power {
@@ -804,6 +860,9 @@ impl App {
                         );
                     }
                     let mut tabs = Vec::new();
+                    if spec.supports("onboard-profiles") {
+                        tabs.push(("板载配置", Command::OpenBoard(m)));
+                    }
                     if pointer_editor::available(spec) {
                         tabs.push(("指针与性能", Command::PointerEditor));
                     }
@@ -1176,6 +1235,16 @@ impl App {
         }
     }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
+        self.hub_requested = false;
+        if self.page == Page::MHub && page != Page::MHub {
+            crate::mhub::close();
+            self.hub_open = false;
+            crate::plugin_manager::set_web_driver_devices(Vec::new());
+        }
+        self.board_requested = matches!(page, Page::Onboard(_));
+        if !self.board.saving {
+            self.board = onboard::Board::default();
+        }
         self.page = page;
         self.show_evidence = false;
         self.pointer_sample = None;
@@ -1241,17 +1310,26 @@ impl App {
             self.begin(hwnd, None);
         }
     }
+    unsafe fn hub_bounds(&self, hwnd: HWND) -> RECT {
+        let mut r: RECT = zeroed();
+        GetClientRect(hwnd, &mut r);
+        r.left = self.px(SIDEBAR + 1);
+        r.top = self.px(66);
+        r.bottom = (r.bottom - self.px(42)).max(r.top);
+        r
+    }
+
     unsafe fn open_mhub(&mut self, hwnd: HWND) {
-        if self.hub_open {
-            if let Err(error) = crate::mhub::open(hwnd) {
-                self.set_status(&error, true);
-                self.render(hwnd);
-            }
+        if self.hub_open || self.modal_open {
             return;
         }
-        if self.pending.is_some() || self.modal_open || !self.queued.is_empty() {
+        if self.pending.is_some() || !self.queued.is_empty() {
+            self.hub_requested = true;
+            self.set_status("当前设备操作完成后将打开迈从 M HUB", false);
+            self.render(hwnd);
             return;
         }
+        self.hub_requested = false;
         // A second installed model may describe another collection on the same receiver.
         let mut receivers = std::collections::HashSet::new();
         for spec in REGISTRY.iter().filter(|spec| spec.mchose()) {
@@ -1309,7 +1387,7 @@ impl App {
         crate::plugin_manager::set_web_driver_devices(
             peers.into_iter().map(|spec| spec.key).collect(),
         );
-        match crate::mhub::open(hwnd) {
+        match crate::mhub::open(hwnd, self.hub_bounds(hwnd)) {
             Ok(()) => {
                 self.hub_open = true;
                 self.pointer_sample = None;
@@ -1319,7 +1397,8 @@ impl App {
                         state.charging = None;
                     }
                 }
-                self.set_status("已打开驱动中心，关闭其窗口后恢复本地控制", false);
+                self.navigate(hwnd, Page::MHub);
+                self.set_status("离开 M HUB 后，自动恢复迈从设备的后台读取", false);
                 self.tray(hwnd);
             }
             Err(error) => {
@@ -1433,6 +1512,19 @@ impl App {
                 self.begin(hwnd, None);
             }
             Command::MHub => self.open_mhub(hwnd),
+            Command::HubMenu => {
+                if let Some(b) = self.controls.iter().find(|b| b.command == Command::HubMenu) {
+                    let mut rect: RECT = zeroed();
+                    GetWindowRect(b.hwnd, &mut rect);
+                    crate::mhub::show_menu(rect.left, rect.bottom);
+                }
+            }
+            Command::OpenBoard(m) => self.navigate(hwnd, Page::Onboard(m)),
+            Command::Board(op) => {
+                if let Page::Onboard(m) = self.page {
+                    self.board_run(hwnd, m, op);
+                }
+            }
             Command::Evidence => {
                 self.show_evidence = !self.show_evidence;
                 self.layout(hwnd);
@@ -1511,6 +1603,11 @@ impl App {
             Command::Drivers => self.navigate(hwnd, Page::Drivers),
             Command::Battery(m) => self.navigate(hwnd, Page::Battery(m)),
             Command::Device(m) if REGISTRY[m].mchose() => self.open_mhub(hwnd),
+            Command::Device(m)
+                if REGISTRY[m].supports("onboard-profiles") && REGISTRY[m].read_only() =>
+            {
+                self.navigate(hwnd, Page::Onboard(m))
+            }
             Command::Device(m) => self.navigate(hwnd, Page::Device(m)),
             Command::System(m) => self.navigate(hwnd, Page::System(m)),
             Command::Prefs => self.navigate(hwnd, Page::Preferences),
@@ -1518,7 +1615,7 @@ impl App {
                 ShowWindow(hwnd, SW_MINIMIZE);
             }
             Command::Close => {
-                ShowWindow(hwnd, SW_HIDE);
+                PostMessageW(hwnd, WM_CLOSE, 0, 0);
             }
             Command::Quit => self.quit(hwnd),
             Command::ReadPointer => self.read_pointer(hwnd),
@@ -1594,15 +1691,28 @@ impl App {
         if self.modal_open {
             return;
         }
-        if self.inflight.is_some() || self.profile_notice.is_some() || !self.queued.is_empty() {
+        if self.board.saving
+            || self.inflight.is_some()
+            || self.profile_notice.is_some()
+            || !self.queued.is_empty()
+        {
             message("设备设置正在保存，请等待完成后退出。");
         } else {
             DestroyWindow(hwnd);
         }
     }
     unsafe fn poll_detail_on_entry(&mut self, hwnd: HWND) {
-        if self.pointer_requested {
-            self.read_pointer(hwnd);
+        if self.pending.is_none() && self.queued.is_empty() {
+            if self.hub_requested && self.page == Page::Drivers {
+                self.open_mhub(hwnd);
+            } else if self.board_requested {
+                if let Page::Onboard(m) = self.page {
+                    self.board_requested = false;
+                    self.board_run(hwnd, m, onboard::Op::Read);
+                }
+            } else if self.pointer_requested {
+                self.read_pointer(hwnd);
+            }
         }
     }
     unsafe fn read_pointer(&mut self, hwnd: HWND) {
@@ -1699,6 +1809,10 @@ impl App {
                     self.snapshot.devices[model] = state;
                     changed = true;
                 }
+                WorkUpdate::Board(model, result) => {
+                    self.board_finished(hwnd, model, result);
+                    return;
+                }
                 WorkUpdate::Pointer(model, result) => {
                     self.pending = None;
                     if self.page == Page::Device(model) {
@@ -1733,6 +1847,7 @@ impl App {
         }
         if finished.is_none() && disconnected {
             self.pending = None;
+            self.board.saving = false;
             self.inflight = None;
             self.profile_notice = None;
             self.set_status("后台读取失败：后台线程已退出", true);
@@ -1992,6 +2107,7 @@ impl App {
     }
     fn selected(&self, command: Command) -> bool {
         match command {
+            Command::Board(op) => self.board_selected(op),
             Command::Setting(action) => {
                 if let Page::Device(m) = self.page {
                     if let Some((id, queued)) = self
@@ -2077,8 +2193,14 @@ impl App {
                             false
                         }
                 }
-                Command::MHub
-                | Command::ConnectAudio
+                Command::MHub => !self.modal_open && !self.hub_requested,
+                Command::Board(op) => {
+                    matches!(self.page, Page::Onboard(m) if self.board_enabled(m, op))
+                        && self.pending.is_none()
+                        && self.queued.is_empty()
+                        && !self.modal_open
+                }
+                Command::ConnectAudio
                 | Command::DriverManager
                 | Command::AddDevice
                 | Command::Configuration
@@ -2140,6 +2262,15 @@ impl App {
             match self.page {
                 Page::Home => self.home(&c),
                 Page::Drivers => self.drivers(&c),
+                Page::MHub => c.text(
+                    "迈从 M HUB",
+                    R::new(SIDEBAR + 144, 16, 240, 34),
+                    17,
+                    600,
+                    TEXT,
+                    DT_LEFT,
+                ),
+                Page::Onboard(m) => self.board_paint(&c, m),
                 Page::Battery(m) => self.battery_detail(&c, m),
                 Page::Device(m) => {
                     self.detail(&c, m);

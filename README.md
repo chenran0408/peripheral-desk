@@ -1,6 +1,6 @@
 # 外设盒 · 外设控制中心
 
-Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看设备状态，在「设备调节」修改硬件设置。迈从驱动中心基于 M HUB，由外设盒维护，在本机的 WebView2 窗口中运行。
+Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看设备状态，在「设备调节」修改硬件设置。迈从驱动中心基于 M HUB，由外设盒维护，在主窗口右侧离线运行。
 
 [安装与使用](docs/USAGE.md) · [本版测试范围](docs/VALIDATION.md) · [响应优化队列](docs/RESPONSE-ROADMAP.md) · [公开设备插件仓库](https://github.com/chenran0408/peripheral-desk-drivers) · [五品牌协议研究](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/PROTOCOL-RESEARCH.md)
 
@@ -9,14 +9,16 @@ Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看�
 在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载以 `-portable.zip` 结尾的便携包并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开「插件管理」，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
 
 - 在「插件管理」按品牌或型号搜索，选中需要的插件后统一安装。共用接收器会提示核对型号。可在[按厂商查找外设](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/catalog/README.md)查看各连接方式的支持记录。
-- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.16/PeripheralDesk-0.4.11-preview.16-windows-x64-setup.exe)。安装后自带本地迈从驱动中心，在「设备调节 → 迈从 M HUB」打开。便携包提供相同功能。Windows 需有 Microsoft Edge WebView2。
-- 驱动中心从本机加载。首次连接时选择自己的设备。型号表、网页、改键修复和后续更新均由外设盒提供；在驱动中心菜单中可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
+- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.17/PeripheralDesk-0.4.11-preview.17-windows-x64-setup.exe)。安装后自带本地迈从驱动中心，在「设备调节 → 迈从 M HUB」打开。便携包提供相同功能。Windows 需有 Microsoft Edge WebView2。
+- 驱动中心从本机加载。首次连接时选择自己的设备。型号表、网页、改键修复和后续更新均由外设盒提供；在右上角「M HUB 菜单」可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
 - 「电量」显示可报告电池状态的外设，点设备查看本次或上次读数。G2 Pro 等有线外设可在「设备调节」找到。
 - 左键托盘图标查看电量，点一行查看该设备；右键可打开电量总览、设备调节或退出。
 - 点右上角关闭会留在托盘。彻底退出请使用托盘菜单或「偏好设置」中的「退出程序」。
 - 设置停止调整 1.5 秒后保存，并从设备读回核对；失败会显示提示。修改后只重新读取对应设备，避免等待其他设备唤醒。
 - 默认每 60 秒刷新，低于 20% 时提醒。工具设置中可调整。
 - 主程序在线更新完成后自动重启。插件批量安装或更新全部成功后自动重启；部分失败时保留结果，可点击“重启生效”。
+
+罗技 G304、G305、G502 LIGHTSPEED 和 G502 X PLUS 的预览插件支持板载模式、已有配置和 DPI 档位切换。雷蛇炼狱蝰蛇 V3 Pro 系列和 V3 HyperSpeed 可通过对应预览插件逐档调整横向及纵向 DPI。[罗技型号和连接方式](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/LOGITECH-ONBOARD.md) · [雷蛇型号和连接方式](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/RAZER-OPENSYNAPSE.md)
 
 「偏好设置」集中提供更新、配置备份、诊断和常驻软件宏。常驻软件宏由外设盒运行，板载宏在对应设备的驱动调节页编辑。
 

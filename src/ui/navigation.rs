@@ -31,6 +31,7 @@ pub(super) fn has_native_controls(spec: &DeviceSpec) -> bool {
                 "lighting-editor",
                 "bindings",
                 "key-colors",
+                "onboard-profiles",
                 "pointer-controls",
                 "dpi-stages-read",
                 "polling-rate-read",

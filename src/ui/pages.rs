@@ -1091,7 +1091,10 @@ impl App {
                 Command::Home => {
                     matches!(self.page, Page::Home | Page::Battery(_) | Page::System(_))
                 }
-                Command::Drivers => matches!(self.page, Page::Drivers | Page::Device(_)),
+                Command::Drivers => matches!(
+                    self.page,
+                    Page::Drivers | Page::MHub | Page::Onboard(_) | Page::Device(_)
+                ),
                 Command::Prefs => self.page == Page::Preferences,
                 _ => false,
             };
@@ -1376,6 +1379,9 @@ fn reading_age(updated: u64) -> String {
 
 fn driver_summary(spec: &crate::devices::DeviceSpec) -> (&'static str, String) {
     let mut features = Vec::new();
+    if spec.supports("onboard-profiles") {
+        features.push("板载配置与 DPI 档");
+    }
     if spec.has_g2_audio() {
         features.extend(["音效", "均衡器"]);
     }
