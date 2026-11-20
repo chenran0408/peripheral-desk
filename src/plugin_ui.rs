@@ -51,13 +51,11 @@ const BRAND: i32 = 117;
 const SEARCH: i32 = 118;
 const SEARCH_LABEL: i32 = 119;
 const BRAND_LABEL: i32 = 120;
-const MHUB: i32 = 121;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreExit {
     Close,
     Restart,
-    MHub,
 }
 
 #[derive(Default)]
@@ -173,7 +171,11 @@ impl DriverRow<'_> {
             Some("public-implementation-untested") => "依据公开实现适配，实机待验证",
             _ => "暂未记录",
         };
-        let mut lines = vec![self.description.to_owned()];
+        let mut lines = Vec::new();
+        if self.brand().eq_ignore_ascii_case("MCHOSE") || self.brand() == "迈从" {
+            lines.push("设备调节请打开「设备调节 → 迈从 M HUB」。".to_owned());
+        }
+        lines.push(self.description.to_owned());
         if let Some(browse) = self.browse {
             if !browse.vendor_aliases.is_empty() {
                 lines.push(format!("厂商别名：{}", browse.vendor_aliases.join("、")));
@@ -184,7 +186,7 @@ impl DriverRow<'_> {
             }
         }
         if !names.is_empty() {
-            lines.push(format!("支持功能：{}", names.join("、")));
+            lines.push(format!("插件能力：{}", names.join("、")));
         }
         lines.push(format!("验证范围：{verification}"));
         if let Some(details) = validation["project_validation"].as_str() {
@@ -563,15 +565,6 @@ impl Manager {
     fn selected(&self) -> Option<DriverRow<'_>> {
         self.inventory.as_ref()?.row(self.selected)
     }
-    fn offers_mhub(&self) -> bool {
-        self.browser
-            .brand
-            .as_ref()
-            .is_some_and(|b| b.eq_ignore_ascii_case("MCHOSE"))
-            || self
-                .selected()
-                .is_some_and(|p| p.brand().eq_ignore_ascii_case("MCHOSE"))
-    }
     fn installation(&self) -> &Installation {
         static MISSING: Installation = Installation::Missing;
         self.selected()
@@ -753,14 +746,6 @@ impl Manager {
 
         self.add(
             hwnd,
-            MHUB,
-            "BUTTON",
-            "打开驱动中心",
-            R::new(862, 168, 132, 30),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
             DESCRIPTION,
             "EDIT",
             "",
@@ -904,7 +889,7 @@ impl Manager {
         self.text(DESCRIPTION, &detail);
         let count = self.targets().len();
         let label = if count == 0 {
-            "请勾选设备驱动".into()
+            "请勾选设备插件".into()
         } else {
             format!("安装 / 更新已选 {count} 项")
         };
@@ -917,10 +902,6 @@ impl Manager {
     }
     unsafe fn availability(&self) {
         let ready = self.pending.is_none() && !self.dialog_open;
-        let hub = self.child(MHUB);
-        let offers_mhub = self.offers_mhub();
-        ShowWindow(hub, if offers_mhub { SW_SHOWNA } else { SW_HIDE });
-        EnableWindow(hub, (ready && offers_mhub) as i32);
         EnableWindow(self.child(RESTART), (ready && self.changed) as i32);
         EnableWindow(self.child(REFRESH), ready as i32);
         EnableWindow(self.child(LIST), ready as i32);
@@ -1285,10 +1266,6 @@ impl Manager {
                 self.populate_list();
                 self.selection(hwnd);
             }
-            MHUB if self.offers_mhub() => {
-                self.exit = StoreExit::MHub;
-                DestroyWindow(hwnd);
-            }
             RESTART if self.changed => self.restart(hwnd),
             REFRESH => self.begin(hwnd, Operation::Refresh),
             OFFLINE => self.offline(hwnd),
@@ -1360,7 +1337,7 @@ impl Manager {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
             c.gradient_v(R::new(0, 0, WIDTH, 84), blend(BG, 0xff25131a, 0.8), BG);
-            c.text("驱动商店", R::new(28, 13, 350, 32), 22, 600, TEXT, DT_LEFT);
+            c.text("插件管理", R::new(28, 13, 350, 32), 22, 600, TEXT, DT_LEFT);
             c.text(
                 "查找型号，按需安装设备插件",
                 R::new(28, 48, 360, 22),
@@ -1434,7 +1411,7 @@ impl Manager {
                 };
                 c.text(
                     &version,
-                    R::new(634, 173, if self.offers_mhub() { 220 } else { 362 }, 22),
+                    R::new(634, 173, 362, 22),
                     13,
                     400,
                     MUTED,
@@ -1906,7 +1883,7 @@ unsafe fn open_inner(owner: HWND, check_updates: bool) -> StoreExit {
     let hwnd = CreateWindowExW(
         ex_style,
         class_name.as_ptr(),
-        wide("外设盒 · 驱动管理").as_ptr(),
+        wide("外设盒 · 插件管理").as_ptr(),
         style,
         x,
         y,
@@ -2229,10 +2206,6 @@ mod tests {
             assert_eq!(manager.browser.brands, ["MCHOSE", "Razer"]);
             SendMessageW(manager.child(BRAND), CB_SETCURSEL, 1, 0);
             manager.command(window, BRAND, CBN_SELCHANGE);
-            assert_ne!(
-                GetWindowLongW(manager.child(MHUB), GWL_STYLE) as u32 & WS_VISIBLE,
-                0
-            );
             manager.command(window, SELECT_DETECTED, 0);
             assert_eq!(manager.checked, BTreeSet::from(["a".into()]));
 
@@ -2248,10 +2221,6 @@ mod tests {
             manager.command(window, BRAND, CBN_SELCHANGE);
             assert!(manager.browser.visible.is_empty());
             assert!(manager.selected().is_none());
-            assert_eq!(
-                GetWindowLongW(manager.child(MHUB), GWL_STYLE) as u32 & WS_VISIBLE,
-                0
-            );
             SetWindowTextW(manager.child(SEARCH), wide("viPEr V3").as_ptr());
             manager.command(window, SEARCH, EN_CHANGE);
             assert_eq!(manager.selected().unwrap().id, "c");
@@ -2266,11 +2235,7 @@ mod tests {
             );
             manager.command(window, SELECT_NONE, 0);
             assert!(manager.targets().is_empty());
-            SendMessageW(manager.child(BRAND), CB_SETCURSEL, 1, 0);
-            manager.command(window, BRAND, CBN_SELCHANGE);
-            manager.command(window, MHUB, BN_CLICKED);
-            assert!(manager.exit == StoreExit::MHub);
-            assert_eq!(IsWindow(window), 0);
+            DestroyWindow(window);
         }
     }
 }

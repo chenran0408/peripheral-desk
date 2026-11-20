@@ -1,7 +1,7 @@
 //! Device configuration/diagnostic window. Import and hardware apply are separate.
 use crate::{
     configuration::{self, OperationReport},
-    devices::REGISTRY,
+    devices::{DeviceSpec, REGISTRY},
     hid::wide,
     paint::{self, Canvas, R},
 };
@@ -28,24 +28,57 @@ const EXPORT: usize = 202;
 const IMPORT: usize = 203;
 const APPLY: usize = 204;
 const DIAGNOSTIC: usize = 205;
+const MHUB_GUIDE: &str = "设备设置请前往「设备调节 → 迈从 M HUB」。本地档案可以在此导入和导出。";
+
+fn available_actions(device: Option<&DeviceSpec>) -> &'static [usize] {
+    match device {
+        None => &[DIAGNOSTIC],
+        Some(spec) if spec.mchose() => &[EXPORT, IMPORT, DIAGNOSTIC],
+        Some(_) => &[EXPORT, IMPORT, APPLY, DIAGNOSTIC],
+    }
+}
+
 struct Window {
     combo: HWND,
     log: HWND,
     buttons: Vec<HWND>,
-    keys: Vec<Option<String>>,
     font: HFONT,
     brush: HBRUSH,
     dpi: u32,
     pending: Option<Receiver<Result<OperationReport, String>>>,
 }
 impl Window {
-    unsafe fn key(&self) -> Option<String> {
-        let index = SendMessageW(self.combo, CB_GETCURSEL, 0, 0);
-        if index < 0 {
-            None
-        } else {
-            self.keys.get(index as usize).cloned().flatten()
+    unsafe fn device(&self) -> Option<&'static DeviceSpec> {
+        let selection = usize::try_from(SendMessageW(self.combo, CB_GETCURSEL, 0, 0)).ok()?;
+        REGISTRY.get(selection.checked_sub(1)?)
+    }
+    unsafe fn selection(&self, hwnd: HWND) {
+        let device = self.device();
+        let actions = available_actions(device);
+        let width = ((864 - 24 * (actions.len() as i32 - 1)) / actions.len() as i32).min(272);
+        let scale = |n: i32| n * self.dpi as i32 / 96;
+        for &button in &self.buttons {
+            let id = GetDlgCtrlID(button) as usize;
+            if let Some(index) = actions.iter().position(|&action| action == id) {
+                SetWindowPos(
+                    button,
+                    null_mut(),
+                    scale(28 + (width + 24) * index as i32),
+                    scale(386),
+                    scale(width),
+                    scale(40),
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                );
+            } else {
+                ShowWindow(button, SW_HIDE);
+            }
         }
+        self.status(match device {
+            Some(spec) if spec.mchose() => MHUB_GUIDE,
+            Some(_) => "导入会恢复本地记录。要将支持的设置写回硬件，请选择「应用到设备」。",
+            None => "可导出所有设备的匿名诊断。选择具体设备后可管理其本地配置。",
+        });
+        InvalidateRect(hwnd, null(), 0);
     }
     unsafe fn status(&self, text: &str) {
         SetWindowTextW(self.log, wide(text).as_ptr());
@@ -63,21 +96,18 @@ impl Window {
         );
     }
     unsafe fn run(&mut self, hwnd: HWND, id: usize) {
-        if self.pending.is_some() || ![EXPORT, IMPORT, APPLY, DIAGNOSTIC].contains(&id) {
+        let device = self.device();
+        if self.pending.is_some() || !available_actions(device).contains(&id) {
             return;
         }
-        let key = self.key();
-        if id != DIAGNOSTIC && key.is_none() {
-            self.status("请先选择具体设备。所有设备选项仅用于导出匿名诊断。");
-            return;
-        }
+        let key = device.map(|spec| spec.key);
         let path = if id == APPLY {
             None
         } else {
             let filename = if id == DIAGNOSTIC {
                 "PeripheralDesk-diagnostics.json".into()
             } else {
-                format!("{}-configuration.json", key.as_deref().unwrap())
+                format!("{}-configuration.json", key.unwrap())
             };
             match choose_file(hwnd, id == IMPORT, &filename) {
                 Ok(Some(path)) => Some(path),
@@ -99,16 +129,14 @@ impl Window {
         });
         thread::spawn(move || {
             let result = match id {
-                EXPORT => configuration::export_configuration(
-                    key.as_deref().unwrap(),
-                    path.as_deref().unwrap(),
-                ),
-                IMPORT => configuration::import_configuration(
-                    key.as_deref().unwrap(),
-                    path.as_deref().unwrap(),
-                ),
-                APPLY => configuration::apply_configuration(key.as_deref().unwrap()),
-                _ => configuration::export_diagnostics(key.as_deref(), path.as_deref().unwrap()),
+                EXPORT => {
+                    configuration::export_configuration(key.unwrap(), path.as_deref().unwrap())
+                }
+                IMPORT => {
+                    configuration::import_configuration(key.unwrap(), path.as_deref().unwrap())
+                }
+                APPLY => configuration::apply_configuration(key.unwrap()),
+                _ => configuration::export_diagnostics(key, path.as_deref().unwrap()),
             };
             let _ = tx.send(result);
         });
@@ -171,6 +199,17 @@ impl Window {
             paint::PANEL,
             Some(paint::BORDER),
         );
+        let device_action = match self.device() {
+            None => (
+                "导出诊断",
+                "生成所有设备的匿名诊断，用于排查连接和读取问题。",
+            ),
+            Some(spec) if spec.mchose() => (
+                "迈从设备调节",
+                "在「设备调节 → 迈从 M HUB」中修改板载设置。",
+            ),
+            Some(_) => ("应用到设备", "读取原值，再写入支持恢复的差异项。"),
+        };
         for (y, title, description) in [
             (
                 215,
@@ -182,11 +221,7 @@ impl Window {
                 "导入本地",
                 "先备份，再恢复本地记录；不会立即改变设备。",
             ),
-            (
-                311,
-                "应用到设备",
-                "单独读取基线，只写支持且可恢复的差异项；未知内容会跳过。",
-            ),
+            (311, device_action.0, device_action.1),
         ] {
             canvas.text(title, R::new(48, y, 130, 24), 14, 600, paint::TEXT, DT_LEFT);
             canvas.text(
@@ -339,6 +374,8 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             let notice = (w >> 16) & 0xffff;
             if id == IDCANCEL as usize {
                 SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            } else if id == DEVICE && notice == CBN_SELCHANGE as usize {
+                window.selection(hwnd);
             } else if notice == BN_CLICKED as usize {
                 window.run(hwnd, id);
             }
@@ -394,14 +431,10 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
         wide("Microsoft YaHei UI").as_ptr(),
     );
     let brush = CreateSolidBrush(0x00261e1e);
-    let keys = std::iter::once(None)
-        .chain(REGISTRY.iter().map(|spec| Some(spec.key.to_string())))
-        .collect();
     let mut window = Box::new(Window {
         combo: null_mut(),
         log: null_mut(),
         buttons: vec![],
-        keys,
         font,
         brush,
         dpi,
@@ -511,7 +544,7 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
         R::new(28, 478, 864, 114),
         ES_MULTILINE as u32 | ES_READONLY as u32 | ES_AUTOVSCROLL as u32 | WS_VSCROLL | WS_BORDER,
     );
-    window.status("可先导出最近记录，也可导入旧配置。导入只恢复本地记录；需要时再单独应用到设备。");
+    window.selection(hwnd);
     SetTimer(hwnd, 1, 80, None);
     EnableWindow(owner, 0);
     ShowWindow(hwnd, SW_SHOW);
@@ -540,5 +573,29 @@ pub unsafe fn open(owner: HWND, model: Option<usize>) {
     DeleteObject(window.brush);
     if let Some(code) = quit {
         PostQuitMessage(code);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::devices::DeviceManifest;
+
+    #[test]
+    fn configuration_archive_actions_follow_the_device_editor() {
+        for (brand, expected) in [
+            ("MCHOSE", &[EXPORT, IMPORT, DIAGNOSTIC][..]),
+            ("RAZER", &[EXPORT, IMPORT, APPLY, DIAGNOSTIC][..]),
+        ] {
+            let device = serde_json::from_value::<DeviceManifest>(serde_json::json!({
+                "key":"test", "name":"Test", "brand":brand,
+                "kind":"mouse", "matches":[{"vid":1,"pid":2}]
+            }))
+            .unwrap()
+            .into_spec()
+            .unwrap();
+            assert_eq!(available_actions(Some(&device)), expected);
+        }
+        assert_eq!(available_actions(None), [DIAGNOSTIC]);
     }
 }

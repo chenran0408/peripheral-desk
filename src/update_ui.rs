@@ -83,7 +83,7 @@ fn size(bytes: u64) -> String {
 fn check_plugins() -> Result<String, String> {
     let installed = plugin_manager::installed_all()?;
     if installed.is_empty() {
-        return Ok("尚未安装设备插件。可前往驱动商店按需选择设备。".into());
+        return Ok("尚未安装设备插件。可前往插件管理按需选择设备。".into());
     }
     let packages = plugin_manager::refresh_catalog()?;
     let mut updates = Vec::new();
@@ -114,7 +114,7 @@ fn check_plugins() -> Result<String, String> {
     };
     if missing > 0 {
         text.push_str(&format!(
-            "\r\n其中 {missing} 个不在当前通道；可在驱动商店切换通道查看。"
+            "\r\n其中 {missing} 个不在当前通道；可在插件管理切换通道查看。"
         ));
     }
     Ok(text)
@@ -534,7 +534,7 @@ impl Updater {
             c.round(R::new(44, 640, 580, 76), RADIUS_MD, FIELD, Some(BORDER));
             c.round(R::new(644, 640, 252, 42), RADIUS_MD, FIELD, Some(BORDER));
             c.text(
-                "设备插件 · 使用驱动商店所选通道",
+                "设备插件 · 使用插件管理所选通道",
                 R::new(44, 606 + SPACE_2, 800, 24),
                 14,
                 600,

@@ -20,6 +20,7 @@ use windows_sys::Win32::{
 };
 
 pub(crate) mod fx;
+mod navigation;
 mod pages;
 mod pointer_editor;
 mod tray;
@@ -46,6 +47,9 @@ fn widget_key(command: Command) -> u64 {
         Command::DriverManager => 0x101,
         Command::CoreUpdate => 0x102,
         Command::Prefs => 0x103,
+        Command::Drivers => 0x104,
+        Command::MHub => 0x105,
+        Command::Battery(model) => 0x4000 + model as u64,
         Command::Device(model) => 0x1000 + model as u64,
         Command::System(model) => 0x8000 + model as u64,
         _ => 0,
@@ -80,6 +84,8 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Home,
+    Drivers,
+    Battery(usize),
     Device(usize),
     System(usize),
     Preferences,
@@ -87,6 +93,8 @@ enum Page {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Command {
     Home,
+    Drivers,
+    Battery(usize),
     Device(usize),
     System(usize),
     Refresh,
@@ -139,6 +147,7 @@ struct App {
     audio_page: u8,
     eq_drag: Option<(Tuning, R)>,
     home_page: usize,
+    drivers_page: usize,
     controls: Vec<Button>,
     pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
@@ -226,6 +235,7 @@ pub fn run(hidden: bool, battery: bool) {
             audio_page: 0,
             eq_drag: None,
             home_page: 0,
+            drivers_page: 0,
             controls: vec![],
             pending: None,
             modal_open: false,
@@ -440,7 +450,9 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         OPEN => {
             let page = if w > 0 && w <= REGISTRY.len() {
-                Page::Device(w - 1)
+                Page::Battery(w - 1)
+            } else if w > REGISTRY.len() && w - REGISTRY.len() <= a.snapshot.system_devices.len() {
+                Page::System(w - REGISTRY.len() - 1)
             } else {
                 Page::Home
             };
@@ -542,7 +554,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_KEYDOWN if w == VK_ESCAPE as usize => {
             if !a.modal_open {
-                a.navigate(hwnd, Page::Home);
+                let parent = if matches!(a.page, Page::Device(_)) {
+                    Page::Drivers
+                } else {
+                    Page::Home
+                };
+                a.navigate(hwnd, parent);
             }
             0
         }
@@ -685,9 +702,9 @@ impl App {
         );
         self.add(hwnd, "×", R::new(w - 56, 15, 34, 32), GHOST, Command::Close);
         let entries = [
-            ("我的设备", Command::Home),
-            ("驱动商店", Command::DriverManager),
-            ("检查更新", Command::CoreUpdate),
+            ("电量", Command::Home),
+            ("设备调节", Command::Drivers),
+            ("插件管理", Command::DriverManager),
             ("偏好设置", Command::Prefs),
         ];
         for (i, (label, command)) in entries.into_iter().enumerate() {
@@ -699,120 +716,66 @@ impl App {
                 command,
             );
         }
-        let total_devices = REGISTRY.len() + self.snapshot.system_devices.len();
-        let page_size = 4;
-        let pages = total_devices.div_ceil(page_size).max(1);
-        self.home_page = self.home_page.min(pages - 1);
-        for (slot, index) in (self.home_page * page_size..total_devices)
-            .take(page_size)
-            .enumerate()
-        {
-            let name = if index < REGISTRY.len() {
-                REGISTRY[index].name.to_owned()
-            } else {
-                self.snapshot.system_devices[index - REGISTRY.len()]
-                    .name
-                    .clone()
-            };
-            self.add(
-                hwnd,
-                &name,
-                R::new(12, 286 + slot as i32 * 42, SIDEBAR - 24, 38),
-                ENTRY,
-                if index < REGISTRY.len() {
-                    Command::Device(index)
-                } else {
-                    Command::System(index - REGISTRY.len())
-                },
-            );
-        }
-        if pages > 1 {
-            self.add(
-                hwnd,
-                "‹",
-                R::new(34, h - 58, 44, 34),
-                GHOST,
-                Command::HomePage(-1),
-            );
-            self.add(
-                hwnd,
-                "›",
-                R::new(126, h - 58, 44, 34),
-                GHOST,
-                Command::HomePage(1),
-            );
-        }
-        if self.hub_open && !matches!(self.page, Page::Device(m) if self.hub_controls(m)) {
-            self.add(
-                hwnd,
-                "返回驱动中心",
-                R::new(12, self.height - 114, SIDEBAR - 24, 36),
-                GHOST,
-                Command::MHub,
-            );
-        }
         match self.page {
-            Page::Home => {
-                let total = REGISTRY.len() + self.snapshot.system_devices.len();
-                if total == 0 {
-                    let center_y = HOME_CONTENT_Y + (h - HOME_CONTENT_Y - 86) / 2;
+            Page::Home | Page::Drivers => {
+                let power = self.page == Page::Home;
+                let entries = if power {
+                    self.battery_entries()
+                } else {
+                    self.driver_entries()
+                };
+                let pages = entries.len().div_ceil(4).max(1);
+                let index = if power {
+                    &mut self.home_page
+                } else {
+                    &mut self.drivers_page
+                };
+                *index = (*index).min(pages - 1);
+                let page = *index;
+                if power {
                     self.add(
                         hwnd,
-                        "＋  添加设备驱动",
-                        R::new((w + SIDEBAR) / 2 - 132, center_y + 8, 264, 48),
-                        CHIP,
-                        Command::AddDevice,
+                        "刷新电量",
+                        R::new(w - 158, 92, 124, 38),
+                        GHOST,
+                        Command::Refresh,
                     );
-                }
-                let cols = 2;
-                let cw = ((w - SIDEBAR - 52 - 18 * (cols - 1)) / cols).max(250);
-                let card_h = ((h - HOME_CONTENT_Y - 100) / 2).min(360);
-                for (slot, index) in (self.home_page * 4..total).take(4).enumerate() {
-                    let x = SIDEBAR + 24 + (slot as i32 % cols) * (cw + 18);
-                    let y = HOME_CONTENT_Y + slot as i32 / cols * (card_h + 16);
-                    if y + card_h > h - 78 {
-                        break;
+                    if entries.is_empty() {
+                        let center_y = HOME_CONTENT_Y + (h - HOME_CONTENT_Y - 86) / 2;
+                        self.add(
+                            hwnd,
+                            "选择设备插件",
+                            R::new((w + SIDEBAR) / 2 - 132, center_y + 8, 264, 48),
+                            CHIP,
+                            Command::AddDevice,
+                        );
                     }
-                    let name = if index < REGISTRY.len() {
-                        REGISTRY[index].name.to_owned()
-                    } else {
-                        self.snapshot.system_devices[index - REGISTRY.len()]
-                            .name
-                            .clone()
-                    };
-                    self.add(
-                        hwnd,
-                        &name,
-                        R::new(x, y, cw, card_h),
-                        CARD,
-                        if index < REGISTRY.len() {
-                            Command::Device(index)
-                        } else {
-                            Command::System(index - REGISTRY.len())
-                        },
-                    );
                 }
-                self.add(
-                    hwnd,
-                    "重新读取",
-                    R::new(w - 268, h - 56, 116, 34),
-                    GHOST,
-                    Command::Refresh,
-                );
-                self.add(
-                    hwnd,
-                    "配置备份",
-                    R::new(w - 396, h - 56, 116, 34),
-                    GHOST,
-                    Command::Configuration,
-                );
-                self.add(
-                    hwnd,
-                    "退出程序",
-                    R::new(w - 144, h - 56, 112, 34),
-                    GHOST,
-                    Command::Quit,
-                );
+                let cw = (w - SIDEBAR - 70) / 2;
+                let card_h = ((h - HOME_CONTENT_Y - 100) / 2).min(360);
+                for (slot, command) in entries.into_iter().skip(page * 4).take(4).enumerate() {
+                    let name = match command {
+                        Command::Battery(m) | Command::Device(m) => REGISTRY[m].name.to_owned(),
+                        Command::System(i) => self.snapshot.system_devices[i].name.clone(),
+                        Command::MHub => "迈从 M HUB".into(),
+                        _ => unreachable!(),
+                    };
+                    let x = SIDEBAR + 24 + (slot as i32 % 2) * (cw + 18);
+                    let y = HOME_CONTENT_Y + slot as i32 / 2 * (card_h + 16);
+                    self.add(hwnd, &name, R::new(x, y, cw, card_h), CARD, command);
+                }
+                if pages > 1 {
+                    for (delta, label, x) in [(-1, "上一页", w - 284), (1, "下一页", w - 156)]
+                    {
+                        self.add(
+                            hwnd,
+                            label,
+                            R::new(x, h - 56, 116, 34),
+                            GHOST,
+                            Command::HomePage(delta),
+                        );
+                    }
+                }
             }
             Page::Device(m) => {
                 let rx = 394;
@@ -830,19 +793,6 @@ impl App {
                     GHOST,
                     Command::Evidence,
                 );
-                if spec.mchose() || self.hub_controls(m) {
-                    self.add(
-                        hwnd,
-                        if self.hub_controls(m) {
-                            "返回驱动中心"
-                        } else {
-                            "打开驱动中心"
-                        },
-                        R::new(SIDEBAR + 23, h - 148, 144, 38),
-                        CHIP,
-                        Command::MHub,
-                    );
-                }
                 if !self.hub_controls(m) && !self.show_evidence {
                     if spec.supports("polling-rate-read") || spec.supports("dpi-stages-read") {
                         self.add(
@@ -898,14 +848,6 @@ impl App {
                     }
                     if spec.supports("bindings") || spec.supports("key-colors") {
                         tabs.push(("按键与板载设置", Command::ControlsEditor));
-                    }
-                    if spec.supports("software-macro-trigger")
-                        || matches!(
-                            spec.key,
-                            "razer-deathadder-v3-pro" | "mchose-a5-ultra" | "mchose-g75-pro"
-                        )
-                    {
-                        tabs.push(("软件宏", Command::ResidentMacros));
                     }
                     let tab_w = ((w - SIDEBAR - 132) / tabs.len().max(1) as i32).min(126);
                     for (i, (label, command)) in tabs.into_iter().enumerate() {
@@ -1110,7 +1052,7 @@ impl App {
                 }
                 self.add(
                     hwnd,
-                    "重新读取",
+                    "刷新设备状态",
                     R::new(w - 150, h - 61, 122, 39),
                     GHOST,
                     Command::Refresh,
@@ -1123,21 +1065,28 @@ impl App {
                     Command::Diagnose,
                 );
             }
-            Page::System(_) => {
+            Page::Battery(_) | Page::System(_) => {
                 self.add(
                     hwnd,
-                    "重新读取",
+                    "刷新电量",
                     R::new(w - 150, h - 61, 122, 39),
                     GHOST,
                     Command::Refresh,
                 );
             }
             Page::Preferences => {
+                let left = SIDEBAR + 48;
+                let available = w - left - 82;
                 for (i, value) in [30, 60, 120, 300, 600, 1800].iter().enumerate() {
                     self.add(
                         hwnd,
                         &format!("{value} 秒"),
-                        R::new(330 + i as i32 * 116, 251, 104, 36),
+                        R::new(
+                            left + i as i32 * (available / 6).min(116),
+                            251,
+                            (available / 6).min(116) - 10,
+                            36,
+                        ),
                         CHIP,
                         Command::Interval(*value),
                     );
@@ -1146,7 +1095,12 @@ impl App {
                     self.add(
                         hwnd,
                         &format!("{value}%"),
-                        R::new(330 + i as i32 * 84, 346, 72, 36),
+                        R::new(
+                            left + i as i32 * (available / 8).min(84),
+                            346,
+                            (available / 8).min(84) - 8,
+                            36,
+                        ),
                         CHIP,
                         Command::Threshold(*value),
                     );
@@ -1154,16 +1108,39 @@ impl App {
                 self.add(
                     hwnd,
                     "启用低电提醒",
-                    R::new(330, 441, 180, 40),
+                    R::new(left, 441, 180, 40),
                     CHIP,
                     Command::Notices,
                 );
+                for (i, (label, command)) in [
+                    ("配置备份", Command::Configuration),
+                    ("导出诊断", Command::Diagnose),
+                    ("常驻软件宏", Command::ResidentMacros),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    self.add(
+                        hwnd,
+                        label,
+                        R::new(left + i as i32 * 154, 536, 142, 38),
+                        GHOST,
+                        command,
+                    );
+                }
                 self.add(
                     hwnd,
-                    "导出设备诊断",
-                    R::new(330, 536, 180, 40),
+                    "检查更新",
+                    R::new(w - 284, h - 56, 116, 34),
                     GHOST,
-                    Command::Diagnose,
+                    Command::CoreUpdate,
+                );
+                self.add(
+                    hwnd,
+                    "退出程序",
+                    R::new(w - 156, h - 56, 116, 34),
+                    GHOST,
+                    Command::Quit,
                 );
                 self.add(
                     hwnd,
@@ -1172,7 +1149,7 @@ impl App {
                     } else {
                         "开机启动：关闭"
                     },
-                    R::new(330, 625, 200, 40),
+                    R::new(left, 625, 200, 40),
                     CHIP,
                     Command::Startup,
                 );
@@ -1199,11 +1176,6 @@ impl App {
         }
     }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
-        match page {
-            Page::Device(model) => self.home_page = model / 4,
-            Page::System(model) => self.home_page = (REGISTRY.len() + model) / 4,
-            Page::Home | Page::Preferences => {}
-        }
         self.page = page;
         self.show_evidence = false;
         self.pointer_sample = None;
@@ -1217,6 +1189,57 @@ impl App {
         self.layout(hwnd);
         self.poll_detail_on_entry(hwnd);
         InvalidateRect(hwnd, null(), 0);
+    }
+    unsafe fn open_resident_macros(&mut self, hwnd: HWND) {
+        if self.pending.is_some() || self.modal_open || !self.queued.is_empty() {
+            return;
+        }
+        let menu = CreatePopupMenu();
+        let mut count = 0;
+        for (i, spec) in REGISTRY.iter().enumerate() {
+            if spec.supports("software-macro-trigger")
+                || matches!(
+                    spec.key,
+                    "mchose-a5-ultra" | "mchose-g75-pro" | "razer-deathadder-v3-pro"
+                )
+            {
+                let flags = if self.hub_controls(i) {
+                    MF_STRING | MF_GRAYED
+                } else {
+                    MF_STRING
+                };
+                AppendMenuW(menu, flags, i + 1, wide(spec.name).as_ptr());
+                count += 1;
+            }
+        }
+        let mut selected = 0;
+        if count > 0 {
+            let button = self
+                .controls
+                .iter()
+                .find(|b| b.command == Command::ResidentMacros);
+            let mut rect: RECT = zeroed();
+            GetWindowRect(button.map_or(hwnd, |b| b.hwnd), &mut rect);
+            selected = TrackPopupMenu(
+                menu,
+                TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                rect.left,
+                rect.bottom,
+                0,
+                hwnd,
+                null(),
+            );
+        } else {
+            self.set_status("已安装的插件中没有支持常驻软件宏的设备", false);
+            self.render(hwnd);
+        }
+        DestroyMenu(menu);
+        if selected > 0 {
+            self.modal_open = true;
+            crate::resident_macro_ui::open(hwnd, selected as usize - 1);
+            self.modal_open = false;
+            self.begin(hwnd, None);
+        }
     }
     unsafe fn open_mhub(&mut self, hwnd: HWND) {
         if self.hub_open {
@@ -1270,7 +1293,7 @@ impl App {
                 match peripheral_desk::resident_macros::list(spec.key) {
                     Ok(state) if !state.active.is_empty() || !state.library.recovery.is_empty() => {
                         message(&format!(
-                            "{} 正在使用软件宏。请在「软件宏」中停用并恢复按键后打开驱动中心。",
+                            "{} 正在使用软件宏。请到「偏好设置 → 常驻软件宏」选择此设备，停用并恢复原键，再打开 M HUB。",
                             spec.name
                         ));
                         return;
@@ -1403,10 +1426,6 @@ impl App {
                         DestroyWindow(hwnd);
                         return;
                     }
-                    crate::plugin_ui::StoreExit::MHub => {
-                        self.open_mhub(hwnd);
-                        return;
-                    }
                     crate::plugin_ui::StoreExit::Close => {}
                 }
                 self.images = Images::load();
@@ -1434,8 +1453,8 @@ impl App {
                     }
                 }
             }
+            Command::ResidentMacros => self.open_resident_macros(hwnd),
             Command::ControlsEditor
-            | Command::ResidentMacros
             | Command::PresetLibrary
             | Command::HeadsetLighting
             | Command::GenericLighting => {
@@ -1446,7 +1465,6 @@ impl App {
                     self.modal_open = true;
                     match command {
                         Command::ControlsEditor => crate::controls_ui::open(hwnd, model),
-                        Command::ResidentMacros => crate::resident_macro_ui::open(hwnd, model),
                         Command::PresetLibrary => crate::preset_ui::open(hwnd, model),
                         Command::GenericLighting => crate::generic_lighting_ui::open(hwnd, model),
                         _ => crate::lighting_ui::open(hwnd),
@@ -1481,14 +1499,18 @@ impl App {
                 self.layout(hwnd);
             }
             Command::HomePage(delta) => {
-                let total = REGISTRY.len() + self.snapshot.system_devices.len();
-                self.home_page = (self.home_page as i32 + delta).clamp(
-                    0,
-                    (total.div_ceil(if total > 3 { 4 } else { 3 }) - 1) as i32,
-                ) as usize;
+                let page = if self.page == Page::Drivers {
+                    &mut self.drivers_page
+                } else {
+                    &mut self.home_page
+                };
+                *page = page.saturating_add_signed(delta as isize);
                 self.layout(hwnd);
             }
             Command::Home => self.navigate(hwnd, Page::Home),
+            Command::Drivers => self.navigate(hwnd, Page::Drivers),
+            Command::Battery(m) => self.navigate(hwnd, Page::Battery(m)),
+            Command::Device(m) if REGISTRY[m].mchose() => self.open_mhub(hwnd),
             Command::Device(m) => self.navigate(hwnd, Page::Device(m)),
             Command::System(m) => self.navigate(hwnd, Page::System(m)),
             Command::Prefs => self.navigate(hwnd, Page::Preferences),
@@ -1768,9 +1790,6 @@ impl App {
         }
         self.update_ring_targets();
         self.fx_wake(hwnd);
-        let total = REGISTRY.len() + self.snapshot.system_devices.len();
-        let page_size = 4;
-        self.home_page = self.home_page.min(total.saturating_sub(1) / page_size);
         if self.queued.is_empty() {
             self.preview_dpi = None;
         }
@@ -1790,17 +1809,15 @@ impl App {
             ),
             (_, Err(e)) => self.set_status(&format!("本地偏好保存失败：{e}"), true),
             _ => {
-                let count = self.snapshot.devices.iter().filter(|d| d.fresh).count()
-                    + self.snapshot.system_devices.len();
                 self.set_status(
-                    &if let Some(notice) = profile_notice {
-                        notice.into()
+                    if let Some(notice) = profile_notice {
+                        notice
                     } else if writing {
-                        "设置已保存，读回确认成功".into()
+                        "设置已保存，读回确认成功"
                     } else if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
-                        "打开驱动仓库添加设备；新驱动安装后自动重启生效".into()
+                        "在插件管理中选择需要查看电量的设备"
                     } else {
-                        format!("{count} 台设备在线 · 状态已更新")
+                        "设备状态已更新"
                     },
                     false,
                 );
@@ -2085,12 +2102,15 @@ impl App {
                     }
                 }
                 Command::HomePage(delta) => {
-                    let total = REGISTRY.len() + self.snapshot.system_devices.len();
-                    let page_size = 4;
-                    if delta < 0 {
-                        self.home_page > 0
+                    let (page, count) = if self.page == Page::Drivers {
+                        (self.drivers_page, self.driver_entries().len())
                     } else {
-                        (self.home_page + 1) * page_size < total
+                        (self.home_page, self.battery_entries().len())
+                    };
+                    if delta < 0 {
+                        page > 0
+                    } else {
+                        (page + 1) * 4 < count
                     }
                 }
                 Command::ReadPointer | Command::PointerEditor => {
@@ -2119,6 +2139,8 @@ impl App {
             self.background(&c);
             match self.page {
                 Page::Home => self.home(&c),
+                Page::Drivers => self.drivers(&c),
+                Page::Battery(m) => self.battery_detail(&c, m),
                 Page::Device(m) => {
                     self.detail(&c, m);
                     self.device_summary(&c, m);

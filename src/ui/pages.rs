@@ -1,6 +1,6 @@
-//! Page painting for the main window: home dashboard, device detail and preferences.
+//! Painting for battery monitoring, device controls and application preferences.
 use super::widgets::{FONT_LG, FONT_MD, RADIUS_LG, RADIUS_MD};
-use super::{widget_key, App, Command, Page, CARD, CHIP, ENTRY, GHOST, HOME_CONTENT_Y, SIDEBAR};
+use super::{widget_key, App, Command, Page, CARD, ENTRY, GHOST, HOME_CONTENT_Y, SIDEBAR};
 use crate::{
     backend::{self, Action},
     devices::{Kind, REGISTRY},
@@ -168,14 +168,6 @@ impl App {
             DIM,
             DT_LEFT,
         );
-        c.text(
-            "设备",
-            R::new(18, 252, SIDEBAR - 36, 20),
-            11,
-            600,
-            DIM,
-            DT_LEFT,
-        );
     }
 
     pub(super) unsafe fn device_summary(&self, c: &Canvas, m: usize) {
@@ -229,44 +221,14 @@ impl App {
             BORDER,
             1.,
         );
-        if spec.supports("battery") || s.percent.is_some() {
-            c.ring(
-                R::new(panel.x + 29, panel.y + 272, 100, 100),
-                s.percent,
-                s.fresh,
-            );
-            c.text(
-                if !s.fresh && s.percent.is_some() {
-                    "上次读数"
-                } else {
-                    power(s)
-                },
-                R::new(panel.x + 8, panel.y + 386, panel.w - 16, 24),
-                11,
-                400,
-                MUTED,
-                DT_CENTER,
-            );
-        } else {
-            c.text(
-                kind_name(spec.kind),
-                R::new(panel.x + 12, panel.y + 266, panel.w - 24, 24),
-                14,
-                500,
-                TEXT,
-                DT_CENTER,
-            );
-            if spec.has_g2_audio() {
-                c.text(
-                    "USB 供电",
-                    R::new(panel.x + 12, panel.y + 298, panel.w - 24, 24),
-                    12,
-                    400,
-                    MUTED,
-                    DT_CENTER,
-                );
-            }
-        }
+        c.text(
+            kind_name(spec.kind),
+            R::new(panel.x + 14, panel.y + 264, panel.w - 28, 24),
+            12,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
     }
 
     pub(super) fn eq_hit(&self, x: i32, y: i32) -> Option<(Tuning, R)> {
@@ -349,173 +311,198 @@ impl App {
     }
     pub(super) unsafe fn background(&self, c: &Canvas) {
         c.rect(R::new(0, 0, self.width, self.height), BG);
-        c.gradient_v(R::new(0, 0, SIDEBAR, self.height), 0xff111117, 0xff0e0e12);
-        c.line(SIDEBAR, 0, SIDEBAR, self.height, BORDER, 1.);
         c.gradient_v(
             R::new(SIDEBAR + 1, 0, self.width - SIDEBAR - 1, 66),
             crate::paint::blend(BG, 0xff25131a, self.fx.nav.value()),
             BG,
         );
         c.line(SIDEBAR + 24, 65, self.width - 28, 65, 0xff19191f, 1.);
-        c.text(
-            "外设盒",
-            R::new(20, 20, SIDEBAR - 40, 30),
-            18,
-            600,
-            TEXT,
-            DT_LEFT,
-        );
-        c.text(
-            "PERIPHERAL DESK",
-            R::new(20, 46, SIDEBAR - 40, 18),
-            10,
-            500,
-            DIM,
-            DT_LEFT,
-        );
-        c.text(
-            "设备",
-            R::new(18, 252, SIDEBAR - 36, 20),
-            11,
-            600,
-            DIM,
-            DT_LEFT,
-        );
     }
-    pub(super) unsafe fn home(&self, c: &Canvas) {
+
+    unsafe fn page_heading(&self, c: &Canvas, title: &str, description: &str) {
+        let left = SIDEBAR + 24;
+        let width = self.width - left - 28;
+        c.text(title, R::new(left, 84, width, 38), 26, 600, TEXT, DT_LEFT);
         c.text(
-            "我的设备",
-            R::new(SIDEBAR + 24, 88, 600, 34),
-            24,
-            600,
-            TEXT,
-            DT_LEFT,
-        );
-        c.text(
-            if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
-                "尚未加载设备驱动，先从驱动商店添加你的设备"
-            } else if REGISTRY.is_empty() {
-                "选择设备，查看 Windows 提供的电量"
-            } else {
-                "选择设备，查看电量并调整设置"
-            },
-            R::new(SIDEBAR + 26, 124, 700, 23),
+            description,
+            R::new(left + 1, 125, width, 22),
             13,
             400,
             MUTED,
             DT_LEFT,
         );
-        if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
-            let center_y = HOME_CONTENT_Y + (self.height - HOME_CONTENT_Y - 86) / 2;
-            c.round(
-                R::new(
-                    SIDEBAR + 24,
-                    HOME_CONTENT_Y,
-                    self.width - SIDEBAR - 48,
-                    self.height - HOME_CONTENT_Y - 86,
-                ),
-                20,
-                PANEL,
-                Some(BORDER),
-            );
-            c.text(
-                "从添加设备驱动开始",
-                R::new(SIDEBAR + 64, center_y - 98, self.width - SIDEBAR - 128, 42),
-                28,
-                600,
-                TEXT,
-                DT_CENTER,
-            );
-            c.text(
-                "驱动按设备下载，只安装你需要的型号。",
-                R::new(SIDEBAR + 64, center_y - 44, self.width - SIDEBAR - 128, 26),
-                15,
-                400,
-                MUTED,
-                DT_CENTER,
-            );
-            c.text(
-                "安装完成后，按提示重启即可使用。",
-                R::new(SIDEBAR + 64, center_y + 76, self.width - SIDEBAR - 128, 26),
-                13,
-                400,
-                DIM,
-                DT_CENTER,
-            );
+    }
+
+    pub(super) unsafe fn home(&self, c: &Canvas) {
+        self.page_heading(c, "电量", "查看外设的剩余电量、充电状态和上次读数。");
+        if !self.battery_entries().is_empty() {
+            return;
+        }
+        let panel = R::new(
+            SIDEBAR + 24,
+            HOME_CONTENT_Y,
+            self.width - SIDEBAR - 52,
+            self.height - HOME_CONTENT_Y - 86,
+        );
+        let center_y = panel.y + panel.h / 2;
+        c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
+        c.text(
+            "暂无电量设备",
+            R::new(panel.x + 24, center_y - 98, panel.w - 48, 42),
+            24,
+            600,
+            TEXT,
+            DT_CENTER,
+        );
+        c.text(
+            "连接蓝牙设备或手柄，或为你的外设安装电量插件。",
+            R::new(panel.x + 24, center_y - 50, panel.w - 48, 30),
+            14,
+            400,
+            MUTED,
+            DT_CENTER,
+        );
+    }
+
+    pub(super) unsafe fn drivers(&self, c: &Canvas) {
+        self.page_heading(
+            c,
+            "设备调节",
+            "迈从设备使用内置 M HUB，其他设备选择对应的型号。",
+        );
+    }
+
+    fn battery_view(&self, command: Command) -> Option<BatteryView<'_>> {
+        match command {
+            Command::Battery(m) => {
+                let spec = REGISTRY.get(m)?;
+                let state = self.snapshot.devices.get(m)?;
+                Some(BatteryView {
+                    name: spec.name,
+                    category: format!("{} · {}", spec.brand, kind_name(spec.kind)),
+                    state,
+                    value: state
+                        .percent
+                        .map(|p| format!("{p}%"))
+                        .unwrap_or_else(|| "未知".into()),
+                    link: connection(state, self.images.installed[m]),
+                    source: if spec.plugin_version.is_empty() {
+                        "设备插件".into()
+                    } else {
+                        format!("设备插件 {}", spec.plugin_version)
+                    },
+                    model: Some(m),
+                    is_level: false,
+                })
+            }
+            Command::System(m) => {
+                let device = self.snapshot.system_devices.get(m)?;
+                let link = if device.state.key.starts_with("system-bt-") {
+                    "蓝牙"
+                } else {
+                    "Windows 已连接"
+                };
+                Some(BatteryView {
+                    name: &device.name,
+                    category: "Windows 系统设备".into(),
+                    state: &device.state,
+                    value: system_reading(device),
+                    link,
+                    source: "Windows 系统电量".into(),
+                    model: None,
+                    is_level: device.level.is_some(),
+                })
+            }
+            _ => None,
         }
     }
+
+    pub(super) unsafe fn battery_detail(&self, c: &Canvas, m: usize) {
+        self.paint_battery_detail(c, Command::Battery(m));
+    }
     pub(super) unsafe fn system_detail(&self, c: &Canvas, m: usize) {
-        let Some(device) = self.snapshot.system_devices.get(m) else {
+        self.paint_battery_detail(c, Command::System(m));
+    }
+
+    unsafe fn paint_battery_detail(&self, c: &Canvas, command: Command) {
+        let Some(battery) = self.battery_view(command) else {
             return;
         };
-        let left = SIDEBAR + 24;
-        let width = self.width - left - 48;
+        self.page_heading(c, battery.name, &battery.category);
+        let x = SIDEBAR + 24;
+        let w = self.width - x - 28;
+        let y = HOME_CONTENT_Y;
+        let panel = R::new(x, y, w, 176);
+        c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
         c.text(
-            "Windows 设备",
-            R::new(left, 88, 600, 34),
-            24,
-            600,
+            "剩余电量",
+            R::new(x + 28, y + 22, w - 260, 25),
+            14,
+            500,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            &battery.value,
+            R::new(x + 26, y + 51, w - 265, 70),
+            44,
+            500,
             TEXT,
             DT_LEFT,
         );
         c.text(
-            "系统提供电量 · 只读状态",
-            R::new(left + 2, 124, width - 4, 22),
+            battery.sample_label(),
+            R::new(x + 28, y + 128, w - 265, 24),
             13,
             400,
             MUTED,
             DT_LEFT,
         );
-        c.soft_shadow(R::new(left, 168, width, 360), 14);
+        if let Some(m) = battery.model {
+            c.image(
+                self.images.images[m],
+                R::new(x + w - 229, y + 16, 198, 144),
+                battery.state.fresh,
+            );
+        }
+        let rows_top = y + panel.h + 16;
+        let rows = [
+            ("连接状态", battery.link.to_owned()),
+            ("供电状态", battery.power_label().into()),
+            ("最近读取", reading_age(battery.state.updated)),
+            ("数据来源", battery.source),
+        ];
+        let row_h = 55;
         c.round(
-            R::new(left, 168, width, 360),
+            R::new(x, rows_top, w, rows.len() as i32 * row_h + 12),
             RADIUS_LG,
             PANEL,
             Some(BORDER),
         );
-        c.text(
-            &device.name,
-            R::new(left + 32, 202, width - 64, 48),
-            24,
-            600,
-            TEXT,
-            DT_LEFT,
-        );
-        c.text(
-            "Windows 系统电量 · 只读",
-            R::new(left + 34, 252, width - 68, 24),
-            13,
-            400,
-            MUTED,
-            DT_LEFT,
-        );
-        c.text(
-            &system_reading(device),
-            R::new(left + 34, 316, width - 68, 78),
-            48,
-            500,
-            TEXT,
-            DT_LEFT,
-        );
-        if device.state.charging == Some(true) {
+        for (i, (label, value)) in rows.iter().enumerate() {
+            let y = rows_top + 6 + i as i32 * row_h;
+            if i > 0 {
+                c.line(x + 24, y, x + w - 24, y, BORDER, 1.);
+            }
             c.text(
-                "正在充电",
-                R::new(left + 34, 416, width - 68, 26),
-                14,
+                label,
+                R::new(x + 26, y, 130, row_h),
+                13,
                 400,
                 MUTED,
                 DT_LEFT,
             );
+            c.text(
+                value,
+                R::new(x + 172, y, w - 200, row_h),
+                15,
+                500,
+                TEXT,
+                DT_LEFT,
+            );
         }
-        c.text(
-            "由 Windows 提供的只读电量数据",
-            R::new(left + 34, 478, width - 68, 22),
-            12,
-            400,
-            DIM,
-            DT_LEFT,
-        );
     }
+
     pub(super) unsafe fn detail(&self, c: &Canvas, m: usize) {
         let s = &self.snapshot.devices[m];
         let spec = &REGISTRY[m];
@@ -622,12 +609,6 @@ impl App {
                 DT_LEFT,
             );
             let mut rows = vec![("连接", connection(s, self.images.installed[m]).to_owned())];
-            if spec.supports("battery") || s.percent.is_some() {
-                rows.push(("电量", reading(s, spec)));
-                if s.fresh && s.charging.is_some() {
-                    rows.push(("充电状态", power(s).into()));
-                }
-            }
             if s.fresh {
                 if let Some(dpi) = s.dpi {
                     rows.push(("当前 DPI", format_number(dpi.into())));
@@ -1022,7 +1003,7 @@ impl App {
             DT_LEFT,
         );
         c.text(
-            "刷新、低电提醒与 Windows 启动行为",
+            "管理电量提醒、配置备份和 Windows 启动行为。",
             R::new(left + 2, 126, width - 4, 22),
             13,
             400,
@@ -1034,7 +1015,11 @@ impl App {
             (202, "自动刷新", "选择读取间隔，较长间隔可减少设备唤醒"),
             (297, "低电阈值", "仅在未充电且读数有效时提醒"),
             (392, "低电提醒", "同一低电周期只提醒一次"),
-            (487, "设备诊断", "仅导出本地 HID 元数据"),
+            (
+                487,
+                "工具与数据",
+                "备份本地配置、导出诊断或管理由外设盒运行的软件宏",
+            ),
             (576, "开机启动", "登录 Windows 后在托盘运行"),
         ] {
             c.text(title, R::new(left + 24, y, 210, 25), 14, 600, TEXT, DT_LEFT);
@@ -1085,64 +1070,18 @@ impl App {
             && cursor.x < self.px(b.rect.w)
             && cursor.y < self.px(b.rect.h);
         if b.style == CARD {
-            if let Command::Device(m) | Command::System(m) = b.command {
-                if matches!(b.command, Command::Device(_)) {
-                    self.card(&c, r, m);
-                } else if let Some(device) = self.snapshot.system_devices.get(m) {
-                    c.soft_shadow(r, 14);
-                    c.round(r, 14, PANEL, Some(BORDER));
-                    c.text(
-                        "WINDOWS · 只读",
-                        R::new(24, 22, r.w - 48, 25),
-                        12,
-                        500,
-                        DIM,
-                        DT_LEFT,
-                    );
-                    c.text(
-                        &device.name,
-                        R::new(24, 64, r.w - 48, 72),
-                        22,
-                        600,
-                        TEXT,
-                        DT_LEFT,
-                    );
-                    c.text(
-                        &system_reading(device),
-                        R::new(24, r.h - 115, r.w - 48, 55),
-                        30,
-                        500,
-                        TEXT,
-                        DT_LEFT,
-                    );
-                    c.text(
-                        "查看电量  ›",
-                        R::new(24, r.h - 55, r.w - 48, 30),
-                        13,
-                        400,
-                        MUTED,
-                        DT_RIGHT,
-                    );
-                }
-                if hover
-                    || self.fx.widget.hover(widget_key(b.command))
-                    || item.itemState & ODS_FOCUS != 0
-                {
-                    c.round(
-                        R::new(3, 3, b.rect.w - 6, b.rect.h - 6),
-                        14,
-                        0,
-                        Some(if item.itemState & ODS_FOCUS != 0 {
-                            RED
-                        } else {
-                            crate::paint::blend(
-                                PANEL,
-                                crate::ui::widgets::HOVER,
-                                self.fx.widget.value(widget_key(b.command)),
-                            )
-                        }),
-                    );
-                }
+            let over = hover || self.fx.widget.hover(widget_key(b.command));
+            let fill = if over {
+                crate::ui::widgets::HOVER
+            } else {
+                PANEL
+            };
+            let focus = item.itemState & ODS_FOCUS != 0;
+            c.round(r, RADIUS_LG, fill, Some(if focus { RED } else { BORDER }));
+            if let Some(battery) = self.battery_view(b.command) {
+                self.paint_battery_card(&c, r, &battery);
+            } else {
+                self.paint_driver_card(&c, r, b.command);
             }
             return;
         }
@@ -1150,13 +1089,10 @@ impl App {
             c.rect(R::new(0, 0, b.rect.w, b.rect.h), 0xff111117);
             let active = match b.command {
                 Command::Home => {
-                    matches!(self.page, Page::Home | Page::Device(_) | Page::System(_))
+                    matches!(self.page, Page::Home | Page::Battery(_) | Page::System(_))
                 }
-                Command::DriverManager => false,
-                Command::CoreUpdate => false,
+                Command::Drivers => matches!(self.page, Page::Drivers | Page::Device(_)),
                 Command::Prefs => self.page == Page::Preferences,
-                Command::Device(m) => self.page == Page::Device(m),
-                Command::System(m) => self.page == Page::System(m),
                 _ => false,
             };
             let key = widget_key(b.command);
@@ -1177,78 +1113,38 @@ impl App {
             if active {
                 c.round(R::new(2, 8, 3, r.h - 16), 1, RED, None);
             }
-            match b.command {
-                Command::Device(m) => {
-                    let percent = self
-                        .fx
-                        .widget
-                        .ring_value(0x1000 + m as u64)
-                        .map(|v| v.round() as u8);
-                    mini_ring(
-                        &c,
-                        R::new(10, 7, 24, 24),
-                        percent,
-                        self.snapshot.devices[m].fresh,
-                    );
-                    c.ellipse(
-                        R::new(r.w - 14, 16, 6, 6),
-                        connection_color(&self.snapshot.devices[m]),
-                    );
-                    c.text(
-                        &b.label,
-                        R::new(42, 4, r.w - 62, r.h - 8),
-                        12,
-                        500,
-                        if active { TEXT } else { MUTED },
-                        DT_LEFT,
-                    );
-                }
-                Command::System(m) => {
-                    let percent = self
-                        .fx
-                        .widget
-                        .ring_value(0x8000 + m as u64)
-                        .map(|v| v.round() as u8);
-                    mini_ring(&c, R::new(10, 7, 24, 24), percent, true);
-                    c.ellipse(R::new(r.w - 14, 16, 6, 6), crate::paint::GREEN);
-                    c.text(
-                        &b.label,
-                        R::new(42, 4, r.w - 62, r.h - 8),
-                        12,
-                        500,
-                        if active { TEXT } else { MUTED },
-                        DT_LEFT,
-                    );
-                }
-                _ => {
-                    c.text(
-                        &b.label,
-                        R::new(14, 3, r.w - 28, r.h - 6),
-                        13,
-                        500,
-                        if active { TEXT } else { MUTED },
-                        DT_LEFT,
-                    );
-                }
-            }
+            c.text(
+                &b.label,
+                R::new(14, 3, r.w - 28, r.h - 6),
+                14,
+                if active { 600 } else { 500 },
+                if active { TEXT } else { MUTED },
+                DT_LEFT,
+            );
             if item.itemState & ODS_FOCUS != 0 {
                 c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 7, 0, Some(MUTED));
             }
             return;
         }
+        let inside_panel = match self.page {
+            Page::Home => b.command == Command::AddDevice,
+            Page::Preferences => (168..700).contains(&b.rect.y),
+            Page::Device(_) => (145..self.height - 82).contains(&b.rect.y),
+            _ => false,
+        };
         c.rect(
             R::new(0, 0, b.rect.w, b.rect.h),
-            if b.style == CHIP || (b.rect.x >= 394 && b.rect.y >= 78 && b.rect.y < self.height - 82)
-            {
-                PANEL
-            } else {
-                BG
-            },
+            if inside_panel { PANEL } else { BG },
         );
         if b.rect.y < 65 {
-            c.gradient(
-                R::new(-b.rect.x, -b.rect.y, self.width * 2 / 3, 68),
-                0xff261119,
+            c.gradient_v(
+                R::new(
+                    SIDEBAR + 1 - b.rect.x,
+                    -b.rect.y,
+                    self.width - SIDEBAR - 1,
+                    66,
+                ),
+                crate::paint::blend(BG, 0xff25131a, self.fx.nav.value()),
                 BG,
             );
         }
@@ -1292,97 +1188,222 @@ impl App {
             c.round(R::new(3, 3, b.rect.w - 6, b.rect.h - 6), 9, 0, Some(MUTED));
         }
     }
-    unsafe fn card(&self, c: &Canvas, r: R, m: usize) {
-        let s = &self.snapshot.devices[m];
-        let spec = &REGISTRY[m];
-        let active = s.fresh;
-        c.rect(R::new(0, 0, r.w + 2, r.h + 2), BG);
-        c.soft_shadow(r, 14);
-        c.round(
-            r,
-            RADIUS_LG,
-            if self.fx.widget.hover(0x1000 + m as u64) {
-                crate::paint::blend(
-                    PANEL,
-                    crate::ui::widgets::HOVER,
-                    self.fx.widget.value(0x1000 + m as u64),
-                )
-            } else if active {
-                PANEL
-            } else {
-                0xff101014
-            },
-            Some(if active { 0xff39313a } else { 0xff222229 }),
-        );
-        let margin = 22;
+    unsafe fn paint_battery_card(&self, c: &Canvas, r: R, battery: &BatteryView<'_>) {
+        let x = 20;
+        let w = r.w - x * 2;
+        let active = battery.state.fresh || battery.is_level;
         c.text(
-            &format!("{}  ·  {}", spec.brand, kind_name(spec.kind)),
-            R::new(margin, 16, r.w - 132, 24),
+            &battery.category,
+            R::new(x, 15, w, 22),
             12,
             500,
             MUTED,
             DT_LEFT,
         );
-        c.ellipse(R::new(r.w - 88, 25, 7, 7), connection_color(s));
         c.text(
-            if active {
-                "已连接"
-            } else if s.present {
-                "待更新"
-            } else {
-                "未连接"
-            },
-            R::new(r.w - 76, 16, 56, 24),
-            11,
-            500,
-            connection_color(s),
-            DT_RIGHT,
-        );
-        let image_h = (r.h - 143).max(70);
-        c.image(
-            self.images.images[m],
-            R::new(margin, 44, r.w - 2 * margin, image_h),
-            active,
-        );
-        c.text(
-            spec.name,
-            R::new(margin, r.h - 93, r.w - 2 * margin, 29),
-            18,
+            battery.name,
+            R::new(x, 45, w, 31),
+            20,
             600,
             if active { TEXT } else { MUTED },
             DT_LEFT,
         );
-        c.line(margin, r.h - 55, r.w - margin, r.h - 55, BORDER, 1.);
+        let center = (80 + r.h - 55) / 2;
+        let image_w = (r.w / 3).min(150);
+        let value_w = if let Some(m) = battery.model {
+            let image_h = (r.h - 135).min(128);
+            c.image(
+                self.images.images[m],
+                R::new(r.w - x - image_w, center - image_h / 2, image_w, image_h),
+                active,
+            );
+            w - image_w - 8
+        } else {
+            w
+        };
         c.text(
-            &reading(s, spec),
-            R::new(margin, r.h - 46, r.w - 145, 30),
-            15,
+            &battery.value,
+            R::new(x, center - 31, value_w, 50),
+            32,
             500,
-            if active { TEXT } else { DIM },
+            if active { TEXT } else { MUTED },
             DT_LEFT,
         );
         c.text(
-            "查看设备  ›",
-            R::new(r.w - 118, r.h - 46, 96, 30),
+            battery.sample_label(),
+            R::new(x + 1, center + 18, value_w, 22),
             12,
-            500,
+            400,
             MUTED,
+            DT_LEFT,
+        );
+        c.line(x, r.h - 48, r.w - x, r.h - 48, BORDER, 1.);
+        c.ellipse(
+            R::new(x, r.h - 27, 6, 6),
+            if battery.is_level {
+                GREEN
+            } else {
+                connection_color(battery.state)
+            },
+        );
+        c.text(
+            battery.link,
+            R::new(x + 14, r.h - 41, w - 110, 33),
+            12,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            "查看电量  ›",
+            R::new(r.w - 110, r.h - 41, 90, 33),
+            13,
+            500,
+            TEXT,
+            DT_RIGHT,
+        );
+    }
+
+    unsafe fn paint_driver_card(&self, c: &Canvas, r: R, command: Command) {
+        let (category, name, capabilities, footer, button) = match command {
+            Command::MHub => (
+                "内置驱动中心".to_owned(),
+                "迈从 M HUB",
+                "在同一处选择迈从设备，编辑并保存板载配置。".to_owned(),
+                "迈从设备".to_owned(),
+                if self.hub_open {
+                    "返回 M HUB"
+                } else {
+                    "打开 M HUB"
+                },
+            ),
+            Command::Device(m) => {
+                let spec = &REGISTRY[m];
+                let (action, capabilities) = driver_summary(spec);
+                (
+                    format!("{} · {}", spec.brand, kind_name(spec.kind)),
+                    spec.name,
+                    capabilities,
+                    connection(&self.snapshot.devices[m], self.images.installed[m]).to_owned(),
+                    action,
+                )
+            }
+            _ => return,
+        };
+        let x = 20;
+        let w = r.w - x * 2;
+        c.text(&category, R::new(x, 15, w, 22), 12, 500, MUTED, DT_LEFT);
+        c.text(name, R::new(x, 45, w, 38), 22, 600, TEXT, DT_LEFT);
+        let mid = (84 + r.h - 48) / 2;
+        c.text(
+            &capabilities,
+            R::new(x, mid - 19, w, 55),
+            15,
+            400,
+            MUTED,
+            DT_LEFT | DT_WORDBREAK,
+        );
+        c.line(x, r.h - 48, r.w - x, r.h - 48, BORDER, 1.);
+        c.text(
+            &footer,
+            R::new(x, r.h - 41, w - 140, 33),
+            12,
+            400,
+            MUTED,
+            DT_LEFT,
+        );
+        c.text(
+            &format!("{button}  ›"),
+            R::new(r.w - 158, r.h - 41, 138, 33),
+            13,
+            500,
+            TEXT,
             DT_RIGHT,
         );
     }
 }
 
-unsafe fn mini_ring(c: &Canvas, r: R, percent: Option<u8>, active: bool) {
-    c.arc(r, -90., 359.9, BORDER, 2.5);
-    if let Some(percent) = percent {
-        c.arc(
-            r,
-            -90.,
-            360. * percent.min(100) as f32 / 100.,
-            if active { RED } else { DIM },
-            2.5,
-        );
+struct BatteryView<'a> {
+    name: &'a str,
+    category: String,
+    state: &'a backend::State,
+    value: String,
+    link: &'a str,
+    source: String,
+    model: Option<usize>,
+    is_level: bool,
+}
+
+impl BatteryView<'_> {
+    fn sample_label(&self) -> &str {
+        if self.is_level {
+            "设备上报等级"
+        } else if !self.state.fresh && self.state.percent.is_some() {
+            "保留的上次读数"
+        } else if self.state.charging.is_some() && self.state.fresh {
+            self.power_label()
+        } else if self.state.percent.is_none() {
+            "暂无百分比读数"
+        } else {
+            "最近一次读取"
+        }
     }
+
+    fn power_label(&self) -> &str {
+        if self.model.is_none() {
+            match self.state.charging {
+                Some(true) => "正在充电",
+                Some(false) => "电池供电",
+                None => "未知",
+            }
+        } else {
+            power(self.state)
+        }
+    }
+}
+
+fn reading_age(updated: u64) -> String {
+    if updated == 0 {
+        return "暂无记录".into();
+    }
+    match backend::now().saturating_sub(updated) {
+        0..=59 => "不到 1 分钟前".into(),
+        seconds @ 60..=3599 => format!("{} 分钟前", seconds / 60),
+        seconds @ 3600..=86399 => format!("{} 小时前", seconds / 3600),
+        seconds => format!("{} 天前", seconds / 86400),
+    }
+}
+
+fn driver_summary(spec: &crate::devices::DeviceSpec) -> (&'static str, String) {
+    let mut features = Vec::new();
+    if spec.has_g2_audio() {
+        features.extend(["音效", "均衡器"]);
+    }
+    if spec.dpi_range.is_some() {
+        features.push("DPI");
+    }
+    if !spec.rates.is_empty() || !spec.wired_rates.is_empty() {
+        features.push("回报率");
+    }
+    if !spec.sleeps.is_empty() {
+        features.push("休眠");
+    }
+    if spec.supports("bindings") {
+        features.push("改键");
+    }
+    if spec.supports("lighting-editor")
+        || spec.supports("lighting-switch")
+        || spec.supports("key-colors")
+    {
+        features.push("灯光");
+    }
+    if features.is_empty() {
+        if spec.supports("dpi-stages-read") || spec.supports("polling-rate-read") {
+            return ("查看参数", "读取设备上报的指针参数。".into());
+        }
+        return ("打开设置", "打开此型号的设备设置。".into());
+    }
+    ("打开设置", features.join("  ·  "))
 }
 
 #[cfg(test)]

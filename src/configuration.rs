@@ -403,8 +403,7 @@ pub fn import_configuration(key: &str, path: &Path) -> Result<OperationReport> {
             }
         }
     })?;
-    report.message =
-        "已恢复本地配置并保留未知字段；尚未写入硬件。原记录已备份，可单独点击“应用到设备”。".into();
+    report.message = "已恢复本地配置并保留未知字段。原记录已备份。".into();
     report
         .skipped
         .push("电量和性能快照只恢复本地；未知字段仅保存，不执行。".into());

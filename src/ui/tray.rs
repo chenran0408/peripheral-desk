@@ -2,7 +2,7 @@
 use super::{
     pages::{connection, reading, system_reading},
     widgets::{HOVER, PRESSED, WARN},
-    App, Command, Page, OPEN, TRAY,
+    App, Command, Page, TRAY,
 };
 use crate::{
     devices::REGISTRY,
@@ -21,8 +21,7 @@ pub(crate) struct TrayFx {
     opening: Option<Instant>,
     closing: Option<Instant>,
     target: RECT,
-    rows_started: Option<Instant>,
-    rings_started: usize,
+    entries: Vec<Command>,
     scroll_offset: i32,
     scroll_drag: Option<(i32, i32)>,
     hovered: Option<HoverTarget>,
@@ -42,9 +41,9 @@ fn hover_target(
     installed: usize,
     system: usize,
 ) -> Option<HoverTarget> {
-    if (footer + 8..footer + 40).contains(&y) && (12..356).contains(&x) {
+    if (footer + 8..footer + 40).contains(&y) && (12..348).contains(&x) {
         let offset = x - 12;
-        return (offset % 116 < 112).then_some(HoverTarget::Footer((offset / 116) as usize));
+        return (offset % 172 < 164).then_some(HoverTarget::Footer((offset / 172) as usize));
     }
     if !(9..335).contains(&x) || !(58..footer).contains(&y) {
         return None;
@@ -63,9 +62,9 @@ fn hover_target(
 }
 
 fn scroll_metrics(app: &App, height: i32) -> (i32, i32, i32, i32, i32) {
-    let count = REGISTRY.len() + app.snapshot.system_devices.len();
-    let sections =
-        i32::from(!REGISTRY.is_empty()) + i32::from(!app.snapshot.system_devices.is_empty());
+    let (installed, system) = app.fx.flyout.section_counts();
+    let count = installed + system;
+    let sections = i32::from(installed > 0) + i32::from(system > 0);
     let content_height = sections * 22 + count as i32 * 64;
     let list_top = 58;
     let footer = height - 50;
@@ -83,6 +82,13 @@ fn scroll_metrics(app: &App, height: i32) -> (i32, i32, i32, i32, i32) {
 }
 
 impl TrayFx {
+    fn section_counts(&self) -> (usize, usize) {
+        let installed = self
+            .entries
+            .partition_point(|e| matches!(e, Command::Battery(_)));
+        (installed, self.entries.len() - installed)
+    }
+
     pub(crate) fn tick(&mut self, hwnd: HWND) -> bool {
         unsafe {
             let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut App;
@@ -95,23 +101,6 @@ impl TrayFx {
                 self.opening = None;
                 self.closing = None;
                 return false;
-            }
-            if let Some(start) = self.rows_started {
-                let elapsed = start.elapsed().as_millis() as usize;
-                let total = REGISTRY.len() + app.snapshot.system_devices.len();
-                while self.rings_started < total && elapsed >= self.rings_started * 60 {
-                    let row = self.rings_started;
-                    let percent = if row < REGISTRY.len() {
-                        let state = &app.snapshot.devices[row];
-                        state.fresh.then_some(state.percent).flatten()
-                    } else {
-                        app.snapshot.system_devices[row - REGISTRY.len()]
-                            .state
-                            .percent
-                    };
-                    app.fx.widget.ring_target(0x2000 + row as u64, percent);
-                    self.rings_started += 1;
-                }
             }
             if let Some(start) = self.opening {
                 let t = start.elapsed().as_millis() as f32 / 200.;
@@ -150,17 +139,12 @@ impl TrayFx {
                     SetLayeredWindowAttributes(flyout, 0, 255, LWA_ALPHA);
                     self.opening = None;
                     self.closing = None;
-                    self.rows_started = None;
-                    self.rings_started = 0;
                     return false;
                 }
                 SetLayeredWindowAttributes(flyout, 0, ((1. - t) * 255.) as u8, LWA_ALPHA);
                 InvalidateRect(flyout, null(), 0);
             }
-            self.opening.is_some()
-                || self.closing.is_some()
-                || (self.rows_started.is_some()
-                    && self.rings_started < REGISTRY.len() + app.snapshot.system_devices.len())
+            self.opening.is_some() || self.closing.is_some()
         }
     }
 }
@@ -222,14 +206,15 @@ pub(super) unsafe extern "system" fn flyout_proc(
             {
                 let c = Canvas::new(dc, a.dpi);
                 let height = a.logical(bounds.bottom);
-                let count = REGISTRY.len() + a.snapshot.system_devices.len();
-                let hids = REGISTRY.len();
+                let entries = &a.fx.flyout.entries;
+                let (hids, system) = a.fx.flyout.section_counts();
+                let count = entries.len();
                 let (list_top, footer, max_offset, track_top, thumb_height) =
                     scroll_metrics(a, height);
                 let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
                 let mut y = list_top - scroll;
                 windows_sys::Win32::Graphics::GdiPlus::GdipGraphicsClear(c.graphics, PANEL);
-                c.text("外设盒", R::new(20, 13, 205, 25), 17, 600, TEXT, DT_LEFT);
+                c.text("设备电量", R::new(20, 13, 205, 25), 17, 600, TEXT, DT_LEFT);
                 c.text(
                     &format!("{count} 台设备"),
                     R::new(220, 16, 120, 20),
@@ -243,7 +228,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 IntersectClipRect(dc, 0, a.px(list_top), a.px(360), a.px(footer));
                 if count == 0 {
                     c.text(
-                        "未安装或尚未加载设备驱动",
+                        "暂无可显示电量的设备",
                         R::new(20, 90, 320, 25),
                         14,
                         500,
@@ -251,7 +236,7 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         DT_LEFT,
                     );
                     c.text(
-                        "到主页面添加 · 安装后自动重启生效",
+                        "连接无线设备，或在插件管理中安装对应型号。",
                         R::new(20, 118, 320, 22),
                         11,
                         400,
@@ -260,12 +245,14 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     );
                 }
                 if hids > 0 {
-                    c.text("我的设备", R::new(20, y, 320, 18), 10, 600, DIM, DT_LEFT);
+                    c.text("外设", R::new(20, y, 320, 18), 10, 600, DIM, DT_LEFT);
                     y += 22;
                 }
-                for (i, spec) in REGISTRY.iter().enumerate() {
+                for (row, &entry) in entries[..hids].iter().enumerate() {
+                    let Command::Battery(i) = entry else { continue };
+                    let spec = &REGISTRY[i];
                     let s = &a.snapshot.devices[i];
-                    if a.fx.flyout.hovered == Some(HoverTarget::Row(i)) {
+                    if a.fx.flyout.hovered == Some(HoverTarget::Row(row)) {
                         c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.image(a.images.images[i], R::new(19, y + 7, 40, 44), s.fresh);
@@ -286,9 +273,13 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         DT_LEFT,
                     );
                     if let Some(percent) = s.percent.filter(|_| s.fresh) {
+                        let fill =
+                            a.fx.widget
+                                .ring_value(0x1000 + i as u64)
+                                .unwrap_or(percent as f32);
                         c.battery_icon(
                             R::new(288, y + 10, 34, 34),
-                            percent,
+                            fill.round() as u8,
                             s.charging == Some(true),
                             if percent < 20 { WARN } else { GREEN },
                         );
@@ -312,14 +303,14 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     }
                     y += 64;
                 }
-                if !a.snapshot.system_devices.is_empty() {
+                if system > 0 {
                     c.text("系统设备", R::new(20, y, 320, 18), 10, 600, DIM, DT_LEFT);
                     y += 22;
                 }
-                for (i, device) in a.snapshot.system_devices.iter().enumerate() {
-                    let index = REGISTRY.len() + i;
-                    let key = 0x2000 + index as u64;
-                    if a.fx.flyout.hovered == Some(HoverTarget::Row(index)) {
+                for (row, &entry) in entries[hids..].iter().enumerate() {
+                    let Command::System(i) = entry else { continue };
+                    let device = &a.snapshot.system_devices[i];
+                    if a.fx.flyout.hovered == Some(HoverTarget::Row(hids + row)) {
                         c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.text(
@@ -339,16 +330,15 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         DT_LEFT,
                     );
                     if let Some(percent) = device.state.percent {
-                        let shown =
+                        let fill =
                             a.fx.widget
-                                .ring_value(key)
-                                .unwrap_or(percent as f32)
-                                .round() as u8;
+                                .ring_value(0x8000 + i as u64)
+                                .unwrap_or(percent as f32);
                         c.battery_icon(
                             R::new(288, y + 10, 34, 34),
-                            shown,
+                            fill.round() as u8,
                             device.state.charging == Some(true),
-                            if shown < 20 { WARN } else { GREEN },
+                            if percent < 20 { WARN } else { GREEN },
                         );
                         c.text(
                             &format!("{percent}%"),
@@ -398,10 +388,9 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     );
                 }
                 c.line(18, footer, 342, footer, BORDER, 1.);
-                let labels = ["打开主窗口", "重新读取", "退出"];
-                let widths = [112, 112, 112];
-                let mut x = 12;
+                let labels = ["电量总览", "刷新电量"];
                 for (i, label) in labels.iter().enumerate() {
+                    let rect = R::new(12 + i as i32 * 172, footer + 8, 164, 32);
                     let key = 0x2100 + i as u64;
                     let color = if a.fx.widget.pressed(key) {
                         PRESSED
@@ -410,16 +399,15 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     } else {
                         PANEL
                     };
-                    c.capsule(R::new(x, footer + 8, widths[i], 32), color, None);
+                    c.capsule(rect, color, None);
                     c.text(
                         label,
-                        R::new(x, footer + 8, widths[i], 32),
+                        rect,
                         11,
                         500,
-                        if i == 2 { RED } else { TEXT },
+                        TEXT,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                     );
-                    x += widths[i] + 4;
                 }
             }
             BitBlt(dest, 0, 0, bounds.right, bounds.bottom, dc, 0, 0, SRCCOPY);
@@ -440,60 +428,23 @@ pub(super) unsafe extern "system" fn flyout_proc(
             let mut rc: RECT = zeroed();
             GetClientRect(hwnd, &mut rc);
             let height = a.logical(rc.bottom);
-            let (list_top, footer, max_offset, _, _) = scroll_metrics(a, height);
-            if x >= 338 && y >= list_top && y < footer {
-                return 0;
-            }
+            let (_, footer, max_offset, _, _) = scroll_metrics(a, height);
             let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
-            let content_y = y + scroll;
-            let mut row_y = 80;
-            let mut device = None;
-            for i in 0..REGISTRY.len() {
-                if (9..=335).contains(&x) && content_y >= row_y && content_y < row_y + 64 {
-                    device = Some(i + 1);
-                    break;
-                }
-                row_y += 64;
-            }
-            if device.is_none() && !a.snapshot.system_devices.is_empty() {
-                let sys_y = 80 + REGISTRY.len() as i32 * 64;
-                let sys_y = sys_y + i32::from(!REGISTRY.is_empty()) * 22;
-                let idx = ((content_y - sys_y) / 64).max(0) as usize;
-                if (9..=335).contains(&x)
-                    && content_y >= sys_y
-                    && idx < a.snapshot.system_devices.len()
-                {
-                    device = Some(0);
-                }
-            }
-            let action = if y >= footer + 8 && y <= footer + 40 {
-                match x {
-                    12..=124 => Some(0),
-                    128..=240 => Some(1),
-                    244..=356 => Some(2),
-                    _ => None,
-                }
-            } else {
-                None
-            };
+            let (installed, system) = a.fx.flyout.section_counts();
+            let target = hover_target(x, y, footer, scroll, installed, system);
             a.fx.widget.clear_press();
-            if let Some(action) = action {
-                match action {
-                    0 => {
-                        a.fx.flyout.closing = Some(Instant::now());
-                        PostMessageW(main, OPEN, 0, 0);
-                    }
-                    1 => {
-                        a.fx.flyout.closing = Some(Instant::now());
-                        a.begin(main, None);
-                    }
-                    _ => a.quit(main),
+            match target {
+                Some(HoverTarget::Row(row)) => {
+                    let page = match a.fx.flyout.entries[row] {
+                        Command::Battery(model) => Page::Battery(model),
+                        Command::System(index) => Page::System(index),
+                        _ => return 0,
+                    };
+                    a.open_tray_page(main, page);
                 }
-                a.fx_wake(main);
-            } else {
-                a.fx.flyout.closing = Some(Instant::now());
-                PostMessageW(main, OPEN, device.unwrap_or(0), 0);
-                a.fx_wake(main);
+                Some(HoverTarget::Footer(0)) => a.open_tray_page(main, Page::Home),
+                Some(HoverTarget::Footer(1)) => a.begin(main, None),
+                _ => {}
             }
             0
         }
@@ -529,9 +480,11 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 InvalidateRect(hwnd, null(), 0);
                 return 0;
             }
-            if y >= footer + 8 && y <= footer + 40 {
-                let index = ((x - 12) / 116).clamp(0, 2) as u64;
-                a.fx.widget.press(0x2100 + index);
+            let (installed, system) = a.fx.flyout.section_counts();
+            if let Some(HoverTarget::Footer(index)) =
+                hover_target(x, y, footer, a.fx.flyout.scroll_offset, installed, system)
+            {
+                a.fx.widget.press(0x2100 + index as u64);
                 InvalidateRect(hwnd, null(), 0);
             }
             0
@@ -553,6 +506,9 @@ pub(super) unsafe extern "system" fn flyout_proc(
             if let Some((start_y, start_offset)) = a.fx.flyout.scroll_drag {
                 let track_height = footer - 18 - track_top;
                 let travel = track_height - thumb_height;
+                if travel <= 0 {
+                    return 0;
+                }
                 let delta = (y - start_y) * max_offset / travel;
                 let offset = (start_offset + delta).clamp(0, max_offset);
                 if a.fx.flyout.scroll_offset != offset {
@@ -562,14 +518,8 @@ pub(super) unsafe extern "system" fn flyout_proc(
                 return 0;
             }
             let scroll = a.fx.flyout.scroll_offset.clamp(0, max_offset);
-            let hovered = hover_target(
-                x,
-                y,
-                footer,
-                scroll,
-                REGISTRY.len(),
-                a.snapshot.system_devices.len(),
-            );
+            let (installed, system) = a.fx.flyout.section_counts();
+            let hovered = hover_target(x, y, footer, scroll, installed, system);
             if a.fx.flyout.hovered != hovered {
                 a.fx.flyout.hovered = hovered;
                 InvalidateRect(hwnd, null(), 0);
@@ -590,13 +540,14 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     y: (l >> 16) as i16 as i32,
                 };
                 ScreenToClient(hwnd, &mut cursor);
+                let (installed, system) = a.fx.flyout.section_counts();
                 a.fx.flyout.hovered = hover_target(
                     a.logical(cursor.x),
                     a.logical(cursor.y),
                     footer,
                     offset,
-                    REGISTRY.len(),
-                    a.snapshot.system_devices.len(),
+                    installed,
+                    system,
                 );
                 InvalidateRect(hwnd, null(), 0);
             }
@@ -626,6 +577,7 @@ fn copy_wide<const N: usize>(dest: &mut [u16; N], text: &str) {
         *d = c;
     }
 }
+
 pub(super) unsafe fn tray_data(hwnd: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW {
         cbSize: size_of::<NOTIFYICONDATAW>() as u32,
@@ -670,26 +622,35 @@ impl App {
         n.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         n.uCallbackMessage = TRAY;
         n.hIcon = self.icon;
+        let mut entries = self.battery_entries();
+        entries.sort_by_key(|entry| matches!(entry, Command::System(_)));
+        if entries != self.fx.flyout.entries {
+            self.fx.flyout.entries = entries;
+            self.fx.flyout.hovered = None;
+        }
         let tip = self
-            .snapshot
-            .devices
+            .fx
+            .flyout
+            .entries
             .iter()
-            .zip(REGISTRY.iter())
-            .map(|(s, spec)| format!("{} {}", spec.name, reading(s, spec)))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .chain(
-                self.snapshot
-                    .system_devices
-                    .iter()
-                    .map(|d| format!("{} {}", d.name, system_reading(d))),
-            )
+            .filter_map(|entry| match *entry {
+                Command::Battery(i) => Some(format!(
+                    "{} {}",
+                    REGISTRY[i].name,
+                    reading(&self.snapshot.devices[i], &REGISTRY[i])
+                )),
+                Command::System(i) => {
+                    let device = &self.snapshot.system_devices[i];
+                    Some(format!("{} {}", device.name, system_reading(device)))
+                }
+                _ => None,
+            })
             .collect::<Vec<_>>()
             .join("\n");
         copy_wide(
             &mut n.szTip,
-            if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
-                "外设盒 · 到主页面添加设备驱动"
+            if tip.is_empty() {
+                "外设盒 · 暂无电量设备"
             } else {
                 &tip
             },
@@ -716,33 +677,7 @@ impl App {
     }
     pub(super) unsafe fn menu(&mut self, hwnd: HWND) {
         let menu = CreatePopupMenu();
-        for (i, spec) in REGISTRY.iter().enumerate() {
-            let state = &self.snapshot.devices[i];
-            let reading = reading(state, spec);
-            AppendMenuW(
-                menu,
-                MF_GRAYED | MF_STRING,
-                0,
-                wide(&format!("{}　{}", spec.name, reading)).as_ptr(),
-            );
-        }
-        for device in &self.snapshot.system_devices {
-            AppendMenuW(
-                menu,
-                MF_GRAYED | MF_STRING,
-                0,
-                wide(&format!("{}　{}", device.name, system_reading(device))).as_ptr(),
-            );
-        }
-        if !REGISTRY.is_empty() || !self.snapshot.system_devices.is_empty() {
-            AppendMenuW(menu, MF_SEPARATOR, 0, null());
-        }
-        for (id, label) in [
-            (1, "打开主页面"),
-            (2, "重新读取电量"),
-            (4, "检查更新"),
-            (3, "退出程序"),
-        ] {
+        for (id, label) in [(1, "查看电量"), (2, "设备调节"), (3, "退出程序")] {
             AppendMenuW(menu, MF_STRING, id, wide(label).as_ptr());
         }
         let mut p = zeroed();
@@ -759,20 +694,21 @@ impl App {
         );
         DestroyMenu(menu);
         match command {
-            1 => {
-                self.navigate(hwnd, Page::Home);
-                ShowWindow(hwnd, SW_RESTORE);
-                SetForegroundWindow(hwnd);
-            }
-            2 => self.begin(hwnd, None),
+            1 => self.open_tray_page(hwnd, Page::Home),
+            2 => self.open_tray_page(hwnd, Page::Drivers),
             3 => self.quit(hwnd),
-            4 => {
-                ShowWindow(hwnd, SW_RESTORE);
-                self.command(hwnd, Command::CoreUpdate);
-            }
             _ => {}
         }
         PostMessageW(hwnd, WM_NULL, 0, 0);
+    }
+    unsafe fn open_tray_page(&mut self, hwnd: HWND, page: Page) {
+        if !self.flyout.is_null() && IsWindowVisible(self.flyout) != 0 {
+            self.fx.flyout.closing = Some(Instant::now());
+            self.fx_wake(hwnd);
+        }
+        self.navigate(hwnd, page);
+        ShowWindow(hwnd, SW_RESTORE);
+        SetForegroundWindow(hwnd);
     }
     pub(super) unsafe fn show_battery(&mut self, hwnd: HWND) {
         if !self.flyout.is_null() && IsWindowVisible(self.flyout) != 0 {
@@ -812,8 +748,10 @@ impl App {
         let mut area: RECT = zeroed();
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut area as *mut _ as _, 0);
         let width = self.px(360);
-        let count = REGISTRY.len() + self.snapshot.system_devices.len();
-        let logical_height = 488;
+        let (installed, system) = self.fx.flyout.section_counts();
+        let sections = i32::from(installed > 0) + i32::from(system > 0);
+        let logical_height =
+            (108 + sections * 22 + (installed + system) as i32 * 64).clamp(208, 488);
         let height = self
             .px(logical_height)
             .min(area.bottom - area.top - self.px(24));
@@ -827,14 +765,9 @@ impl App {
         };
         self.fx.flyout.opening = Some(Instant::now());
         self.fx.flyout.closing = None;
-        self.fx.flyout.rows_started = Some(Instant::now());
-        self.fx.flyout.rings_started = 0;
         self.fx.flyout.scroll_offset = 0;
         self.fx.flyout.scroll_drag = None;
         self.fx.flyout.hovered = None;
-        for row in 0..count {
-            self.fx.widget.ring_target(0x2000 + row as u64, Some(0));
-        }
         SetLayeredWindowAttributes(self.flyout, 0, 0, LWA_ALPHA);
         SetWindowPos(
             self.flyout,
@@ -848,5 +781,27 @@ impl App {
         SetForegroundWindow(self.flyout);
         self.fx_wake(hwnd);
         InvalidateRect(self.flyout, null(), 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filtered_and_scrolled_rows_select_the_displayed_battery() {
+        let flyout = TrayFx {
+            entries: vec![Command::Battery(2), Command::Battery(5), Command::System(0)],
+            ..Default::default()
+        };
+        let (installed, system) = flyout.section_counts();
+        let hit = |y| match hover_target(20, y, 300, 64, installed, system) {
+            Some(HoverTarget::Row(row)) => Some(flyout.entries[row]),
+            _ => None,
+        };
+        assert_eq!(hit(80), Some(Command::Battery(5)));
+        assert_eq!(hit(148), None); // System section heading
+        assert_eq!(hit(168), Some(Command::System(0)));
+        assert_eq!(hit(310), None); // Footer cannot also select a row
     }
 }
