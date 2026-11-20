@@ -8,6 +8,7 @@ const INSTALL: usize = 2102;
 const LOCAL: usize = 2103;
 const DIRECTORY: usize = 2104;
 const STYLE: usize = 2111;
+const SCRIPT: usize = 2113;
 const APPLY_STYLE: usize = 2112;
 const ZOOM_SMALL: usize = 2121;
 const ZOOM_NORMAL: usize = 2122;
@@ -45,6 +46,7 @@ pub(super) unsafe fn create(hwnd: HWND) {
                 (COLOR_CORAL, "珊瑚红强调色"),
                 (COLOR_TEAL, "青绿强调色"),
                 (STYLE, "编辑个人样式…"),
+                (SCRIPT, "编辑本地交互脚本…"),
                 (APPLY_STYLE, "重新应用样式"),
                 (ZOOM_SMALL, "缩放到 85%"),
                 (ZOOM_NORMAL, "缩放到 100%"),
@@ -132,6 +134,7 @@ unsafe fn open_path(path: &std::path::Path, edit: bool) -> Result<(), String> {
 }
 
 unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
+    workspace::sync_script(path)?;
     let web3: ICoreWebView2_3 = web.cast().map_err(|e| e.to_string())?;
     web3.SetVirtualHostNameToFolderMapping(
         PCWSTR(wide("mhub.peripheraldesk.test").as_ptr()),
@@ -154,7 +157,14 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             remember_mode(false)
         }
-        RELOAD => web.Reload().map_err(|e| e.to_string()),
+        RELOAD => {
+            let mut uri = PWSTR::null();
+            web.Source(&mut uri).map_err(|e| e.to_string())?;
+            if take_pwstr(uri).starts_with(workspace::LOCAL_SITE) {
+                workspace::sync_script(&workspace::selected()?)?;
+            }
+            web.Reload().map_err(|e| e.to_string())
+        }
         INSTALL => {
             if DOWNLOADING.swap(true, Ordering::AcqRel) {
                 return Err("已有工作区下载正在进行".into());
@@ -192,6 +202,7 @@ pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
         }
         DIRECTORY => open_path(&workspace::selected()?, false),
         STYLE => open_path(&workspace::styles_path()?, true),
+        SCRIPT => open_path(&workspace::script_path()?, true),
         APPLY_STYLE => apply_style(&web),
         ZOOM_SMALL | ZOOM_NORMAL | ZOOM_LARGE => {
             let zoom = match id {
@@ -320,4 +331,18 @@ unsafe fn choose_previous(hwnd: HWND) -> Result<Option<PathBuf>, String> {
         return Err("请选择 MHubWorkspace 中已保存版本的 index.html".into());
     }
     Ok(Some(dir.to_owned()))
+}
+
+pub(super) unsafe fn load_user_module(web: &ICoreWebView2) -> windows::core::Result<()> {
+    if !workspace::root().is_ok_and(|p| p.join("personal.js").is_file()) {
+        return Ok(());
+    }
+    // The desktop only adds a fixed same-origin URL. The editable code stays in the local site.
+    let code = r#"(() => {
+        if(location.origin!=='https://mhub.peripheraldesk.test'||document.querySelector('script[data-peripheral-desk]')) return;
+        const script=document.createElement('script');
+        script.type='module'; script.dataset.peripheralDesk='personal';
+        script.src='/_peripheral_desk/personal.js?v='+Date.now(); document.head.append(script);
+    })()"#;
+    web.ExecuteScript(PCWSTR(wide(code).as_ptr()), None)
 }

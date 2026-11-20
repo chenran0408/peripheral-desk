@@ -5,9 +5,10 @@
 //! or a labeled draft, with readable brightness tracked separately.
 use crate::{
     hid::wide,
+    model::AccessoryLighting as LightingConfig,
     paint::{self, Canvas, R},
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     mem::{size_of, zeroed},
@@ -36,19 +37,10 @@ const BRIGHTNESS_UP: usize = 106;
 const APPLY: usize = 107;
 const REFRESH: usize = 108;
 const CLOSE: usize = 109;
+const CLOCKWISE: usize = 110;
+const COUNTERCLOCKWISE: usize = 111;
 const MODE_BASE: usize = 200;
 const TIMER: usize = 1;
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-struct LightingConfig {
-    enabled: bool,
-    effect: u8,
-    rgb: [u8; 3],
-    speed: u8,
-    brightness: u8,
-    music_sync: bool,
-}
 
 #[derive(Clone, Debug, Deserialize)]
 struct LightingMode {
@@ -68,6 +60,8 @@ struct Capabilities {
 
 #[derive(Debug, Deserialize)]
 struct LightingState {
+    #[serde(default)]
+    lighting_direction_modes: Vec<u8>,
     enabled: bool,
     saved: Option<LightingConfig>,
     notice: String,
@@ -90,6 +84,9 @@ struct Dialog {
     name: String,
     capabilities: Capabilities,
     supports_switch: bool,
+    supports_direction: bool,
+    direction_modes: Vec<u8>,
+    direction_edit: Option<u8>,
     config: Option<LightingConfig>,
     confirmed: Option<LightingConfig>,
     actual_enabled: Option<bool>,
@@ -192,12 +189,16 @@ fn invoke(
     operation: Operation,
     config: Option<&LightingConfig>,
     write_only: bool,
+    extended_direction: bool,
 ) -> Result<LightingState, String> {
-    let request = match operation {
+    let mut request = match operation {
         Operation::Read => json!({"op":"lighting-read"}),
         Operation::Apply => json!({"op":"lighting-apply","config":config.ok_or("缺少灯效草稿")?}),
         Operation::Toggle(enabled) => json!({"op":"lighting-switch","enabled":enabled}),
     };
+    if extended_direction {
+        request["extended_direction"] = json!(true);
+    }
     let value = crate::plugin_manager::invoke(key, request)?;
     let state: LightingState =
         serde_json::from_value(value).map_err(|e| format!("驱动返回的灯效状态无效：{e}"))?;
@@ -208,6 +209,18 @@ fn invoke(
 }
 
 impl Dialog {
+    fn show_direction(&self) -> bool {
+        self.supports_direction
+            && self
+                .config
+                .as_ref()
+                .is_some_and(|config| self.direction_modes.contains(&config.effect))
+    }
+    fn requested_config(&self) -> Option<LightingConfig> {
+        let mut config = self.config.clone()?;
+        config.direction = self.direction_edit.filter(|_| self.show_direction());
+        Some(config)
+    }
     fn mode(&self, effect: u8) -> Option<&LightingMode> {
         self.capabilities
             .modes
@@ -229,6 +242,7 @@ impl Dialog {
             return false;
         }
         match id {
+            CLOCKWISE | COUNTERCLOCKWISE => self.editable() && self.show_direction(),
             APPLY => can_apply(
                 self.actual_enabled,
                 self.confirmed.as_ref(),
@@ -269,6 +283,16 @@ impl Dialog {
 
     unsafe fn update_buttons(&self) {
         for (id, button) in self.buttons.iter().chain(self.mode_buttons.iter()) {
+            if matches!(*id, CLOCKWISE | COUNTERCLOCKWISE) {
+                ShowWindow(
+                    *button,
+                    if self.show_direction() {
+                        SW_SHOWNA
+                    } else {
+                        SW_HIDE
+                    },
+                );
+            }
             EnableWindow(*button, i32::from(self.available(*id)));
         }
     }
@@ -277,12 +301,13 @@ impl Dialog {
         if self.pending.is_some() {
             return;
         }
-        let config = self.config.clone();
+        let config = self.requested_config();
         if matches!(operation, Operation::Apply) && config.is_none() {
             return;
         }
         let key = self.key.clone();
         let write_only = self.capabilities.write_only;
+        let extended_direction = self.supports_direction;
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.operation = operation;
@@ -297,7 +322,13 @@ impl Dialog {
         self.update_buttons();
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
         thread::spawn(move || {
-            let _ = tx.send(invoke(&key, operation, config.as_ref(), write_only));
+            let _ = tx.send(invoke(
+                &key,
+                operation,
+                config.as_ref(),
+                write_only,
+                extended_direction,
+            ));
         });
     }
 
@@ -318,6 +349,8 @@ impl Dialog {
         self.pending = None;
         match result {
             Ok(state) => {
+                let requested = self.requested_config();
+                self.direction_modes = state.lighting_direction_modes;
                 let suggested = state
                     .draft
                     .filter(|config| valid_config(config, &self.capabilities));
@@ -331,6 +364,7 @@ impl Dialog {
                 self.stale = false;
                 match self.operation {
                     Operation::Read => {
+                        self.direction_edit = None;
                         self.config = saved.clone().or(suggested.clone());
                         self.dirty = false;
                         self.status = if write_only {
@@ -358,12 +392,16 @@ impl Dialog {
                         };
                     }
                     Operation::Apply => {
-                        let requested = self.config.as_ref();
-                        let exact = saved.as_ref() == requested
-                            && state.enabled == requested.is_some_and(|c| c.enabled);
+                        let exact = requested.is_some_and(|request| {
+                            state.enabled == request.enabled
+                                && saved
+                                    .as_ref()
+                                    .is_some_and(|actual| request.matches_readback(actual))
+                        });
                         self.error = !exact;
                         self.dirty = !exact;
                         if exact {
+                            self.direction_edit = None;
                             self.config = saved.clone();
                             self.status = if write_only {
                                 "灯效已发送，亮度已读回；模式与颜色无法读回，请观察实际灯光。"
@@ -423,6 +461,13 @@ impl Dialog {
                 }
                 RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
                 return;
+            }
+            CLOCKWISE | COUNTERCLOCKWISE if self.available(id) => {
+                self.direction_edit = Some(u8::from(id == COUNTERCLOCKWISE));
+                if let Some(config) = self.config.as_mut() {
+                    config.enabled = true;
+                }
+                self.mark_draft("方向已选择，点击“应用灯效”写入设备。");
             }
             COLOR => {
                 let Some(config) = self.config.as_ref() else {
@@ -494,6 +539,9 @@ impl Dialog {
                         (self.config.as_mut(), baseline.as_ref())
                     {
                         select_mode(config, baseline, &mode);
+                        if !self.direction_modes.contains(&effect) {
+                            self.direction_edit = None;
+                        }
                         self.mark_draft("模式草稿已更改；点击“应用灯效”提交。");
                     }
                 }
@@ -513,6 +561,12 @@ impl Dialog {
     fn selected(&self, id: usize) -> bool {
         if id == TOGGLE {
             return self.actual_enabled == Some(true);
+        }
+        if matches!(id, CLOCKWISE | COUNTERCLOCKWISE) {
+            return self
+                .direction_edit
+                .or_else(|| self.config.as_ref().and_then(|config| config.direction))
+                == Some(u8::from(id == COUNTERCLOCKWISE));
         }
         if (MODE_BASE..MODE_BASE + 256).contains(&id) {
             return self
@@ -598,6 +652,16 @@ impl Dialog {
                 15,
                 500,
                 paint::TEXT,
+                DT_CENTER,
+            );
+        }
+        if self.show_direction() {
+            canvas.text(
+                "流动方向",
+                R::new(42, 429, 210, 20),
+                12,
+                500,
+                paint::MUTED,
                 DT_CENTER,
             );
         }
@@ -961,6 +1025,13 @@ pub unsafe fn open(owner: HWND, model: usize) {
         name: spec.name.into(),
         capabilities,
         supports_switch,
+        supports_direction: installed
+            .manifest
+            .capabilities
+            .iter()
+            .any(|cap| cap == "lighting-direction"),
+        direction_modes: Vec::new(),
+        direction_edit: None,
         config: None,
         confirmed: None,
         actual_enabled: None,
@@ -1043,6 +1114,8 @@ pub unsafe fn open(owner: HWND, model: usize) {
     }
     for (id, text, rect) in [
         (COLOR, "选择颜色", R::new(708, 321, 140, 36)),
+        (CLOCKWISE, "顺时针", R::new(44, 452, 96, 30)),
+        (COUNTERCLOCKWISE, "逆时针", R::new(152, 452, 96, 30)),
         (SPEED_DOWN, "−", R::new(708, 377, 38, 32)),
         (SPEED_UP, "+", R::new(817, 377, 38, 32)),
         (BRIGHTNESS_DOWN, "−", R::new(708, 433, 38, 32)),
@@ -1111,6 +1184,7 @@ mod tests {
             speed: 2,
             brightness: 3,
             music_sync: false,
+            direction: None,
         }
     }
 

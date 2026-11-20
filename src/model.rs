@@ -1,6 +1,28 @@
 //! Shared, serializable device state and setting commands.
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AccessoryLighting {
+    pub enabled: bool,
+    pub effect: u8,
+    pub rgb: [u8; 3],
+    pub speed: u8,
+    pub brightness: u8,
+    pub music_sync: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<u8>,
+}
+impl AccessoryLighting {
+    pub fn matches_readback(&self, actual: &Self) -> bool {
+        let mut actual = actual.clone();
+        if self.direction.is_none() {
+            actual.direction = None;
+        }
+        *self == actual
+    }
+}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]

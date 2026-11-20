@@ -445,11 +445,73 @@ struct Plan {
     request: Value,
     undo: Vec<Value>,
 }
-fn binding_request(control: u16, layer: u8, action: BindingAction) -> Value {
-    json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Bind{control,layer,action}})
+fn directional_lighting_plan(
+    archive: &Value,
+    current: &Value,
+    report: &mut OperationReport,
+) -> Result<Option<Plan>> {
+    use crate::model::AccessoryLighting;
+    if current["readback"] != true {
+        return Err("未读到设备当前灯效".into());
+    }
+    let parse = |value: &Value| {
+        serde_json::from_value::<AccessoryLighting>(value.clone())
+            .map_err(|e| format!("灯效配置不完整：{e}"))
+    };
+    let mut wanted = parse(archive.get("saved").unwrap_or(archive))?;
+    let mut old = parse(&current["saved"])?;
+    let modes: Vec<u8> = serde_json::from_value(current["lighting_direction_modes"].clone())
+        .map_err(|e| format!("未读到支持方向的灯效模式：{e}"))?;
+    let requested = wanted.direction.take();
+    if let Some(direction) = requested.filter(|_| modes.contains(&wanted.effect)) {
+        if direction <= 1 && old.direction.is_some_and(|n| n <= 1) {
+            wanted.direction = Some(direction);
+        } else {
+            report
+                .skipped
+                .push("原方向或导入的方向未知，保留设备当前方向。".into());
+        }
+    }
+    if wanted.matches_readback(&old) {
+        return Ok(None);
+    }
+    let apply = |config: &AccessoryLighting| json!({"op":"lighting-apply","extended_direction":true,"config":config});
+    let mut undo = Vec::new();
+    if wanted.direction.is_some() && wanted.direction != old.direction {
+        if !modes.contains(&old.effect) {
+            // Direction is global, but the device accepts a direction change only in a directional mode.
+            let mut restore_direction = wanted.clone();
+            restore_direction.direction = old.direction;
+            undo.push(apply(&restore_direction));
+            old.direction = None;
+        }
+    } else {
+        old.direction = None;
+    }
+    undo.push(apply(&old));
+    Ok(Some(Plan {
+        request: apply(&wanted),
+        undo,
+    }))
 }
-fn macro_request(control: u16, definition: crate::controls::MacroDefinition) -> Value {
-    json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Macro{control,definition}})
+fn binding_request(profile: Option<u8>, control: u16, layer: u8, action: BindingAction) -> Value {
+    ControlAction::Bind {
+        control,
+        layer,
+        action,
+    }
+    .request(profile)
+}
+fn macro_request(
+    profile: Option<u8>,
+    control: u16,
+    definition: crate::controls::MacroDefinition,
+) -> Value {
+    ControlAction::Macro {
+        control,
+        definition,
+    }
+    .request(profile)
 }
 fn control_state(value: Value) -> Result<ControlState> {
     let mut complete = serde_json::to_value(ControlState::default()).map_err(|e| e.to_string())?;
@@ -461,7 +523,7 @@ fn call(key: &str, request: Value) -> Result<Value> {
 }
 pub fn apply_configuration(key: &str) -> Result<OperationReport> {
     crate::resident_macros::disable_device(key)?;
-    checked_key(key)?;
+    let model = checked_key(key)?;
     let source = match read_json(&device_dir(key).join("imported-configuration.json"))? {
         Some(source) => source,
         None => collect(key)?,
@@ -567,7 +629,7 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                     }
                     let undo = if matches!(original.action, BindingAction::Macro(_)) {
                         if let Some(definition) = baseline.macros.get(&binding.control) {
-                            macro_request(binding.control, definition.clone())
+                            macro_request(baseline.profile, binding.control, definition.clone())
                         } else {
                             report
                                 .skipped
@@ -580,7 +642,12 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                             .push("当前未知映射无法完整恢复，该按键未改动。".into());
                         continue;
                     } else {
-                        binding_request(original.control, original.layer, original.action.clone())
+                        binding_request(
+                            baseline.profile,
+                            original.control,
+                            original.layer,
+                            original.action.clone(),
+                        )
                     };
                     if matches!(binding.action, BindingAction::Macro(_)) {
                         if !baseline.macro_supported {
@@ -606,13 +673,18 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                         });
                         if !identical {
                             plans.push(Plan {
-                                request: macro_request(binding.control, definition.clone()),
+                                request: macro_request(
+                                    baseline.profile,
+                                    binding.control,
+                                    definition.clone(),
+                                ),
                                 undo: vec![undo],
                             });
                         }
                     } else if binding.action != original.action {
                         plans.push(Plan {
                             request: binding_request(
+                                baseline.profile,
                                 binding.control,
                                 binding.layer,
                                 binding.action,
@@ -648,13 +720,14 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
                             mode == 19 || crate::devices::LIGHTS.iter().any(|(id, _)| *id == mode)
                         })
                     {
-                        let mut undo = vec![
-                            json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Colors(old)}),
-                        ];
+                        let mut undo = vec![ControlAction::Colors(old).request(baseline.profile)];
                         if state.light != Some(19) {
                             undo.push(json!({"op":"apply-setting","action":Action::Light(state.light.unwrap())}));
                         }
-                        plans.push(Plan{request:json!({"op":"controls-apply","extended_modes":true,"action":ControlAction::Colors(desired)}),undo});
+                        plans.push(Plan {
+                            request: ControlAction::Colors(desired).request(baseline.profile),
+                            undo,
+                        });
                     } else {
                         report
                             .skipped
@@ -668,7 +741,14 @@ pub fn apply_configuration(key: &str) -> Result<OperationReport> {
         .get("lighting")
         .or_else(|| archive["local"].get("g2-lighting"))
     {
-        if key == "hecate-g2-pro" {
+        if REGISTRY[model].supports("lighting-direction") {
+            let baseline = call(key, json!({"op":"lighting-read","extended_direction":true}))?;
+            match directional_lighting_plan(raw, &baseline, &mut report) {
+                Ok(Some(plan)) => plans.push(plan),
+                Ok(None) => {}
+                Err(error) => report.skipped.push(format!("本次跳过灯效：{error}")),
+            }
+        } else if key == "hecate-g2-pro" {
             let config = serde_json::from_value::<LightingConfig>(
                 raw.get("saved")
                     .filter(|v| !v.is_null())
@@ -844,6 +924,30 @@ pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationRep
 #[cfg(test)]
 mod tests {
     #[test]
+    fn lighting_archive_restores_global_direction_then_previous_effect() {
+        use serde_json::json;
+        let old = json!({"enabled":true,"effect":1,"rgb":[1,2,3],"speed":3,"brightness":50,"music_sync":false,"direction":0});
+        let current = json!({"readback":true,"saved":old,"lighting_direction_modes":[4]});
+        let mut wanted = old.clone();
+        wanted["effect"] = json!(4);
+        wanted["direction"] = json!(1);
+        let mut report = super::OperationReport::default();
+        let plan = super::directional_lighting_plan(&wanted, &current, &mut report)
+            .unwrap()
+            .unwrap();
+        assert_eq!(plan.request["config"]["direction"], 1);
+        assert_eq!(plan.undo[0]["config"]["effect"], 4);
+        assert_eq!(plan.undo[0]["config"]["direction"], 0);
+        assert_eq!(plan.undo[1]["config"]["effect"], 1);
+        assert!(plan.undo[1]["config"].get("direction").is_none());
+        wanted.as_object_mut().unwrap().remove("direction");
+        let unchanged = super::directional_lighting_plan(&wanted, &current, &mut report)
+            .unwrap()
+            .unwrap();
+        assert!(unchanged.request["config"].get("direction").is_none());
+        assert_eq!(unchanged.undo.len(), 1);
+    }
+    #[test]
     fn board_macro_archive_preserves_extended_mode_and_device_capacity() {
         use crate::controls::{ControlState, MacroDefinition, MacroEvent, MacroMode};
         let mut hardware = ControlState {
@@ -876,7 +980,11 @@ mod tests {
                 .unwrap();
         let definition = &decoded.macros[&3];
         assert_eq!(decoded.macro_limit_error(definition), None);
-        let request = super::macro_request(3, definition.clone());
+        let request = super::macro_request(Some(2), 3, definition.clone());
+        assert_eq!(request["profile"], 2);
+        assert!(super::macro_request(None, 3, definition.clone())
+            .get("profile")
+            .is_none());
         assert_eq!(request["extended_modes"], true);
         assert_eq!(
             request["action"]["Macro"]["definition"]["mode"],

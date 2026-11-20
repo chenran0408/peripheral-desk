@@ -176,6 +176,29 @@ pub(super) fn styles_path() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+pub(super) fn script_path() -> Result<PathBuf, String> {
+    let path = root()?.join("personal.js");
+    if !path.exists() {
+        atomic_write(&path, include_bytes!("personal.js"))?;
+    }
+    Ok(path)
+}
+
+pub(super) fn sync_script(dest: &Path) -> Result<(), String> {
+    let source = root()?.join("personal.js");
+    let generated = dest.join("_peripheral_desk").join("personal.js");
+    match fs::read(&source) {
+        Ok(content) => atomic_write(&generated, &content),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if generated.exists() {
+                fs::remove_file(generated).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 pub(super) fn local_wide(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     path.as_os_str().encode_wide().chain(Some(0)).collect()

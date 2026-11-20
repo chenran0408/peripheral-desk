@@ -382,13 +382,10 @@ impl Editor {
             b.editable
                 && match b.action {
                     BindingAction::Unknown(_) => false,
-                    BindingAction::Macro(_) => {
-                        self.page == 1
-                            && self
-                                .state
-                                .as_ref()
-                                .is_some_and(|s| s.macros.contains_key(&b.control))
-                    }
+                    BindingAction::Macro(_) => self
+                        .state
+                        .as_ref()
+                        .is_some_and(|s| s.macros.contains_key(&b.control)),
                     _ => true,
                 }
         })
@@ -869,10 +866,11 @@ impl Editor {
         );
         self.availability();
         let model = self.model;
+        let profile = self.state.as_ref().and_then(|state| state.profile);
         let window = hwnd as usize;
         thread::spawn(move || {
             let result = match action {
-                Some(action) => controls::apply(model, &action),
+                Some(action) => controls::apply_in_profile(model, profile, &action),
                 None => peripheral_desk::resident_macros::disable_device(REGISTRY[model].key)
                     .and_then(|_| controls::read(model)),
             };
@@ -1209,14 +1207,16 @@ impl Editor {
                 TEXT,
                 DT_LEFT,
             );
-            c.text(
-                REGISTRY[self.model].name,
-                R::new(28, 52, 780, 21),
-                13,
-                400,
-                MUTED,
-                DT_LEFT,
-            );
+            let name = REGISTRY[self.model].name;
+            let subtitle = self
+                .state
+                .as_ref()
+                .and_then(|state| state.profile)
+                .map_or_else(
+                    || name.to_owned(),
+                    |profile| format!("{name}   ·   板载配置 {}", u16::from(profile) + 1),
+                );
+            c.text(&subtitle, R::new(28, 52, 780, 21), 13, 400, MUTED, DT_LEFT);
             c.round(R::new(24, 144, 326, 512), 14, PANEL, Some(BORDER));
             c.round(R::new(366, 144, 650, 512), 14, PANEL, Some(BORDER));
             c.text(
@@ -1287,7 +1287,7 @@ impl Editor {
                     if !self.state.as_ref().is_some_and(|s| s.macro_supported) {
                         self.wrapped(
                             &c,
-                            "该设备尚未开放宏写入，请查看下方原因；这里不会把软件宏冒充板载宏。",
+                            "当前设备未提供板载宏写入。详情见下方的设备状态。",
                             390,
                             566,
                             426,
@@ -1297,7 +1297,7 @@ impl Editor {
                     } else if !self.editable() {
                         self.wrapped(
                             &c,
-                            "所选键位只读，请选择其他按键。已有设备宏暂不覆盖。",
+                            "所选键位当前只读，可从左侧选择其他按键。",
                             390,
                             572,
                             426,
@@ -1306,7 +1306,7 @@ impl Editor {
                         );
                     } else {
                         c.text(
-                            "本工具宏可再次编辑；未知旧宏保持只读。",
+                            "写入后会从设备读回，并显示当前宏。",
                             R::new(390, 596, 426, 25),
                             13,
                             400,

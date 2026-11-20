@@ -46,6 +46,8 @@ pub struct KeyColor {
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ControlState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<u8>,
     pub bindings: Vec<Binding>,
     #[serde(default)]
     pub binding_types: Vec<String>,
@@ -113,6 +115,17 @@ pub enum ControlAction {
     Colors(Vec<KeyColor>),
 }
 
+impl ControlAction {
+    pub fn request(&self, profile: Option<u8>) -> serde_json::Value {
+        let mut request =
+            serde_json::json!({"op":"controls-apply","extended_modes":true,"action":self});
+        if let Some(index) = profile {
+            request["profile"] = index.into();
+        }
+        request
+    }
+}
+
 #[cfg(feature = "driver-runtime")]
 #[path = "controls_runtime.rs"]
 mod runtime;
@@ -129,10 +142,22 @@ pub fn read(model: usize) -> crate::protocol::Result<ControlState> {
 }
 #[cfg(not(feature = "driver-runtime"))]
 pub fn apply(model: usize, action: &ControlAction) -> crate::protocol::Result<ControlState> {
+    apply_in_profile(model, None, action)
+}
+#[cfg(feature = "desktop")]
+pub fn apply_in_profile(
+    model: usize,
+    profile: Option<u8>,
+    action: &ControlAction,
+) -> crate::protocol::Result<ControlState> {
+    #[cfg(feature = "driver-runtime")]
+    if profile.is_none() {
+        return runtime::apply(model, action);
+    }
     let spec = crate::devices::REGISTRY.get(model).ok_or("设备编号无效")?;
     serde_json::from_value(crate::plugin_manager::invoke(
         spec.key,
-        serde_json::json!({"op":"controls-apply","extended_modes":true,"action":action}),
+        action.request(profile),
     )?)
     .map_err(|e| format!("驱动返回键位格式错误：{e}"))
 }

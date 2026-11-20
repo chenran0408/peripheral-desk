@@ -92,14 +92,14 @@ fn cz_assets(data: &[u8]) -> Result<Vec<String>, String> {
 fn save_cz(dest: &Path) -> Result<(), String> {
     let manifest_path = format!("{CZ}/asset-manifest.json");
     let manifest_file = dest.join(&manifest_path);
-    let manifest = if manifest_file.is_file() {
-        fs::read(&manifest_file).map_err(|e| e.to_string())?
+    let files = if manifest_file.is_file() {
+        cz_assets(&fs::read(&manifest_file).map_err(|e| e.to_string())?)?
     } else {
         let data = fetch(SITE, &manifest_path)?;
+        let files = cz_assets(&data)?;
         atomic_write(&manifest_file, &data)?;
-        data
+        files
     };
-    let files = cz_assets(&manifest)?;
     for batch in files.chunks(6) {
         std::thread::scope(|scope| -> Result<(), String> {
             let jobs: Vec<_> = batch

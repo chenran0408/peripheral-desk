@@ -272,6 +272,9 @@ unsafe fn attach(hwnd: HWND, profile: &[u16]) -> webview2_com::Result<()> {
                         web.Source(&mut uri)?;
                         local = take_pwstr(uri).starts_with(workspace::LOCAL_SITE);
                         let _ = menu::apply_style(&web);
+                        if local {
+                            menu::load_user_module(&web)?;
+                        }
                     }
                     if local {
                         "迈从 M HUB · 本地可编辑工作区"
