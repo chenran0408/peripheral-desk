@@ -162,7 +162,10 @@ fn edit_binding(bytes: &mut [u8], control: u16, action: &BindingAction) -> Resul
         return Err("该键位是空槽或保留的 Fn 键，不能修改".into());
     }
     let raw = encode(action)?;
-    bytes[index * 4..index * 4 + 4].copy_from_slice(&raw);
+    let slot = &mut bytes[index * 4..index * 4 + 4];
+    if decode(slot) != *action {
+        slot.copy_from_slice(&raw);
+    }
     Ok(())
 }
 fn edit_colors(bytes: &mut [u8], colors: &[KeyColor]) -> Result<()> {
@@ -365,6 +368,10 @@ mod tests {
             decode(&[7, 0, 0, 4]),
             BindingAction::Unknown(vec![7, 0, 0, 4])
         );
+        after[36..40].copy_from_slice(&[0, 1, 6, 0]);
+        let same = decode(&after[36..40]);
+        edit_binding(&mut after, 9, &same).unwrap();
+        assert_eq!(&after[36..40], &[0, 1, 6, 0]);
         assert!(encode(&BindingAction::Macro(0)).is_err());
     }
     #[test]
