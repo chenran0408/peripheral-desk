@@ -9,9 +9,9 @@ Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看�
 在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载以 `-portable.zip` 结尾的便携包并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开「插件管理」，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
 
 - 在「插件管理」按品牌或型号搜索，选中需要的插件后统一安装。共用接收器会提示核对型号。可在[按厂商查找外设](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/catalog/README.md)查看各连接方式的支持记录。
-- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.18/PeripheralDesk-0.4.11-preview.18-windows-x64-setup.exe)。安装后自带本地迈从驱动中心，在「设备调节 → 迈从 M HUB」打开。便携包提供相同功能。Windows 需有 Microsoft Edge WebView2。
+- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.19/PeripheralDesk-0.4.11-preview.19-windows-x64-setup.exe)。安装后自带本地迈从驱动中心，在「设备调节 → 迈从 M HUB」打开。便携包提供相同功能。Windows 需有 Microsoft Edge WebView2。
 - 在「设备调节」也可进入雷蛇、罗技驱动中心，选择自己的型号。「选择设备插件」会直接列出该品牌的插件。
-- 驱动中心从本机加载。首次连接时选择自己的设备。型号表、网页、改键修复和后续更新均由外设盒提供；在右上角「M HUB 菜单」可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
+- 驱动中心从本机加载。在内置版中，匹配的迈从设备由 Windows 直接连接。连接多台时，优先打开从电量页点选或上次用过的型号。型号表、网页、改键修复和后续更新均由外设盒提供；在右上角「M HUB 菜单」可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
 - 「电量」显示可报告电池状态的外设，点设备查看本次或上次读数。G2 Pro 等有线外设可在「设备调节」找到。
 - 左键托盘图标查看电量，点一行查看该设备；右键可打开电量总览、设备调节或退出。
 - 点右上角关闭会留在托盘。彻底退出请使用托盘菜单或「偏好设置」中的「退出程序」。

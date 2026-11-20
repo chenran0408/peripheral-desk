@@ -2,10 +2,18 @@
 // including previously saved editions with a custom device list.
 (() => {
   const hub = window.PeripheralDeskHub ||= {};
-  hub.chooseDevice ||= () => {
-    hub.stayInChooser = true;
+  function home() {
     const router = document.querySelector("#app")?.__vue_app__?.config.globalProperties.$router;
     if (router) return router.push({name:"ConnectDevice"});
     location.hash = "/connectDevice";
+  }
+  hub.chooseDevice ||= () => {
+    hub.stayInChooser = true;
+    return home();
+  };
+  hub.openModel ||= model => {
+    window.__peripheralDeskPreferredModel = model || "";
+    hub.stayInChooser = false;
+    return home();
   };
 })();

@@ -74,7 +74,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Driver SDK software tests failed" }
           }
       - name: Verify local M HUB navigation and G75 Pro onboard key remaps
-        run: node --test src/mhub/fixes/device-connection.test.cjs src/mhub/fixes/g75-keymap.test.cjs
+        run: node --test src/mhub/fixes/device-connection.test.cjs src/mhub/fixes/g75-keymap.test.cjs src/mhub/hub/native-transport.test.cjs
       - name: Build the desktop core without bundled device implementations
         shell: pwsh
         run: ./scripts/build-desktop.ps1

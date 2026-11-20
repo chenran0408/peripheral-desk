@@ -99,7 +99,8 @@ def integrate_device_connection(module, hub):
     binding = (hub / "device-binding.js").read_text(encoding="utf-8-sig").strip()
     factory = (hub / "device-connection.js").read_text(encoding="utf-8-sig")
     anchors = (
-        ("cl=ref(0);watch(()=>Ga.chargeStatus", binding + ",cl=ref(0);watch(()=>Ga.chargeStatus"),
+        ("cl=ref(0);watch(()=>Ga.chargeStatus",
+         binding + ",cl=ref(0);onBeforeUnmount($a.afterEach(pdConnection.arrived));watch(()=>Ga.chargeStatus"),
         ("const ko=ir=sa.beginLegacyRefresh();Ja.abort()",
          "const ko=ir=sa.beginLegacyRefresh();pdConnection.begin(ko);Ja.abort()"),
         ("markListInit({success:_o})", "pdConnection.finish(ko,_o),markListInit({success:_o})"),
@@ -141,7 +142,8 @@ def fork_site(originals, directory, rustc):
     # The keyboard editor opens these independent documents in same-origin frames.
     # Apply the local policy before their scripts, without loading the main Vue UI.
     policy = next(line for line in head.splitlines() if b'http-equiv="Content-Security-Policy"' in line)
-    child_head = (policy + b'\n<script src="/desk-hub/magnetic-models.js"></script>'
+    child_head = (policy + b'\n<script src="/_peripheral_desk/connection.js"></script>'
+                  b'\n<script src="/desk-hub/magnetic-models.js"></script>'
                   b'\n<link rel="stylesheet" href="/desk-hub/magnetic.css">'
                   b'\n<script defer src="/desk-hub/magnetic.js"></script>')
     for name in MAGNETIC_PAGES:

@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.4.11-preview.19
+
+- 打开迈从 M HUB 时，支持的设备由外设盒直接连接，首次使用也可省去浏览器授权弹窗。
+- 多台设备同时在线，从电量页点哪台就打开哪台。从品牌入口打开时优先回到上次用的设备。顶栏「切换设备」仍可随时手选，原来的键盘布局、改键和灯效界面都保留。
+- 原厂支持但尚未接入 Windows 直连的设备，继续使用 M HUB 的设备连接入口。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.11-preview.19/PeripheralDesk-0.4.11-preview.19-windows-x64-setup.exe)
+
 ## 0.4.11-preview.18
 
 - 从电量详情可以直接打开迈从 M HUB，在主窗口点「切换设备」就能返回熟悉的设备选择页。改键、板载配置、灯效预览仍使用原来的 M HUB 页面。

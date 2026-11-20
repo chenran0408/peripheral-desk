@@ -3,6 +3,9 @@ mod bootstrap;
 mod builtin;
 mod fixes;
 mod menu;
+mod native_hid;
+mod transport;
+pub use transport::devices_changed;
 mod release_resources;
 mod resources;
 mod workspace;
@@ -97,7 +100,7 @@ pub fn parent_moved() {
     }
 }
 
-pub fn choose_device() -> Result<(), String> {
+fn run_local_script(code: &str) -> Result<(), String> {
     let controller = CONTROLLER
         .with_borrow(Clone::clone)
         .ok_or("驱动中心正在打开")?;
@@ -108,12 +111,13 @@ pub fn choose_device() -> Result<(), String> {
         if !take_pwstr(page).starts_with(workspace::LOCAL_SITE) {
             return Err("本地驱动页打开后即可切换设备".into());
         }
-        web.ExecuteScript(
-            PCWSTR(wide("window.PeripheralDeskHub?.chooseDevice()").as_ptr()),
-            None,
-        )
-        .map_err(|e| e.to_string())
+        web.ExecuteScript(PCWSTR(wide(code).as_ptr()), None)
+            .map_err(|e| e.to_string())
     }
+}
+
+pub fn choose_device() -> Result<(), String> {
+    run_local_script("window.PeripheralDeskHub?.chooseDevice()")
 }
 
 pub fn show_menu(x: i32, y: i32) {
@@ -148,8 +152,25 @@ pub fn shutdown() {
 /// # Safety
 /// The owner must be a live window on the calling UI thread.
 pub unsafe fn open(owner: HWND, bounds: RECT) -> Result<(), String> {
+    open_for_model(owner, bounds, None)
+}
+
+/// Open the local editor with the model selected in the app.
+///
+/// # Safety
+/// The owner must be a live window on the calling UI thread.
+pub unsafe fn open_for_model(
+    owner: HWND,
+    bounds: RECT,
+    preferred: Option<&'static str>,
+) -> Result<(), String> {
+    transport::prefer(preferred);
     if active() {
         set_bounds(bounds);
+        if let Some(model) = preferred {
+            let id = serde_json::to_string(model).map_err(|e| e.to_string())?;
+            run_local_script(&format!("window.PeripheralDeskHub?.openModel({id})"))?;
+        }
         return Ok(());
     }
     let local = std::env::var_os("LOCALAPPDATA").ok_or("无法定位当前用户的 M HUB 配置目录")?;
@@ -268,7 +289,8 @@ unsafe fn attach(
     resources::attach(hwnd, &web, env)?;
     let settings = web.Settings()?;
     settings.SetAreHostObjectsAllowed(false)?;
-    settings.SetIsWebMessageEnabled(false)?;
+    settings.SetIsWebMessageEnabled(true)?;
+    transport::attach(hwnd, &web)?;
     let mut token = 0;
     web.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
@@ -427,6 +449,10 @@ unsafe fn resize(hwnd: HWND, controller: &ICoreWebView2Controller) -> windows::c
 
 unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
+        transport::READY => {
+            transport::deliver();
+            0
+        }
         SHOW_MENU => {
             menu::popup(hwnd, w as i32, l as i32);
             0
@@ -463,6 +489,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_DESTROY => {
             HOST.take();
+            transport::select_edition(false);
             menu::close();
             resources::close();
             if let Some(controller) = CONTROLLER.take() {

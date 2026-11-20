@@ -170,7 +170,11 @@ unsafe fn open_path(path: &std::path::Path, edit: bool) -> Result<(), String> {
     Ok(())
 }
 
-unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<(), String> {
+unsafe fn navigate_local(
+    web: &ICoreWebView2,
+    path: &std::path::Path,
+    managed: bool,
+) -> Result<(), String> {
     workspace::prepare_user_hooks(path)?;
     let web3: ICoreWebView2_3 = web.cast().map_err(|e| e.to_string())?;
     web3.SetVirtualHostNameToFolderMapping(
@@ -179,6 +183,16 @@ unsafe fn navigate_local(web: &ICoreWebView2, path: &std::path::Path) -> Result<
         COREWEBVIEW2_HOST_RESOURCE_ACCESS_KIND_DENY,
     )
     .map_err(|e| e.to_string())?;
+    let native = managed
+        && path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(builtin::folder_name);
+    // The mapped HTTPS origin resolves these files in WebView2's renderer.
+    // Prepare the per-launch context before the vendor's first getDevices().
+    let generated = path.join("_peripheral_desk").join("connection.js");
+    crate::storage::atomic_write(&generated, transport::script(native).as_bytes())?;
+    transport::select_edition(native);
     resources::set_root(path);
     web.Navigate(PCWSTR(
         wide(&format!("{}index.html", workspace::LOCAL_SITE)).as_ptr(),
@@ -271,7 +285,7 @@ unsafe fn open_local(
     mode: &str,
 ) -> Result<(), String> {
     BUILTIN_RESULT.take();
-    navigate_local(web, path)?;
+    navigate_local(web, path, matches!(mode, "builtin" | "managed"))?;
     let build = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -373,7 +387,12 @@ pub(super) unsafe fn open_initial(hwnd: HWND, web: &ICoreWebView2) -> windows::c
         workspace::selected().ok(),
     );
     let result = match choice {
-        Initial::Local(path) => navigate_local(web, &path).and_then(|()| {
+        Initial::Local(path) => navigate_local(
+            web,
+            &path,
+            matches!(mode.as_deref(), Some("builtin" | "managed")),
+        )
+        .and_then(|()| {
             if mode.as_deref() == Some("official") {
                 remember_mode("local")
             } else {

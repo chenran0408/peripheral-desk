@@ -447,6 +447,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             0
         }
+        WM_DEVICECHANGE if w == DBT_DEVNODES_CHANGED as usize => {
+            crate::mhub::devices_changed();
+            0
+        }
         WM_TIMER if w == 1 => {
             if a.queued.is_empty() {
                 a.begin(hwnd, None);
@@ -1470,7 +1474,11 @@ impl App {
         crate::plugin_manager::set_web_driver_devices(
             peers.into_iter().map(|spec| spec.key).collect(),
         );
-        match crate::mhub::open(hwnd, self.hub_bounds(hwnd)) {
+        let preferred = match self.page {
+            Page::Battery(m) | Page::Device(m) if REGISTRY[m].mchose() => Some(REGISTRY[m].key),
+            _ => None,
+        };
+        match crate::mhub::open_for_model(hwnd, self.hub_bounds(hwnd), preferred) {
             Ok(()) => {
                 self.hub_source = self.page;
                 self.hub_open = true;
