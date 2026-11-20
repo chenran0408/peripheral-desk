@@ -49,8 +49,30 @@ fn checked_key(key: &str) -> Result<usize> {
         .position(|spec| spec.key == key)
         .ok_or_else(|| "配置中的设备尚未加入当前设备目录".into())
 }
-fn device_dir(key: &str) -> PathBuf {
-    data().join("devices").join(key)
+fn cache_path(key: &str, name: &str, for_write: bool) -> PathBuf {
+    let base = data().join("devices").join(key);
+    let legacy = base.join(format!("{name}.json"));
+    if name == "resident-macros" {
+        // Definitions are shared by model. Each active recovery pins the actual receiver.
+        return legacy;
+    }
+    if REGISTRY
+        .iter()
+        .any(|spec| spec.key == key && spec.supports("instance-target"))
+    {
+        if let Some(target) = plugin_manager::bound_device_target(key)
+            .unwrap_or_else(|| plugin_manager::selected_device_target(key))
+        {
+            let specific = base
+                .join("instances")
+                .join(target.id)
+                .join(format!("{name}.json"));
+            if for_write || specific.is_file() || plugin_manager::device_targets(key).len() != 1 {
+                return specific;
+            }
+        }
+    }
+    legacy
 }
 fn local_files(key: &str) -> Vec<(&'static str, &'static str)> {
     match key {
@@ -116,6 +138,8 @@ fn portable(value: Value) -> Value {
                         "username",
                         "sdk",
                         "identity",
+                        "instance_id",
+                        "target_instance",
                         "error",
                         "notice",
                     ]
@@ -137,7 +161,7 @@ fn collect(key: &str) -> Result<Value> {
     checked_key(key)?;
     let mut cached = serde_json::Map::new();
     for name in CACHE_NAMES {
-        if let Some(value) = read_json(&device_dir(key).join(format!("{name}.json")))? {
+        if let Some(value) = read_json(&cache_path(key, name, false))? {
             cached.insert(
                 name.into(),
                 if name == "resident-macros" {
@@ -154,8 +178,8 @@ fn collect(key: &str) -> Result<Value> {
             local.insert(alias.into(), value);
         }
     }
-    let mut archive = read_json(&device_dir(key).join("imported-configuration.json"))?
-        .unwrap_or_else(|| json!({}));
+    let mut archive =
+        read_json(&cache_path(key, "imported-configuration", false))?.unwrap_or_else(|| json!({}));
     merge(
         &mut archive,
         json!({"schema":1,"device":key,"appVersion":env!("CARGO_PKG_VERSION"),"cached":cached,"local":local}),
@@ -229,14 +253,14 @@ fn normalize(mut value: Value, key: &str) -> Result<Value> {
 fn target_files(key: &str) -> Vec<PathBuf> {
     let mut paths: Vec<_> = CACHE_NAMES
         .iter()
-        .map(|name| device_dir(key).join(format!("{name}.json")))
+        .map(|name| cache_path(key, name, true))
         .collect();
     paths.extend(
         local_files(key)
             .into_iter()
             .map(|(_, file)| data().join(file)),
     );
-    paths.push(device_dir(key).join("imported-configuration.json"));
+    paths.push(cache_path(key, "imported-configuration", true));
     paths
 }
 fn backup(key: &str) -> Result<()> {
@@ -343,7 +367,7 @@ pub fn import_configuration(key: &str, path: &Path) -> Result<OperationReport> {
             .get(name)
             .filter(|value| value.is_object())
         {
-            let target = device_dir(key).join(format!("{name}.json"));
+            let target = cache_path(key, name, true);
             if name == "resident-macros" {
                 match crate::resident_macros::import_value(key, value.clone(), read_json(&target)?)
                 {
@@ -366,10 +390,7 @@ pub fn import_configuration(key: &str, path: &Path) -> Result<OperationReport> {
             }
         }
     }
-    writes.push((
-        device_dir(key).join("imported-configuration.json"),
-        incoming,
-    ));
+    writes.push((cache_path(key, "imported-configuration", true), incoming));
     let mut prepared = Vec::new();
     for (path, incoming) in writes {
         let old = read_bytes(&path)?;
@@ -521,9 +542,13 @@ fn call(key: &str, request: Value) -> Result<Value> {
     plugin_manager::invoke(key, request)
 }
 pub fn apply_configuration(key: &str) -> Result<OperationReport> {
+    let target = plugin_manager::selected_device_target(key);
+    plugin_manager::with_device_target(key, target.as_ref(), || apply_selected_configuration(key))
+}
+fn apply_selected_configuration(key: &str) -> Result<OperationReport> {
     crate::resident_macros::disable_device(key)?;
     let model = checked_key(key)?;
-    let source = match read_json(&device_dir(key).join("imported-configuration.json"))? {
+    let source = match read_json(&cache_path(key, "imported-configuration", false))? {
         Some(source) => source,
         None => collect(key)?,
     };
@@ -891,7 +916,7 @@ pub fn export_diagnostics(key: Option<&str>, path: &Path) -> Result<OperationRep
             .filter(|interface| crate::backend::matches(interface, model))
             .map(anonymous_interface)
             .collect();
-        let state = read_json(&device_dir(spec.key).join("state.json"))
+        let state = read_json(&cache_path(spec.key, "state", false))
             .ok()
             .flatten()
             .unwrap_or_else(|| json!({}));

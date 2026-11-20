@@ -1,5 +1,5 @@
 pub(super) const MODULE: &str = "assets/main-DIt5vAcV.js";
-pub(super) const STAMP: &str = "/* Peripheral Desk G75 keymap v1 */";
+pub(super) const STAMP: &str = "/* Peripheral Desk G75 keymap v2 */";
 
 // Match the complete set of call sites before making any changes. If the user
 // already rewrote this component, keep their implementation intact.
@@ -10,8 +10,8 @@ const HOOKS: &[(&str, &str)] = &[
             include_str!("g75-keymap.js"),
             "\nconst Ia=ref([]),$a=ref(0);let Ra=0;",
             "const pdG75=ma==='G75_Pro'&&!xa.value?createG75Editor(ha,keyList$6,[...baseArr,...mouseArr,...mediaArr,...extendedArr],va):null;",
-            "function pdSave(index){const handler=navigator.deviceHandler,layer=da.keyLayer;",
-            "return pdG75.save(handler,layer,Ia.value[index]).catch(error=>{",
+            "function pdSave(index,preparation){const handler=navigator.deviceHandler,layer=da.keyLayer;",
+            "return pdG75.save(handler,layer,Ia.value[index],preparation).catch(error=>{",
             "messageError({message:error.message});",
             "if(pa&&handler===navigator.deviceHandler&&layer===da.keyLayer)return Ua({localLoading:true})})}",
         ),
@@ -21,8 +21,8 @@ const HOOKS: &[(&str, &str)] = &[
         "const La=()=>{if(pdG75)return Ua({localLoading:true});Ia.value=JSON.parse(JSON.stringify(ha)),syncKeyLabels",
     ),
     (
-        "const Ya=++Ra;Ia.value=JSON.parse(JSON.stringify(ha));",
-        "const Ya=++Ra;Ia.value=pdG75?(pdG75.beginRead(),[]):JSON.parse(JSON.stringify(ha));",
+        "const Ua=({localLoading:Ha=!1}={})=>{const Ya=++Ra;Ia.value=JSON.parse(JSON.stringify(ha));",
+        "const Ua=async({localLoading:Ha=!1}={})=>{if(pdG75)await pdG75.waitForWrites();const Ya=++Ra;Ia.value=pdG75?(pdG75.beginRead(),[]):JSON.parse(JSON.stringify(ha));",
     ),
     (
         "wiredParser:_r,wirelessParser:Sr});const Dr=Ha?null:ca();",
@@ -42,6 +42,13 @@ const HOOKS: &[(&str, &str)] = &[
         ),
     ),
     (
+        r#"Ua(),watch(()=>da.keyboardTab,Ha=>{xa.value&&Ha==="lightSetting"&&Ua()});"#,
+        concat!(
+            r#"if(ma!=="G75_Pro"||!xa.value)Ua();"#,
+            r#"watch(()=>da.keyboardTab,Ha=>{if(ma==="G75_Pro"){if(xa.value===(Ha==="lightSetting"))Ua()}else if(xa.value&&Ha==="lightSetting")Ua()});"#,
+        ),
+    ),
+    (
         "syncKeyLabels(Ta.value,Ia.value)}).finally(()=>{Ha?$a.value-=1:Dr()})",
         concat!(
             "syncKeyLabels(Ta.value,Ia.value)}).catch(error=>{if(!pdG75)throw error;",
@@ -50,7 +57,7 @@ const HOOKS: &[(&str, &str)] = &[
     ),
     (
         "try{await lr,await za()}catch(yr){Ia.value[Qa]=ar",
-        "try{await lr,await (pdG75?pdSave(Qa):za())}catch(yr){Ia.value[Qa]=ar",
+        "try{if(pdG75)await pdSave(Qa,lr);else{await lr;await za()}}catch(yr){Ia.value[Qa]=ar",
     ),
     (
         "Ia.value[_r].fn2Val=Qa);za()}},gr=async",

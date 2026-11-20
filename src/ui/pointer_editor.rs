@@ -211,6 +211,7 @@ type EditorRead = Result<(Profile, Box<PointerSample>), String>;
 
 struct Editor {
     spec: &'static DeviceSpec,
+    target: Option<crate::hid::DeviceTarget>,
     dpi: u32,
     font: HFONT,
     brush: HBRUSH,
@@ -337,8 +338,9 @@ impl Editor {
         self.enable(hwnd);
         InvalidateRect(hwnd, null(), 0);
         let dest = hwnd as usize;
+        let target = self.target.clone();
         thread::spawn(move || {
-            let work = (|| {
+            let work = plugin_manager::with_device_target(spec.key, target.as_ref(), || {
                 if let Some(request) = request {
                     plugin_manager::invoke(spec.key, request)?;
                 }
@@ -397,7 +399,7 @@ impl Editor {
                         error
                     }
                 })
-            })();
+            });
             if tx.send(work).is_ok() {
                 PostMessageW(dest as HWND, RESULT, 0, 0);
             }
@@ -835,6 +837,7 @@ unsafe fn create(
     let brush = CreateSolidBrush(0x00241c1c);
     let mut editor = Box::new(Editor {
         spec,
+        target: plugin_manager::selected_device_target(spec.key),
         dpi,
         font,
         brush,

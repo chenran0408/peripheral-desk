@@ -136,8 +136,17 @@ fn states_for_registry(saved: &[State], registry: &[crate::devices::DeviceSpec])
     states
 }
 
+fn discover() -> Result<Vec<Interface>> {
+    let found = hid::enumerate();
+    #[cfg(feature = "desktop")]
+    if let Ok(interfaces) = &found {
+        crate::plugin_manager::observe_interfaces(interfaces);
+    }
+    found
+}
+
 pub fn refresh(previous: &Snapshot, action: Option<(usize, Action)>) -> (Snapshot, Result<()>) {
-    let (next, result) = refresh_with(previous, action, hid::enumerate(), crate::adapters::open);
+    let (next, result) = refresh_with(previous, action, discover(), crate::adapters::open);
     (
         if action.is_none() {
             with_system_battery(next)
@@ -176,7 +185,7 @@ pub fn refresh_progress_except<F>(
 where
     F: FnMut(usize, State),
 {
-    let interfaces = match hid::enumerate() {
+    let interfaces = match discover() {
         Ok(interfaces) => interfaces,
         Err(error) => {
             let (next, result) =
@@ -214,8 +223,8 @@ where
     next.devices = states_for_registry(&previous.devices, &REGISTRY);
     let interfaces = Arc::new(interfaces);
 
-    // Serialize models that expose the same VID/PID. This conservatively keeps
-    // sibling HID collections on a shared receiver from being read together.
+    // Serialize collections on the same physical receiver. Two independent units
+    // with an identical VID/PID are distinct resources.
     let identities: Vec<std::collections::HashSet<_>> = REGISTRY
         .iter()
         .enumerate()
@@ -223,10 +232,19 @@ where
             interfaces
                 .iter()
                 .filter(|interface| matches(interface, model))
-                .map(|interface| (interface.vid, interface.pid))
+                .map(Interface::instance_id)
                 .collect()
         })
         .collect();
+    let editor_instances = editing
+        .and_then(|model| identities.get(model).cloned())
+        .unwrap_or_default();
+    #[cfg(feature = "desktop")]
+    let editor_instances = editing
+        .and_then(|model| REGISTRY.get(model))
+        .and_then(|spec| crate::plugin_manager::selected_device_target(spec.key))
+        .map(|t| [t.id].into_iter().collect())
+        .unwrap_or(editor_instances);
     let mut parents: Vec<usize> = (0..REGISTRY.len()).collect();
     for left in 0..REGISTRY.len() {
         for right in (left + 1)..REGISTRY.len() {
@@ -267,6 +285,7 @@ where
             let group_index = group_index.clone();
             let tx = tx.clone();
             let open = &open;
+            let editor_instances = &editor_instances;
             let prior_devices = prior_devices.clone();
             scope.spawn(move || {
                 let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| loop {
@@ -274,24 +293,15 @@ where
                     let Some(models) = groups.get(group) else {
                         break;
                     };
-                    let editor_owns_group = editing.is_some_and(|model| models.contains(&model));
                     for &model in models {
-                        if editor_owns_group {
-                            let mut cached = prior_devices[model].clone();
-                            cached.fresh = false;
-                            cached.charging = None;
-                            if tx.send((model, cached)).is_err() {
-                                return;
-                            }
-                            continue;
-                        }
                         let state =
                             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                refresh_scoped(
+                                refresh_scoped_except(
                                     previous,
                                     None,
                                     Some(model),
                                     Ok((*interfaces).clone()),
+                                    editor_instances,
                                     |index, interface| open(index, interface),
                                 )
                                 .0
@@ -358,7 +368,7 @@ pub fn refresh_device(previous: &Snapshot, model: usize) -> (Snapshot, Result<()
         previous,
         None,
         Some(model),
-        hid::enumerate(),
+        discover(),
         crate::adapters::open,
     )
 }
@@ -378,6 +388,40 @@ fn refresh_scoped<F>(
     action: Option<(usize, Action)>,
     scope: Option<usize>,
     interfaces: Result<Vec<Interface>>,
+    open: F,
+) -> (Snapshot, Result<()>)
+where
+    F: FnMut(usize, &Interface) -> Result<Box<dyn crate::adapters::DeviceSession>>,
+{
+    refresh_scoped_except(
+        previous,
+        action,
+        scope,
+        interfaces,
+        &Default::default(),
+        open,
+    )
+}
+
+fn stale_state(previous: &State, present: bool) -> State {
+    State {
+        key: previous.key.clone(),
+        instance_id: previous.instance_id.clone(),
+        percent: previous.percent,
+        battery_raw: previous.battery_raw,
+        updated: previous.updated,
+        alerted: previous.alerted,
+        present,
+        ..State::default()
+    }
+}
+
+fn refresh_scoped_except<F>(
+    previous: &Snapshot,
+    action: Option<(usize, Action)>,
+    scope: Option<usize>,
+    interfaces: Result<Vec<Interface>>,
+    editing: &std::collections::HashSet<String>,
     mut open: F,
 ) -> (Snapshot, Result<()>)
 where
@@ -414,55 +458,130 @@ where
                 1
             }
         });
-        let d = &mut next.devices[model];
-        d.present = !candidates.is_empty();
-        d.fresh = false;
-        d.charging = None;
-        d.dpi = None;
-        d.rate = None;
-        d.sleep_seconds = None;
-        d.light = None;
-        d.tuning.clear();
-        d.dpi_stages.clear();
-        d.active_stage = None;
-        if candidates.is_empty() {
-            d.error = "未检测到支持的接口，请连接接收器或 USB 数据线".into();
-            if scope == Some(model) {
-                action_result = Err(d.error.clone());
-            }
-            continue;
-        }
-        let mut read = None;
+        let mut groups: std::collections::BTreeMap<String, (hid::DeviceTarget, Vec<&Interface>)> =
+            std::collections::BTreeMap::new();
         for interface in candidates {
-            let result = open(model, interface).and_then(|session| {
-                if let Some((m, a)) = action {
-                    if m == model {
-                        action_result = session.read().and_then(|current| {
-                            spec.validate(a, &current)?;
-                            session.apply(a)
-                        });
-                    }
-                }
-                session.read()
+            let t = interface.target();
+            groups
+                .entry(t.id.clone())
+                .or_insert_with(|| (t, Vec::new()))
+                .1
+                .push(interface);
+        }
+
+        #[cfg(feature = "desktop")]
+        let target = crate::plugin_manager::bound_device_target(spec.key)
+            .unwrap_or_else(|| crate::plugin_manager::selected_device_target(spec.key));
+        #[cfg(not(feature = "desktop"))]
+        let target: Option<hid::DeviceTarget> = None;
+        let selected = target
+            .map(|t| t.id)
+            .or_else(|| (groups.len() == 1).then(|| groups.keys().next().unwrap().clone()));
+        let previous_state = &next.devices[model];
+        #[cfg(feature = "desktop")]
+        let cached_selection = selected
+            .as_ref()
+            .and_then(|id| crate::plugin_manager::device_target_state(spec.key, id));
+        #[cfg(not(feature = "desktop"))]
+        let cached_selection: Option<State> = None;
+        let mut displayed = match cached_selection.as_ref() {
+            Some(state) => stale_state(state, false),
+            None if selected.as_deref().is_none_or(|id| {
+                previous_state.instance_id.is_empty() || previous_state.instance_id == id
+            }) =>
+            {
+                stale_state(previous_state, false)
+            }
+            None => State {
+                key: spec.key.into(),
+                instance_id: selected.clone().unwrap_or_default(),
+                ..State::default()
+            },
+        };
+        displayed.error = if selected.is_some() || groups.is_empty() {
+            "未检测到所选设备的接口，请连接接收器或 USB 数据线".into()
+        } else {
+            "检测到多台同型号设备，请选择其中一台".into()
+        };
+        let count = groups.len();
+        for (id, (target, candidates)) in groups {
+            let is_selected = selected.as_deref() == Some(&id);
+            let write = action.filter(|(m, _)| *m == model);
+            if write.is_some() && !is_selected {
+                continue;
+            }
+            #[cfg(feature = "desktop")]
+            let cached = crate::plugin_manager::device_target_state(spec.key, &id);
+            #[cfg(not(feature = "desktop"))]
+            let cached: Option<State> = None;
+            let baseline = cached.as_ref().or_else(|| {
+                (previous_state.instance_id == id
+                    || (count == 1 && previous_state.instance_id.is_empty()))
+                .then_some(previous_state)
             });
-            match result {
-                Ok(mut s) => {
-                    if !s.fresh && s.present && s.percent.is_none() {
-                        s.percent = d.percent;
+            let mut sample = baseline
+                .map(|s| stale_state(s, true))
+                .unwrap_or_else(|| State {
+                    present: true,
+                    ..State::default()
+                });
+            sample.key = spec.key.into();
+            sample.instance_id = id.clone();
+            if editing.contains(&id) {
+                sample.error.clear();
+            } else if count > 1 && !spec.supports("instance-target") {
+                sample.error = "检测到多台匹配设备；此插件需要更新才能区分实物".into();
+            } else {
+                let mut issued = false;
+                for interface in candidates {
+                    let result = open(model, interface).and_then(|session| {
+                        if let Some((_, action)) = write {
+                            if issued {
+                                return Err("已发送设备设置，需要重新读取才能确认结果".into());
+                            }
+                            issued = true;
+                            action_result = session.read().and_then(|current| {
+                                spec.validate(action, &current)?;
+                                session.apply(action)
+                            });
+                        }
+                        session.read()
+                    });
+                    match result {
+                        Ok(mut s) => {
+                            if !s.fresh && s.present && s.percent.is_none() {
+                                s.percent = sample.percent;
+                            }
+                            s.key = spec.key.into();
+                            s.instance_id = id.clone();
+                            s.alerted = sample.alerted;
+                            sample = s;
+                            break;
+                        }
+                        Err(e) => {
+                            sample.error = e;
+                            if issued {
+                                break;
+                            }
+                        }
                     }
-                    s.key = spec.key.into();
-                    s.alerted = d.alerted;
-                    read = Some(s);
-                    break;
                 }
-                Err(e) => d.error = e,
+            }
+            #[cfg(feature = "desktop")]
+            crate::plugin_manager::remember_device_state(spec.key, &target, &sample);
+            #[cfg(not(feature = "desktop"))]
+            let _ = target;
+            if is_selected {
+                displayed = sample;
             }
         }
-        if let Some(s) = read {
-            *d = s;
-        } else if scope == Some(model) {
-            action_result = Err(d.error.clone());
+        if scope == Some(model)
+            && (!displayed.present || !displayed.error.is_empty() && !displayed.fresh)
+            && action_result.is_ok()
+        {
+            action_result = Err(displayed.error.clone());
         }
+        next.devices[model] = displayed;
     }
     (next, action_result)
 }
@@ -719,6 +838,52 @@ mod tests {
                 product: "A5 ultra".into(),
             },
         ]
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn two_a5_receivers_write_only_the_selected_second_instance() {
+        let first = mouse_test_interfaces().remove(1);
+        let mut second = first.clone();
+        second.path = "a5-second".into();
+        let target = second.target();
+        let writes = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut opened = Vec::new();
+        let (snapshot, result) =
+            crate::plugin_manager::with_device_target(REGISTRY[1].key, Some(&target), || {
+                refresh_with(
+                    &Snapshot::default(),
+                    Some((1, Action::Dpi(1600))),
+                    Ok(vec![first.clone(), second]),
+                    |_, interface| {
+                        opened.push(interface.path.clone());
+                        Ok(Box::new(FakeSession {
+                            state: State {
+                                present: true,
+                                fresh: true,
+                                dpi: Some(1600),
+                                ..State::default()
+                            },
+                            writes: writes.clone(),
+                            fail: false,
+                        }))
+                    },
+                )
+            });
+        assert!(result.is_ok());
+        assert_eq!(opened, ["a5-second"]);
+        assert_eq!(writes.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(snapshot.devices[1].instance_id, target.id);
+        let (_, unplugged) =
+            crate::plugin_manager::with_device_target(REGISTRY[1].key, Some(&target), || {
+                refresh_with(
+                    &snapshot,
+                    Some((1, Action::Dpi(1600))),
+                    Ok(vec![first]),
+                    |_, _| panic!("a stale selection must not fall through to the other receiver"),
+                )
+            });
+        assert!(unplugged.is_err());
     }
 
     #[test]

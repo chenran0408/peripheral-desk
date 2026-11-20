@@ -1,11 +1,8 @@
 use super::io::open_handle;
-use crate::hid::{self, wide, Interface};
+use crate::hid::{self, Interface};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, os::windows::io::AsRawHandle};
-use windows_sys::Win32::Devices::{
-    DeviceAndDriverInstallation::*, HumanInterfaceDevice::*, Properties::DEVPKEY_Device_InstanceId,
-};
+use windows_sys::Win32::Devices::HumanInterfaceDevice::*;
 
 #[derive(Clone)]
 pub(super) struct Collection {
@@ -33,34 +30,6 @@ impl Device {
         }).collect();
         json!({"id":self.id,"vendorId":first.vid,"productId":first.pid,"productName":first.product,"collections":collections})
     }
-}
-
-fn parent_id(path: &str) -> Option<String> {
-    // Windows exposes one path per top-level collection. Its PnP parent is the
-    // HID interface, distinct even for two receivers with identical VID/PID.
-    let mut instance = [0u16; MAX_DEVICE_ID_LEN as usize];
-    let mut size = std::mem::size_of_val(&instance) as u32;
-    let (mut kind, mut node, mut parent) = (0, 0, 0);
-    unsafe {
-        if CM_Get_Device_Interface_PropertyW(
-            wide(path).as_ptr(),
-            &DEVPKEY_Device_InstanceId,
-            &mut kind,
-            instance.as_mut_ptr().cast(),
-            &mut size,
-            0,
-        ) != CR_SUCCESS
-            || CM_Locate_DevNodeW(&mut node, instance.as_ptr(), 0) != CR_SUCCESS
-            || CM_Get_Parent(&mut parent, node, 0) != CR_SUCCESS
-            || CM_Get_Device_IDW(parent, instance.as_mut_ptr(), instance.len() as u32, 0)
-                != CR_SUCCESS
-        {
-            return None;
-        }
-    }
-    Some(String::from_utf16_lossy(
-        &instance[..instance.iter().position(|v| *v == 0)?],
-    ))
 }
 
 struct Parsed(PHIDP_PREPARSED_DATA);
@@ -158,13 +127,10 @@ pub(super) fn enumerate() -> Result<BTreeMap<String, Device>, String> {
         .into_iter()
         .filter(super::allowlist::supported)
     {
-        let Some(parent) = parent_id(&i.path) else {
-            continue;
-        };
+        let id = i.instance_id();
         let Some(collection) = collection(i) else {
             continue;
         };
-        let id = format!("{:x}", Sha256::digest(parent.as_bytes()));
         devices
             .entry(id.clone())
             .or_insert_with(|| Device {

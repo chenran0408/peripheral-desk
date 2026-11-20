@@ -3,7 +3,11 @@ use super::*;
 pub(super) const WIDTH: i32 = 728;
 pub(super) const HEIGHT: i32 = 476;
 
+pub(crate) const WRITE_FINISHED: u32 = WM_APP + 0xD4;
+pub(super) const RETIRE: u32 = WM_APP + 0xD5;
 thread_local! {
+    static DETACHED: std::cell::RefCell<Vec<(HWND,usize)>>=const {std::cell::RefCell::new(Vec::new())};
+    static NOTICES: std::cell::RefCell<std::collections::VecDeque<(usize,String,bool)>>=const {std::cell::RefCell::new(std::collections::VecDeque::new())};
     static PAGE: viewport::Embedded<Editor> = const { viewport::Embedded::new() };
 }
 
@@ -14,6 +18,27 @@ impl viewport::EditorState for Editor {
 }
 
 pub(crate) unsafe fn open_embedded(owner: HWND, model: usize, bounds: RECT) -> Result<(), String> {
+    let requested = crate::plugin_manager::selected_device_target(REGISTRY[model].key);
+    let same_target = |hwnd: HWND| {
+        let editor = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Editor);
+        editor.target.as_ref().map(|t| &t.id) == requested.as_ref().map(|t| &t.id)
+    };
+    let change = PAGE.with(|page| !page.content().is_null() && !same_target(page.content()));
+    if change && !close_embedded() {
+        return Err("请先关闭取色器".into());
+    }
+    if let Some(content) = DETACHED.with_borrow(|all| {
+        all.iter()
+            .find(|(h, m)| *m == model && same_target(*h))
+            .map(|(h, _)| *h)
+    }) {
+        if !close_embedded() {
+            return Err("请先关闭取色器".into());
+        }
+        DETACHED.with_borrow_mut(|all| all.retain(|(h, _)| *h != content));
+        PAGE.with(|page| page.resume(content, model, bounds));
+        return Ok(());
+    }
     PAGE.with(|page| page.open(owner, model, bounds, |host| create(host, model, true)))
 }
 
@@ -22,15 +47,56 @@ pub(crate) unsafe fn resize_embedded(bounds: RECT) {
 }
 
 pub(crate) unsafe fn embedded_writing() -> bool {
-    PAGE.with(|page| page.busy())
+    PAGE.with(|page| page.busy()) || DETACHED.with_borrow(|all| !all.is_empty())
 }
 
 pub(crate) unsafe fn close_embedded() -> bool {
-    PAGE.with(|page| page.close())
+    PAGE.with(|page| {
+        let hwnd = page.content();
+        if !hwnd.is_null() {
+            let editor = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Editor);
+            if editor.color_open {
+                return false;
+            }
+            if editor.saving && editor.pending.is_some() {
+                let hwnd = page.hide_and_detach();
+                DETACHED.with_borrow_mut(|all| all.push((hwnd, editor.model)));
+                return true;
+            }
+        }
+        page.close()
+    })
 }
 
 pub(super) unsafe fn destroyed(hwnd: HWND, data: *mut Editor) {
-    PAGE.with(|page| page.destroyed(hwnd, data));
+    if detached(hwnd) {
+        DETACHED.with_borrow_mut(|all| all.retain(|(h, _)| *h != hwnd));
+        drop(Box::from_raw(data));
+    } else {
+        PAGE.with(|page| page.destroyed(hwnd, data));
+    }
+}
+
+pub(super) fn detached(hwnd: HWND) -> bool {
+    DETACHED.with_borrow(|all| all.iter().any(|(h, _)| *h == hwnd))
+}
+pub(crate) unsafe fn writing_model(model: usize) -> bool {
+    DETACHED.with_borrow(|all| all.iter().any(|(_, m)| *m == model))
+        || PAGE.with(|page| {
+            let hwnd = page.content();
+            if hwnd.is_null() {
+                return false;
+            }
+            let editor = &*(GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const Editor);
+            editor.model == model && editor.saving && editor.pending.is_some()
+        })
+}
+pub(crate) fn take_write_notice() -> Option<(usize, String, bool)> {
+    NOTICES.with_borrow_mut(|all| all.pop_front())
+}
+pub(super) unsafe fn notify_write(hwnd: HWND, model: usize, text: String, error: bool) {
+    NOTICES.with_borrow_mut(|all| all.push_back((model, text, error)));
+    PostMessageW(GetAncestor(hwnd, GA_ROOT), WRITE_FINISHED, 0, 0);
 }
 
 pub(super) fn control_rect(id: i32, default: R) -> R {

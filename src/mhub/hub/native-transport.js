@@ -184,6 +184,7 @@
     get [installed]() { return true; }
     get [Symbol.toStringTag]() { return "HID"; }
     async getDevices() {
+      if (window.__peripheralDeskTargetInstance) return (await nativeDevices()).slice();
       const [native, granted] = await Promise.allSettled([nativeDevices(), browser?.getDevices?.() ?? []]);
       if (native.status === "fulfilled" && granted.status === "fulfilled") return combine(native.value, granted.value);
       if (native.status === "fulfilled" && native.value.length) return native.value.slice();
@@ -197,7 +198,7 @@
       // browser-supported model. Open that chooser before yielding activation.
       const covered = filters.length && filters.every(f => f.vendorId !== undefined &&
         f.productId !== undefined && currentNative.some(d => matches(d, f)));
-      if (covered || !browser?.requestDevice) {
+      if (window.__peripheralDeskTargetInstance || covered || !browser?.requestDevice) {
         return filtered(await this.getDevices(), filters, exclusionFilters);
       }
       const picked = await browser.requestDevice(options);
@@ -214,11 +215,12 @@
     emit(provider, "connect", {device});
   }
   browser?.addEventListener?.("connect", ({device}) => {
+    if (window.__peripheralDeskTargetInstance) return;
     provider.getDevices().then(() => connected(browserAliases.get(device) ?? device), () => connected(device));
   });
   browser?.addEventListener?.("disconnect", ({device}) => {
     // Native notifications own the lifetime of an endpoint represented by both transports.
-    if (browserAliases.has(device)) return;
+    if (window.__peripheralDeskTargetInstance || browserAliases.has(device)) return;
     announced.delete(device);
     emit(provider, "disconnect", {device});
   });

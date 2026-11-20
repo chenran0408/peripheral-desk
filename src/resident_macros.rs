@@ -38,6 +38,8 @@ pub struct Recovery {
     pub control: u16,
     pub layer: u8,
     pub trigger_usage: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_instance: Option<String>,
     pub original: BindingAction,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
@@ -341,6 +343,13 @@ impl Runtime {
         })
     }
     fn enable(&mut self, key: &str, id: u64) -> Result<()> {
+        let selected = crate::plugin_manager::selected_device_target(key)
+            .ok_or("请在设备列表中选择实际设备，读取状态后再启用软件宏")?;
+        crate::plugin_manager::with_device_target(key, Some(&selected), || {
+            self.enable_for(key, id, &selected.id)
+        })
+    }
+    fn enable_for(&mut self, key: &str, id: u64, instance: &str) -> Result<()> {
         let mut library = load(key)?;
         if self.active.values().any(|a| a.key == key && a.id == id) {
             return Err("该软件宏已在常驻运行".into());
@@ -411,6 +420,7 @@ impl Runtime {
             control: definition.control,
             layer: definition.layer,
             trigger_usage: usage,
+            target_instance: Some(instance.to_owned()),
             original: selected.action.clone(),
             extra: BTreeMap::new(),
         };
@@ -444,6 +454,18 @@ impl Runtime {
         Ok(())
     }
     fn restore(&mut self, key: &str, recovery: &Recovery) -> Result<()> {
+        let target = recovery
+            .target_instance
+            .as_ref()
+            .map(|id| crate::hid::DeviceTarget {
+                id: id.clone(),
+                label: String::new(),
+            });
+        crate::plugin_manager::with_device_target(key, target.as_ref(), || {
+            self.restore_binding(key, recovery)
+        })
+    }
+    fn restore_binding(&mut self, key: &str, recovery: &Recovery) -> Result<()> {
         let current = binding(key, recovery.control, recovery.layer)?;
         if current != recovery.original {
             if current != trigger(recovery.trigger_usage) {

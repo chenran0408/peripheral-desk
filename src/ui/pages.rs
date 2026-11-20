@@ -365,44 +365,16 @@ impl App {
     }
 
     pub(super) unsafe fn drivers(&self, c: &Canvas) {
-        self.page_heading(
-            c,
-            "设备调节",
-            "选择品牌进入驱动中心，或打开已安装的设备设置。",
-        );
-    }
-
-    pub(super) unsafe fn brand_heading(&self, c: &Canvas, brand: super::Brand) {
-        self.page_heading(c, &format!("{}驱动中心", brand.name()), brand.description());
-        if self.brand_devices(brand).is_empty() {
-            let panel = R::new(SIDEBAR + 24, HOME_CONTENT_Y, self.width - SIDEBAR - 52, 152);
-            c.round(panel, RADIUS_LG, PANEL, Some(BORDER));
-            c.text(
-                "还没有可调节的设备",
-                R::new(panel.x + 24, panel.y + 28, panel.w - 48, 40),
-                22,
-                600,
-                TEXT,
-                DT_LEFT,
-            );
-            c.text(
-                "选择右上角的「选择设备插件」，按型号查看可用功能并安装。",
-                R::new(panel.x + 24, panel.y + 84, panel.w - 48, 32),
-                15,
-                400,
-                MUTED,
-                DT_LEFT,
-            );
-        }
+        self.page_heading(c, "设备调节", "选择设备进行调节，已连接的设备排在前面。");
     }
 
     fn battery_view(&self, command: Command) -> Option<BatteryView<'_>> {
         match command {
-            Command::Battery(m) => {
-                let spec = REGISTRY.get(m)?;
-                let state = self.snapshot.devices.get(m)?;
+            Command::Battery(_) | Command::UnitBattery(_) => {
+                let (m, name, state) = self.unit_view(command)?;
+                let spec = &REGISTRY[m];
                 Some(BatteryView {
-                    name: spec.name,
+                    name,
                     category: format!("{} · {}", spec.brand, kind_name(spec.kind)),
                     state,
                     value: state
@@ -1118,7 +1090,6 @@ impl App {
                 Command::Drivers => matches!(
                     self.page,
                     Page::Drivers
-                        | Page::Brand(_)
                         | Page::Tool(_, _)
                         | Page::MHub
                         | Page::Onboard(_)
@@ -1309,21 +1280,17 @@ impl App {
                     "打开 M HUB"
                 },
             ),
-            Command::Brand(b) => (
-                "品牌驱动中心".to_owned(),
-                b.name(),
-                b.description().to_owned(),
-                format!("{} 款已安装的可调节设备", self.brand_devices(b).len()),
-                "选择设备",
-            ),
-            Command::Device(m) => {
+            Command::Device(_) | Command::UnitDevice(_) => {
+                let Some((m, name, state)) = self.unit_view(command) else {
+                    return;
+                };
                 let spec = &REGISTRY[m];
                 let (action, capabilities) = driver_summary(spec);
                 (
                     format!("{} · {}", spec.brand, kind_name(spec.kind)),
-                    spec.name,
+                    name,
                     capabilities,
-                    connection(&self.snapshot.devices[m], self.images.installed[m]).to_owned(),
+                    connection(state, self.images.installed[m]).to_owned(),
                     action,
                 )
             }

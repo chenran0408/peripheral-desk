@@ -30,10 +30,11 @@ function createG75Editor(layout, protocolFields, choices, writeConstants) {
             return row;
         });
         session = { handler, layer, field, raw };
+        globalThis.window?.PeripheralDeskWrites?.editable();
         return rows;
     }
 
-    function save(handler, layer, row) {
+    function save(handler, layer, row, preparation) {
         const active = session;
         if (!active || active.handler !== handler || active.layer !== layer || !row) {
             return Promise.reject(new Error("请先读取 G75 Pro 当前层的板载按键。"));
@@ -51,13 +52,24 @@ function createG75Editor(layout, protocolFields, choices, writeConstants) {
             };
             try {
                 await handler.sendCommand("set", "setKeySetting", frame, { yy: 14 + 16 * layerIndex });
+                const current = await handler.sendCommand("get", "getKeySetting", {});
+                for (const {key: slot} of protocolFields) {
+                    if (!current[slot] || current[slot].join() !== frame[slot].join())
+                        throw new Error("G75 Pro 板载键位读回不一致，请重新读取本层。");
+                }
+                if (current.pdG75Tail?.join() !== frame.space15.slice(0,120).join())
+                    throw new Error("G75 Pro 保留槽读回不一致，请重新读取本层。");
             } catch (error) {
                 if (session === active) session = undefined;
                 throw error;
             }
             active.raw[key] = bytes;
         };
-        const write = pending.then(send);
+        const prior = pending;
+        const ready = Promise.all([prior, preparation]);
+        const enqueue = () => ready.then(send);
+        const host = globalThis.window?.PeripheralDeskWrites;
+        const write = host ? host.track(enqueue) : enqueue();
         pending = write.catch(() => {});
         return write;
     }

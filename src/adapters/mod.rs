@@ -56,14 +56,16 @@ pub fn open(model: usize, interface: &Interface) -> Result<Box<dyn DeviceSession
 #[cfg(not(feature = "driver-runtime"))]
 struct PluginSession {
     spec: &'static crate::devices::DeviceSpec,
+    target: crate::hid::DeviceTarget,
 }
 #[cfg(not(feature = "driver-runtime"))]
 impl DeviceSession for PluginSession {
     fn read(&self) -> Result<State> {
         if self.spec.switch_only() {
-            let reply = crate::plugin_manager::invoke(
+            let reply = crate::plugin_manager::invoke_target(
                 self.spec.key,
                 serde_json::json!({"op":"lighting-read"}),
+                &self.target,
             )?;
             let enabled = reply
                 .get("enabled")
@@ -78,9 +80,10 @@ impl DeviceSession for PluginSession {
                 ..State::default()
             });
         }
-        serde_json::from_value(crate::plugin_manager::invoke(
+        serde_json::from_value(crate::plugin_manager::invoke_target(
             self.spec.key,
             serde_json::json!({"op":"read-state"}),
+            &self.target,
         )?)
         .map_err(|e| format!("驱动返回状态格式错误：{e}"))
     }
@@ -91,11 +94,14 @@ impl DeviceSession for PluginSession {
             }
             _ => serde_json::json!({"op":"apply-setting","action":action}),
         };
-        crate::plugin_manager::invoke(self.spec.key, request).map(|_| ())
+        crate::plugin_manager::invoke_target(self.spec.key, request, &self.target).map(|_| ())
     }
 }
 #[cfg(not(feature = "driver-runtime"))]
-pub fn open(model: usize, _interface: &Interface) -> Result<Box<dyn DeviceSession>> {
+pub fn open(model: usize, interface: &Interface) -> Result<Box<dyn DeviceSession>> {
     let spec = REGISTRY.get(model).ok_or("设备编号无效")?;
-    Ok(Box::new(PluginSession { spec }))
+    Ok(Box::new(PluginSession {
+        spec,
+        target: interface.target(),
+    }))
 }

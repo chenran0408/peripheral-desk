@@ -22,7 +22,15 @@ struct Endpoint {
     handle: Arc<OwnedHandle>,
     caps: Collection,
 }
+struct Lease(String);
+impl Drop for Lease {
+    fn drop(&mut self) {
+        crate::plugin_manager::release_web_driver_instance(&self.0);
+    }
+}
+
 struct Session {
+    _lease: Lease,
     stop: Arc<OwnedHandle>,
     endpoints: Vec<Endpoint>,
 }
@@ -33,6 +41,25 @@ impl Session {
         }
     }
     fn open(device: &Device) -> Result<Self, String> {
+        for spec in crate::devices::REGISTRY.iter().filter(|s| {
+            (s.supports("software-macro-trigger")
+                || matches!(s.key, "mchose-a5-ultra" | "mchose-g75-pro"))
+                && device.collections.iter().any(|c| s.matches(&c.interface))
+        }) {
+            let macros = crate::resident_macros::list(spec.key)?;
+            if macros.library.recovery.iter().any(|r| {
+                r.target_instance
+                    .as_deref()
+                    .is_none_or(|id| id == device.id)
+            }) {
+                return Err(format!(
+                    "{} 正在使用常驻宏，请先在偏好设置中恢复该设备的原键。",
+                    spec.name
+                ));
+            }
+        }
+        crate::plugin_manager::claim_web_driver_instance(&device.id)?;
+        let lease = Lease(device.id.clone());
         let mut endpoints = Vec::new();
         for c in &device.collections {
             let mut access = 0;
@@ -56,6 +83,7 @@ impl Session {
             });
         }
         Ok(Self {
+            _lease: lease,
             stop: Arc::new(io::event().map_err(|e| e.to_string())?),
             endpoints,
         })
@@ -118,6 +146,7 @@ impl Session {
 
 #[derive(Default)]
 struct State {
+    target: Option<String>,
     stopped: bool,
     scanned: bool,
     devices: BTreeMap<String, Device>,
@@ -134,6 +163,13 @@ impl Bridge {
             emit: Arc::new(emit),
         }
     }
+    pub(super) fn set_target(&self, target: Option<String>) {
+        let mut s = self.state.lock().unwrap();
+        if s.target != target {
+            s.target = target;
+            s.scanned = false;
+        }
+    }
     pub(super) fn shutdown(&self) {
         let mut s = self.state.lock().unwrap();
         s.stopped = true;
@@ -143,11 +179,14 @@ impl Bridge {
         s.devices.clear();
     }
     pub(super) fn refresh(&self) -> Result<(), String> {
-        let devices = descriptor::enumerate()?;
+        let mut devices = descriptor::enumerate()?;
         let events = {
             let mut s = self.state.lock().unwrap();
             if s.stopped {
                 return Err("本地设备会话已关闭".into());
+            }
+            if let Some(wanted) = &s.target {
+                devices.retain(|id, _| id == wanted);
             }
             let mut events = Vec::new();
             if s.scanned {

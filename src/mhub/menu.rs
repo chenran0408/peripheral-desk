@@ -202,6 +202,13 @@ unsafe fn navigate_local(
 }
 
 pub(super) unsafe fn command(hwnd: HWND, id: usize) -> Result<(), String> {
+    if matches!(
+        id,
+        OPEN_BUILTIN | UPDATE_NOTICE | INSTALL | RELOAD | LOCAL | SELECT_COPY
+    ) && writes::pending()
+    {
+        return Err("G75 Pro 正在确认板载键位，请在写完后切换或重载工作区。".into());
+    }
     let web = browser()?;
     match id {
         OPEN_BUILTIN => prepare(

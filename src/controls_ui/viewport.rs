@@ -97,6 +97,20 @@ impl<T: EditorState> Embedded<T> {
         Ok(())
     }
 
+    pub(super) fn content(&self) -> HWND {
+        self.content.get()
+    }
+    pub(super) unsafe fn hide_and_detach(&self) -> HWND {
+        let content = self.content.replace(null_mut());
+        ShowWindow(GetParent(content), SW_HIDE);
+        content
+    }
+    pub(super) unsafe fn resume(&self, content: HWND, model: usize, bounds: RECT) {
+        self.model.set(model);
+        self.content.set(content);
+        self.resize(bounds);
+        ShowWindow(GetParent(content), SW_SHOWNA);
+    }
     pub(crate) unsafe fn resize(&self, bounds: RECT) {
         if !self.content.get().is_null() {
             SetWindowPos(
@@ -182,6 +196,22 @@ unsafe extern "system" fn control_proc(
     DefSubclassProc(hwnd, msg, w, l)
 }
 
+pub(super) unsafe fn content_size(child: HWND, width: i32, height: i32) {
+    let mut rect = zeroed();
+    GetWindowRect(child, &mut rect);
+    if rect.right - rect.left != width || rect.bottom - rect.top != height {
+        SetWindowPos(
+            child,
+            null_mut(),
+            0,
+            0,
+            width,
+            height,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOMOVE,
+        );
+        layout(GetParent(child));
+    }
+}
 unsafe fn layout(host: HWND) {
     let child = GetWindow(host, GW_CHILD);
     if child.is_null() {

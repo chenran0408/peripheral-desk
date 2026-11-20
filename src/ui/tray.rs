@@ -85,7 +85,7 @@ impl TrayFx {
     fn section_counts(&self) -> (usize, usize) {
         let installed = self
             .entries
-            .partition_point(|e| matches!(e, Command::Battery(_)));
+            .partition_point(|e| matches!(e, Command::Battery(_) | Command::UnitBattery(_)));
         (installed, self.entries.len() - installed)
     }
 
@@ -249,15 +249,16 @@ pub(super) unsafe extern "system" fn flyout_proc(
                     y += 22;
                 }
                 for (row, &entry) in entries[..hids].iter().enumerate() {
-                    let Command::Battery(i) = entry else { continue };
+                    let Some((i, name, s)) = a.unit_view(entry) else {
+                        continue;
+                    };
                     let spec = &REGISTRY[i];
-                    let s = &a.snapshot.devices[i];
                     if a.fx.flyout.hovered == Some(HoverTarget::Row(row)) {
                         c.capsule(R::new(9, y, 326, 60), HOVER, None);
                     }
                     c.image(a.images.images[i], R::new(19, y + 7, 40, 44), s.fresh);
                     c.text(
-                        spec.name,
+                        name,
                         R::new(68, y + 4, 190, 22),
                         13,
                         500,
@@ -273,10 +274,13 @@ pub(super) unsafe extern "system" fn flyout_proc(
                         DT_LEFT,
                     );
                     if let Some(percent) = s.percent.filter(|_| s.fresh) {
-                        let fill =
+                        let fill = if matches!(entry, Command::UnitBattery(_)) {
+                            percent as f32
+                        } else {
                             a.fx.widget
                                 .ring_value(0x1000 + i as u64)
-                                .unwrap_or(percent as f32);
+                                .unwrap_or(percent as f32)
+                        };
                         c.battery_icon(
                             R::new(288, y + 10, 34, 34),
                             fill.round() as u8,
@@ -436,6 +440,12 @@ pub(super) unsafe extern "system" fn flyout_proc(
             match target {
                 Some(HoverTarget::Row(row)) => {
                     let page = match a.fx.flyout.entries[row] {
+                        Command::UnitBattery(i) => {
+                            let Some(model) = a.select_unit(main, i) else {
+                                return 0;
+                            };
+                            Page::Battery(model)
+                        }
                         Command::Battery(model) => Page::Battery(model),
                         Command::System(index) => Page::System(index),
                         _ => return 0,
@@ -634,11 +644,10 @@ impl App {
             .entries
             .iter()
             .filter_map(|entry| match *entry {
-                Command::Battery(i) => Some(format!(
-                    "{} {}",
-                    REGISTRY[i].name,
-                    reading(&self.snapshot.devices[i], &REGISTRY[i])
-                )),
+                Command::Battery(_) | Command::UnitBattery(_) => {
+                    let (i, name, state) = self.unit_view(*entry)?;
+                    Some(format!("{} {}", name, reading(state, &REGISTRY[i])))
+                }
                 Command::System(i) => {
                     let device = &self.snapshot.system_devices[i];
                     Some(format!("{} {}", device.name, system_reading(device)))

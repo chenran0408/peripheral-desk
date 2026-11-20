@@ -14,7 +14,11 @@ pub(in crate::ui) unsafe fn open_embedded(
     let current = CHILD.get();
     if !current.is_null() {
         let editor = GetWindowLongPtrW(current, GWLP_USERDATA) as *const Editor;
-        if !editor.is_null() && (*editor).spec.key == spec.key {
+        let selected = plugin_manager::selected_device_target(spec.key);
+        if !editor.is_null()
+            && (*editor).spec.key == spec.key
+            && (*editor).target.as_ref().map(|t| &t.id) == selected.as_ref().map(|t| &t.id)
+        {
             resize_embedded(bounds);
             return Ok(());
         }

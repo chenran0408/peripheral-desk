@@ -11,6 +11,7 @@ thread_local! {
     static MANAGED: Cell<bool> = const { Cell::new(false) };
     static DOCUMENT: Cell<bool> = const { Cell::new(false) };
     static PREFERRED: Cell<Option<&'static str>> = const { Cell::new(None) };
+    static TARGET: RefCell<Option<String>> = const { RefCell::new(None) };
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
 }
 
@@ -54,6 +55,7 @@ impl Session {
             event["channel"] = Value::String(CHANNEL.into());
             events.send(event);
         }));
+        bridge.set_target(TARGET.with_borrow(Clone::clone));
         let worker = bridge.clone();
         let outgoing = replies.clone();
         let (requests, rx) = mpsc::channel::<Job>();
@@ -101,6 +103,20 @@ pub fn devices_changed() {
 
 pub(super) fn prefer(model: Option<&'static str>) {
     PREFERRED.set(model);
+    TARGET.set(
+        model
+            .and_then(crate::plugin_manager::selected_device_target)
+            .map(|target| target.id),
+    );
+}
+
+pub(super) fn allow_all() {
+    TARGET.set(None);
+    SESSION.with_borrow(|s| {
+        if let Some(session) = s {
+            session.bridge.set_target(None);
+        }
+    });
 }
 
 pub(super) fn select_edition(managed: bool) {
@@ -109,14 +125,25 @@ pub(super) fn select_edition(managed: bool) {
     release();
 }
 
+pub(super) fn managed_document() -> bool {
+    MANAGED.get() && DOCUMENT.get()
+}
+
 pub(super) fn script(managed: bool) -> String {
     let preference = serde_json::to_string(&PREFERRED.get()).unwrap();
+    let target = TARGET.with_borrow(|t| serde_json::to_string(t).unwrap());
+    let writes = if managed {
+        include_str!("hub/write-lifecycle.js")
+    } else {
+        ""
+    };
+    let measure = std::env::var_os("PD_HUB_TIMING_FILE").is_some();
     let source = if managed {
         include_str!("hub/native-transport.js")
     } else {
         ""
     };
-    format!("window.__peripheralDeskPreferredModel={preference};\n{source}")
+    format!("window.__peripheralDeskPreferredModel={preference};window.__peripheralDeskTargetInstance={target};window.__peripheralDeskMeasure={measure};\n{writes}\n{source}")
 }
 
 unsafe fn local_document(web: &ICoreWebView2) -> windows::core::Result<bool> {
@@ -183,6 +210,10 @@ pub(super) unsafe fn attach(hwnd: HWND, web: &ICoreWebView2) -> windows::core::R
             let Ok(value) = serde_json::from_str::<Value>(&take_pwstr(raw)) else {
                 return Ok(());
             };
+            if value["channel"] == "peripheral-desk-editor" {
+                super::writes::event(hwnd, &value);
+                return Ok(());
+            }
             let Some(id) = value["id"].as_u64() else {
                 return Ok(());
             };

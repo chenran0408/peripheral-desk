@@ -1,4 +1,7 @@
 //! The local MCHOSE editor is a child of the main window on its UI apartment.
+pub mod timing;
+mod writes;
+pub use writes::{closing, take_write_notices, WRITE_MESSAGE};
 mod bootstrap;
 mod builtin;
 mod fixes;
@@ -117,7 +120,10 @@ fn run_local_script(code: &str) -> Result<(), String> {
 }
 
 pub fn choose_device() -> Result<(), String> {
-    run_local_script("window.PeripheralDeskHub?.chooseDevice()")
+    transport::allow_all();
+    run_local_script(
+        "(async()=>{await window.PeripheralDeskWrites?.whenReady();window.__peripheralDeskTargetInstance=null;window.PeripheralDeskHub?.chooseDevice()})()",
+    )
 }
 
 pub fn show_menu(x: i32, y: i32) {
@@ -131,6 +137,9 @@ pub fn show_menu(x: i32, y: i32) {
 
 pub fn close() {
     let hwnd = host_window();
+    if !hwnd.is_null() && writes::leave(hwnd) {
+        return;
+    }
     if !hwnd.is_null() {
         unsafe {
             DestroyWindow(hwnd);
@@ -164,6 +173,9 @@ pub unsafe fn open_for_model(
     bounds: RECT,
     preferred: Option<&'static str>,
 ) -> Result<(), String> {
+    if closing() {
+        return Err("上一项板载操作尚未完成，结果将显示在外设盒中。".into());
+    }
     transport::prefer(preferred);
     if active() {
         set_bounds(bounds);
@@ -292,6 +304,22 @@ unsafe fn attach(
     settings.SetIsWebMessageEnabled(true)?;
     transport::attach(hwnd, &web)?;
     let mut token = 0;
+    web.add_ProcessFailed(
+        &webview2_com::ProcessFailedEventHandler::create(Box::new(move |_, args| {
+            if let Some(args) = args {
+                let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND_UNKNOWN_PROCESS_EXITED;
+                args.ProcessFailedKind(&mut kind)?;
+                if kind == COREWEBVIEW2_PROCESS_FAILED_KIND_BROWSER_PROCESS_EXITED
+                    || kind == COREWEBVIEW2_PROCESS_FAILED_KIND_RENDER_PROCESS_EXITED
+                {
+                    ERROR.set(Some("驱动页面已停止，请重新进入并读取设备状态。".into()));
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                }
+            }
+            Ok(())
+        })),
+        &mut token,
+    )?;
     web.add_NavigationStarting(
         &NavigationStartingEventHandler::create(Box::new(move |sender, args| {
             if let Some(args) = args {
@@ -487,7 +515,14 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             0
         }
+        writes::DRAINED => {
+            if closing() {
+                DestroyWindow(hwnd);
+            }
+            0
+        }
         WM_DESTROY => {
+            writes::destroyed(hwnd);
             HOST.take();
             transport::select_edition(false);
             menu::close();

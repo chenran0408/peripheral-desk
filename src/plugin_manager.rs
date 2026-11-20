@@ -180,9 +180,18 @@ fn version(v: &str) -> Result<(u32, u32, u32)> {
     }
     Ok((a, b, c))
 }
+fn core_matches(current: &str, min: &str, max: &str) -> Result<bool> {
+    // ABI 1 catalogs originally used numeric release families. Keep their
+    // meaning while allowing newer editors to require one exact preview.
+    let meets_minimum = if min.contains('-') {
+        !crate::core_update::is_newer_version(min, current)?
+    } else {
+        version(current)? >= version(min)?
+    };
+    Ok(meets_minimum && version(current)? < version(max)?)
+}
 fn compatible(abi: u32, min: &str, max: &str) -> Result<()> {
-    let current = version(env!("CARGO_PKG_VERSION"))?;
-    if abi != ABI_VERSION || current < version(min)? || current >= version(max)? {
+    if abi != ABI_VERSION || !core_matches(env!("CARGO_PKG_VERSION"), min, max)? {
         Err(format!(
             "驱动需要主程序 {min} 至 {max}（不含），接口版本 {abi}；请先更新主程序"
         ))
@@ -686,7 +695,7 @@ fn install_bytes(package: &DriverPackage, bytes: &[u8]) -> Result<InstalledDrive
         return Err("下载包大小或 SHA-256 校验失败，旧驱动保持不变".into());
     }
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).map_err(|e| e.to_string())?;
-    if zip.len() > 128 {
+    if zip.len() > 256 {
         return Err("驱动包文件过多".into());
     }
     let manifest_bytes = {
@@ -1084,31 +1093,80 @@ pub fn worker_main(key: &str) {
         let _ = std::io::stdout().write_all(&bytes);
     }
 }
-// Browser sessions own their HID interfaces until the user returns control.
+mod instances;
+use crate::hid::DeviceTarget;
+pub(crate) use instances::{
+    bound as bound_device_target, observe_interfaces, remember as remember_device_state,
+};
+pub use instances::{
+    claim_web_driver_instance, device_target_state, device_targets, release_web_driver_instance,
+    select_device_target, selected_device_target, set_web_driver_instances, web_owns_instance,
+    with_device_target,
+};
+
+// Old workspaces without a native transport can still request exclusive model access.
 static WEB_DRIVER_DEVICES: std::sync::RwLock<Vec<&'static str>> =
     std::sync::RwLock::new(Vec::new());
 pub fn set_web_driver_devices(keys: Vec<&'static str>) {
     *WEB_DRIVER_DEVICES.write().expect("web driver device list") = keys;
 }
 pub fn web_driver_owns(key: &str) -> bool {
-    WEB_DRIVER_DEVICES
-        .read()
-        .expect("web driver device list")
-        .contains(&key)
+    WEB_DRIVER_DEVICES.read().unwrap().contains(&key)
+        || selected_device_target(key).is_some_and(|t| web_owns_instance(&t.id))
 }
-pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
-    if web_driver_owns(key) {
-        return Err("正在使用 M HUB，请先恢复本地控制".into());
-    }
+pub fn invoke(key: &str, request: Value) -> Result<Value> {
+    let target = instances::bound(key).unwrap_or_else(|| selected_device_target(key));
+    invoke_scoped(key, request, target.as_ref())
+}
+
+pub fn invoke_target(key: &str, request: Value, target: &DeviceTarget) -> Result<Value> {
+    invoke_scoped(key, request, Some(target))
+}
+
+fn invoke_scoped(key: &str, mut request: Value, requested: Option<&DeviceTarget>) -> Result<Value> {
     safe_id(key)?;
-    if !is_installed(key) {
-        return Err("尚未安装此设备驱动，请打开驱动仓库下载".into());
+    let installed = installed(key)?.ok_or("尚未安装此设备驱动，请打开驱动仓库下载")?;
+    let addressed = installed
+        .manifest
+        .capabilities
+        .iter()
+        .any(|c| c == "instance-target");
+    let spec = crate::devices::REGISTRY.iter().find(|s| s.key == key);
+    let mut available = device_targets(key);
+    // Unaddressed legacy DLLs enumerate independently. Check the live candidates
+    // before dispatch so a disconnected selection cannot silently target its sibling.
+    if let Some(spec) = spec {
+        if !addressed || requested.is_none() || available.is_empty() {
+            let interfaces = crate::hid::enumerate()?;
+            available = interfaces
+                .iter()
+                .filter(|i| spec.matches(i))
+                .map(|i| i.target())
+                .collect();
+            available.sort_by(|a, b| a.id.cmp(&b.id));
+            available.dedup_by(|a, b| a.id == b.id);
+        }
     }
-    let context = crate::backend::data_path()
+    let target = instances::resolve(&available, requested, addressed)?;
+    let gate = instances::gate(target.as_ref().map(|t| t.id.as_str()).unwrap_or(key));
+    let _guard = gate.lock().unwrap();
+    if WEB_DRIVER_DEVICES.read().unwrap().contains(&key)
+        || target.as_ref().is_some_and(|t| web_owns_instance(&t.id))
+    {
+        return Err("此设备的接口正由内置 M HUB 使用".into());
+    }
+    let model_dir = crate::backend::data_path()
         .parent()
         .unwrap()
         .join("devices")
         .join(key);
+    let context = if addressed {
+        let target = target.as_ref().ok_or("未发现所选设备的接口")?;
+        request["target_instance"] = json!(target.id);
+        model_dir.join("instances").join(&target.id)
+    } else {
+        model_dir.clone()
+    };
     if let Some(map) = request.as_object_mut() {
         map.insert("config_dir".into(), json!(context));
     }
@@ -1208,6 +1266,9 @@ pub fn invoke(key: &str, mut request: Value) -> Result<Value> {
     }
     let mut value = reply.get("value").cloned().unwrap_or(Value::Null);
     if operation == "read-state" {
+        if let (Some(target), Some(state)) = (&target, value.as_object_mut()) {
+            state.insert("instance_id".into(), json!(target.id));
+        }
         if let (Some(error), Some(state)) = (component_error, value.as_object_mut()) {
             state.insert("settings_error".into(), json!(error));
         }
@@ -1359,7 +1420,7 @@ pub fn check_core_compatibility(candidate: &str) -> Result<()> {
     check_core_compatibility_at(app.parent().ok_or("主程序目录无效")?, candidate)
 }
 pub fn check_core_compatibility_at(app_root: &Path, candidate: &str) -> Result<()> {
-    let target = version(candidate)?;
+    safe_version(candidate)?;
     let drivers = app_root.join("data").join("drivers");
     let entries = match std::fs::read_dir(&drivers) {
         Ok(e) => e,
@@ -1395,10 +1456,7 @@ pub fn check_core_compatibility_at(app_root: &Path, candidate: &str) -> Result<(
             safe_version(previous)?;
         }
         let m = current.manifest;
-        if m.abi != ABI_VERSION
-            || target < version(&m.core_min)?
-            || target >= version(&m.core_max_exclusive)?
-        {
+        if m.abi != ABI_VERSION || !core_matches(candidate, &m.core_min, &m.core_max_exclusive)? {
             return Err(format!(
                 "{} 的现有插件与主程序 {candidate} 不兼容；请先更新兼容的设备插件",
                 m.name
@@ -1411,6 +1469,14 @@ pub fn check_core_compatibility_at(app_root: &Path, candidate: &str) -> Result<(
 #[cfg(test)]
 mod backup_tests {
     use super::*;
+    #[test]
+    fn explicit_preview_minimum_and_legacy_release_families() {
+        let max = "0.5.0";
+        assert!(core_matches("0.4.11-preview.9", "0.4.11", max).unwrap());
+        assert!(!core_matches("0.4.12-preview.1", "0.4.12-preview.10", max).unwrap());
+        assert!(core_matches("0.4.12", "0.4.12-preview.10", max).unwrap());
+        assert!(!core_matches("0.5.0-preview.1", "0.4.11", max).unwrap());
+    }
     #[test]
     fn nested_unknown_device_files_are_backed_up_without_changing_source() {
         let base = std::env::var_os("PD_UPDATE_TEST_ROOT")

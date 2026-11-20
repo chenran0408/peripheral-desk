@@ -21,7 +21,8 @@ test("editing a key preserves the board's other bindings and hidden slots", asyn
     };
     const writes = [];
     const handler = navigator.deviceHandler = {
-        async sendCommand(_mode, _command, frame, options) {
+        async sendCommand(mode, _command, frame, options) {
+            if (mode === "get") return {...writes.at(-1).frame, pdG75Tail:board.pdG75Tail};
             writes.push(JSON.parse(JSON.stringify({frame,options})));
         },
     };
@@ -45,4 +46,42 @@ test("editing a key preserves the board's other bindings and hidden slots", asyn
     handler.sendCommand = async () => { throw Error("connection lost"); };
     await assert.rejects(editor.save(handler, "Fn", fnRows[0]), /connection lost/);
     await assert.rejects(editor.save(handler, "Fn", fnRows[0]), /当前层/);
+});
+
+test("leaving while two G75 edits are queued reports each result after hardware readback", async () => {
+    const messages = [];
+    const scope = vm.createContext({
+        navigator:{}, document:{addEventListener(){}},
+        chrome:{webview:{postMessage:event=>messages.push(event)}}
+    });
+    scope.window = scope;
+    vm.runInContext(fs.readFileSync(path.join(__dirname,"../hub/write-lifecycle.js"), "utf8"), scope);
+    const make = vm.runInContext(fs.readFileSync(path.join(__dirname,"g75-keymap.js"),"utf8") + "\ncreateG75Editor",scope);
+    const fields = ["A","B"].map(key=>({key,length:4}));
+    const layout = fields.map(({key})=>({key,defaultVal:[0,0,0,0]}));
+    const editor = make(layout, fields, [], {space15:Array(126).fill(0)});
+    const board = {A:[0,0,0,0], B:[0,0,0,0], pdG75Tail:Array(120).fill(0x44)};
+    let release;
+    const firstWrite = new Promise(resolve=>{release=resolve;});
+    const handler = scope.navigator.deviceHandler = {
+        async sendCommand(mode, _, frame) {
+            if (mode === "get") return board;
+            await firstWrite;
+            board.A = frame.A.slice();
+            // Second edit is intentionally not accepted by hardware.
+        }
+    };
+    const rows = editor.receive(handler,"Default","defaultVal",board);
+    rows[0].defaultVal=[0,0,0,4]; rows[1].defaultVal=[0,0,0,5];
+    const one=editor.save(handler,"Default",rows[0]);
+    const two=editor.save(handler,"Default",rows[1]);
+    const leave=scope.PeripheralDeskWrites.finishLeave();
+    assert.deepEqual(messages.map(m=>m.event),["editable","queued","queued"]);
+    await assert.rejects(editor.save(handler,"Default",rows[0]),/离开/);
+    release();
+    await one;
+    await assert.rejects(two,/读回不一致/);
+    await leave;
+    assert.deepEqual(messages.slice(-3).map(m=>[m.event,m.id]),[["confirmed",1],["failed",2],["drained",undefined]]);
+    assert.deepEqual(Array.from(board.A),[0,0,0,4]);
 });

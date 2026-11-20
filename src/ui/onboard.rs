@@ -86,8 +86,8 @@ impl Profiles {
 
 #[derive(Default)]
 pub(super) struct Board {
-    model: Option<usize>,
-    result: Option<Result<Profiles, String>>,
+    pub(super) model: Option<usize>,
+    pub(super) result: Option<Result<Profiles, String>>,
     pub(super) saving: bool,
 }
 
@@ -297,12 +297,19 @@ impl App {
         );
         self.render(hwnd);
         let window = hwnd as usize;
+        let target = crate::plugin_manager::selected_device_target(key);
         thread::spawn(move || {
-            let result = crate::plugin_manager::invoke(key, op.request()).and_then(|value| {
+            let result = crate::plugin_manager::with_device_target(key, target.as_ref(), || {
+                crate::plugin_manager::invoke(key, op.request())
+            })
+            .and_then(|value| {
                 serde_json::from_value(value)
                     .map_err(|e| format!("插件返回的板载配置格式不正确：{e}"))
             });
-            if tx.send(WorkUpdate::Board(model, result)).is_ok() {
+            if tx
+                .send(WorkUpdate::Board(model, target.map(|t| t.id), result))
+                .is_ok()
+            {
                 PostMessageW(window as HWND, DONE, 0, 0);
             }
         });
@@ -312,11 +319,23 @@ impl App {
         &mut self,
         hwnd: HWND,
         model: usize,
+        id: Option<String>,
         result: Result<Profiles, String>,
     ) {
         self.pending = None;
         let saved = std::mem::take(&mut self.board.saving);
-        if self.page == Page::Onboard(model) && self.board.model == Some(model) {
+        if saved {
+            let notice = result.as_ref().map_or_else(
+                |e| format!("{} · {e}", REGISTRY[model].name),
+                |_| format!("{} · 板载设置已切换并读回确认", REGISTRY[model].name),
+            );
+            self.record_write(notice, result.is_err());
+        }
+        if self.page == Page::Onboard(model)
+            && self.board.model == Some(model)
+            && crate::plugin_manager::selected_device_target(REGISTRY[model].key).map(|t| t.id)
+                == id
+        {
             match &result {
                 Err(e) => self.set_status(e, true),
                 Ok(_) => self.set_status(

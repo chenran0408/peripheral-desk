@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.4.12-preview.1
+
+- 打开「设备调节」就能选择已连接的外设。两台同型号设备可按接收器分别选择，后台读电量时仍可打开设置或检查更新。
+- G75 Pro 改键直接显示键盘图。点选或拖放按键，可分别编辑普通、Fn、Fn2 层和逐键颜色。连续改键后可以切回电量，在「偏好设置 → 写入记录」查看每笔结果。
+- 初代 A5 Ultra 可在主窗口调 DPI、回报率、休眠等参数，或点鼠标图改键。K5 Ultra 共用板载按键和宏编辑器。磁轴键盘、个人模板等仍可在同一窗口的「本地 M HUB」使用。
+- 已安装上述设备插件的用户，升级主程序后可到「插件管理」选择预览渠道并更新自己的型号。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.1/PeripheralDesk-0.4.12-preview.1-windows-x64-setup.exe) · [下载这三款设备的插件](https://github.com/chenran0408/peripheral-desk-drivers/releases/tag/v0.4.13-preview.48)
+
 ## 0.4.11-preview.19
 
 - 打开迈从 M HUB 时，支持的设备由外设盒直接连接，首次使用也可省去浏览器授权弹窗。

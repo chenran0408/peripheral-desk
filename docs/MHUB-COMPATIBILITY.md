@@ -1,6 +1,6 @@
 # 迈从驱动中心能做什么
 
-从发布页下载 Windows x64 的 **Setup 安装程序**即可。安装后，选择 **设备调节 → 迈从 M HUB**，将接收器插入电脑或用数据线连接。匹配的设备会通过 Windows 直连，多台在线也能直接进入设备页；其他原厂型号可用「连接设备」添加。安装程序自带迈从驱动中心。打开 M HUB 即可连接受支持的迈从设备。后台读取电量需要对应型号插件，在「插件管理」中安装。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases) · [连接与个性化说明](MHUB-WORKSPACE.md)
+安装 Windows x64 安装程序后，在「设备调节」点选自己的设备。G75 Pro 和初代 A5 Ultra 的常用原生编辑器需要对应型号插件，可在「插件管理」安装。要用其他原厂编辑器，打开「本地 M HUB」或设备页的「更多原厂功能」。内置网页离线可用。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.1/PeripheralDesk-0.4.12-preview.1-windows-x64-setup.exe) · [本地工作区用法](MHUB-WORKSPACE.md)
 
 Windows 直连的设备范围、原版功能和验证记录见[本地连接说明](MHUB-NATIVE-TRANSPORT.md)。
 

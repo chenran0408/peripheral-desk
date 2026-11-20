@@ -15,16 +15,20 @@ function createPeripheralConnection({ref, watch, visible, familiesReady, cards, 
   const compare = (left, right) => left < right ? -1 : left > right ? 1 : 0;
 
   function consider() {
-    if (session.stayInChooser || !visible() || !completed.value || !familiesReady()) return;
+    if (session.stayInChooser || !visible()) return;
     const choices = cards();
     if (!choices.length) return;
     const preferred = model(window.__peripheralDeskPreferredModel);
     let choice;
     if (preferred) {
+      // An explicit physical target filters discovery to one endpoint. Its own
+      // resolved card can open while unrelated families finish initialization.
+      if (!window.__peripheralDeskTargetInstance && (!completed.value || !familiesReady())) return;
       const matches = choices.filter(row => row.names.some(name => model(name) === preferred));
       if (matches.length !== 1) return;
       choice = matches[0];
     } else {
+      if (!completed.value || !familiesReady()) return;
       let last;
       try { last = JSON.parse(localStorage.getItem(lastKey)); } catch { /* A saved edition may edit this preference. */ }
       const ordered = choices.sort((a,b) => compare(model(a.names[0]), model(b.names[0])) ||

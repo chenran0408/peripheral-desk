@@ -1,16 +1,20 @@
 //! Native structured control editor. The device adapters own all wire formats.
 mod embedded;
 pub(crate) mod viewport;
+mod visual;
 use crate::{
     controls::{
-        self, BindingAction, ControlAction, ControlState, KeyColor, MacroDefinition, MacroEvent,
-        MacroMode,
+        self, BindingAction, ControlAction, ControlSection, ControlState, KeyColor,
+        MacroDefinition, MacroEvent, MacroMode,
     },
     devices::REGISTRY,
     hid::wide,
     paint::{self, Canvas, BG, BORDER, DIM, FIELD, MUTED, ORANGE, PANEL, R, RED, TEXT},
 };
-pub(crate) use embedded::{close_embedded, embedded_writing, open_embedded, resize_embedded};
+pub(crate) use embedded::{
+    close_embedded, embedded_writing, open_embedded, resize_embedded, take_write_notice,
+    writing_model, WRITE_FINISHED,
+};
 use std::{
     collections::BTreeMap,
     mem::{size_of, zeroed},
@@ -31,6 +35,7 @@ use windows_sys::Win32::{
 };
 
 const FINISHED: u32 = WM_APP + 80;
+const INITIAL_READ: u32 = WM_APP + 81;
 const KEYS: i32 = 100;
 const KIND: i32 = 101;
 const TARGET: i32 = 102;
@@ -53,6 +58,67 @@ const STATUS: i32 = 140;
 const WIDTH: i32 = 1040;
 const HEIGHT: i32 = 750;
 type Job = std::result::Result<ControlState, String>;
+type Execute = fn(
+    usize,
+    Option<&crate::hid::DeviceTarget>,
+    Option<u8>,
+    Option<ControlSection>,
+    Option<ControlAction>,
+) -> Job;
+
+fn execute_controls(
+    model: usize,
+    target: Option<&crate::hid::DeviceTarget>,
+    profile: Option<u8>,
+    section: Option<ControlSection>,
+    action: Option<ControlAction>,
+) -> Job {
+    let key = REGISTRY[model].key;
+    crate::plugin_manager::with_device_target(key, target, || {
+        if let Some(action) = &action {
+            if REGISTRY[model].supports("software-macro-trigger")
+                || matches!(
+                    key,
+                    "mchose-a5-ultra" | "mchose-g75-pro" | "razer-deathadder-v3-pro"
+                )
+            {
+                let locks = peripheral_desk::resident_macros::list(key)?
+                    .library
+                    .recovery;
+                let id = match action {
+                    ControlAction::Bind { control, layer, .. } => Some((*control, *layer)),
+                    ControlAction::Macro { control, .. } => Some((*control, 0)),
+                    ControlAction::Colors(_) => None,
+                };
+                if id.is_some_and(|(c, l)| {
+                    locks.iter().any(|r| {
+                        r.control == c
+                            && r.layer == l
+                            && r.target_instance
+                                .as_ref()
+                                .is_none_or(|saved| target.is_some_and(|t| &t.id == saved))
+                    })
+                }) {
+                    return Err("此键已绑定常驻宏，请先在软件宏设置停用此键的宏。".to_owned());
+                }
+            }
+        }
+        if let Some(section) = section {
+            let mut request = action.as_ref().map_or_else(
+                || serde_json::json!({"op":"controls-read","extended_modes":true}),
+                |action| action.request(profile),
+            );
+            request["control_section"] = serde_json::json!(section);
+            return serde_json::from_value(crate::plugin_manager::invoke(key, request)?)
+                .map_err(|e| format!("驱动返回键位格式错误：{e}"));
+        }
+        if let Some(action) = action {
+            controls::apply_in_profile(model, profile, &action)
+        } else {
+            controls::read(model)
+        }
+    })
+}
 
 struct Child {
     hwnd: HWND,
@@ -61,6 +127,7 @@ struct Child {
 }
 struct Editor {
     model: usize,
+    target: Option<crate::hid::DeviceTarget>,
     embedded: bool,
     dpi: u32,
     font: HFONT,
@@ -69,6 +136,7 @@ struct Editor {
     children: Vec<Child>,
     state: Option<ControlState>,
     selected: usize,
+    restore_selection: Option<u16>,
     pending: Option<Receiver<Job>>,
     saving: bool,
     status: String,
@@ -82,6 +150,10 @@ struct Editor {
     rgb: [u8; 3],
     picked: bool,
     color_open: bool,
+    visual: Option<visual::Visual>,
+    queue: std::collections::VecDeque<ControlAction>,
+    #[cfg(test)]
+    test_device: Option<Execute>,
 }
 impl Drop for Editor {
     fn drop(&mut self) {
@@ -333,7 +405,7 @@ impl Editor {
         EnableWindow(self.child(id), value as i32);
     }
     unsafe fn add(&mut self, hwnd: HWND, id: i32, class: &str, text: &str, r: R, style: u32) {
-        let r = if self.embedded {
+        let r = if self.embedded && !self.visual_page() && !self.sheet_page() {
             embedded::control_rect(id, r)
         } else {
             r
@@ -438,13 +510,60 @@ impl Editor {
             BindingAction::Unknown(_) => "未识别（只读）".into(),
         }
     }
+    fn visual_page(&self) -> bool {
+        self.visual.is_some() && self.page != 1
+    }
+    fn sheet_page(&self) -> bool {
+        self.embedded && (self.page == 1 || (self.page == 2 && self.visual.is_none()))
+    }
+    fn macro_available(&self) -> bool {
+        self.state
+            .as_ref()
+            .is_some_and(|s| s.macro_supported || !s.macros.is_empty())
+    }
+    unsafe fn change_page(&mut self, hwnd: HWND, page: usize) {
+        if self.pending.is_some() || (page == 1 && !self.macro_available()) {
+            return;
+        }
+        let previous = self.visual_selected();
+        self.remember_macro();
+        self.page = page;
+        self.selected = 0;
+        self.layout(hwnd);
+        if self.visual_page() {
+            self.show_visual_section(hwnd, previous);
+            SetFocus(self.child(visual::SELECT_KEY));
+        } else {
+            SetFocus(self.child(KEYS));
+        }
+    }
     unsafe fn layout(&mut self, hwnd: HWND) {
         self.remember_macro();
         for child in self.children.drain(..) {
             DestroyWindow(child.hwnd);
         }
-        if !self.embedded {
+        if self.embedded {
+            let (w, h) = if self.sheet_page() {
+                (WIDTH, HEIGHT)
+            } else if self.visual_page() {
+                (visual::WIDTH, visual::HEIGHT)
+            } else {
+                (embedded::WIDTH, embedded::HEIGHT)
+            };
+            viewport::content_size(hwnd, self.px(w), self.px(h));
+        }
+        if self.visual_page() {
+            self.visual_layout(hwnd);
+            return;
+        }
+        if !self.embedded || self.sheet_page() {
             for (i, label) in ["按键设置", "宏编辑器", "逐键灯光"].iter().enumerate() {
+                if self.embedded
+                    && ((i == 1 && !self.macro_available())
+                        || (i == 2 && !self.state.as_ref().is_some_and(|s| !s.colors.is_empty())))
+                {
+                    continue;
+                }
                 self.button(
                     hwnd,
                     10 + i as i32,
@@ -452,6 +571,9 @@ impl Editor {
                     R::new(28 + i as i32 * 148, 88, 136, 38),
                 );
             }
+        }
+        if self.embedded && !self.sheet_page() && self.macro_available() {
+            self.button(hwnd, 11, "板载宏", R::new(600, 22, 102, 35));
         }
         self.button(hwnd, RELOAD, "重新读取", R::new(866, 88, 146, 38));
         self.add(
@@ -634,11 +756,13 @@ impl Editor {
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     unsafe fn availability(&self) {
-        let ready = self.pending.is_none();
-        self.enable(RELOAD, ready);
+        let ready = self.pending.is_none()
+            || (self.visual.is_some() && self.saving && self.state.is_some());
+        self.enable(RELOAD, self.pending.is_none());
         self.enable(KEYS, ready);
+        self.enable(visual::LAYER, self.pending.is_none());
         for id in 10..13 {
-            self.enable(id, ready);
+            self.enable(id, self.pending.is_none());
         }
         let editable = ready && self.editable();
         match self.page {
@@ -863,7 +987,20 @@ impl Editor {
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     unsafe fn begin(&mut self, hwnd: HWND, action: Option<ControlAction>) {
-        if self.pending.is_some() || self.color_open {
+        if self.color_open {
+            return;
+        }
+        if self.pending.is_some() {
+            if self.visual.is_some() && self.saving {
+                if let Some(next) = action {
+                    self.queue.push_back(next);
+                    self.status(
+                        hwnd,
+                        format!("已排队 {} 项修改，按操作顺序写入。", self.queue.len()),
+                        false,
+                    );
+                }
+            }
             return;
         }
         self.saving = action.is_some();
@@ -880,14 +1017,15 @@ impl Editor {
         );
         self.availability();
         let model = self.model;
+        let target = self.target.clone();
         let profile = self.state.as_ref().and_then(|state| state.profile);
+        let section = self.visual_section();
         let window = hwnd as usize;
+        let execute: Execute = execute_controls;
+        #[cfg(test)]
+        let execute = self.test_device.unwrap_or(execute);
         thread::spawn(move || {
-            let result = match action {
-                Some(action) => controls::apply_in_profile(model, profile, &action),
-                None => peripheral_desk::resident_macros::disable_device(REGISTRY[model].key)
-                    .and_then(|_| controls::read(model)),
-            };
+            let result = execute(model, target.as_ref(), profile, section, action);
             if tx.send(result).is_ok() {
                 unsafe {
                     PostMessageW(window as HWND, FINISHED, 0, 0);
@@ -904,27 +1042,32 @@ impl Editor {
             return;
         }
         self.pending = None;
+        let writing = std::mem::take(&mut self.saving);
+        let saved = matches!(&result, Ok(Ok(_)));
         match result {
             Ok(Ok(state)) => {
-                if self.saving && self.page == 1 {
+                if writing && self.page == 1 {
                     if let Some(control) = self.macro_control.take() {
                         self.macro_drafts.remove(&control);
                     }
                 }
                 let notice = state.notice.clone();
                 self.state = Some(state);
-                self.status = if self.saving {
+                self.status = if writing {
                     format!("已保存，读回确认成功。{notice}")
                 } else {
                     notice
                 };
                 self.error = false;
                 self.layout(hwnd);
+                if let Some(control) = self.restore_selection.take() {
+                    self.select_hotspot(hwnd, control);
+                }
             }
             Ok(Err(e)) => {
                 self.status(
                     hwnd,
-                    format!("{}失败：{e}", if self.saving { "保存" } else { "读取" }),
+                    format!("{}失败：{e}", if writing { "保存" } else { "读取" }),
                     true,
                 );
                 self.state = None;
@@ -935,6 +1078,44 @@ impl Editor {
                 self.state = None;
                 self.layout(hwnd);
             }
+        }
+        if self.visual.is_some() && saved {
+            if writing {
+                crate::mhub::timing::mark("write_confirmed");
+            } else if self
+                .state
+                .as_ref()
+                .is_some_and(|s| s.bindings.iter().any(|b| b.editable))
+            {
+                crate::mhub::timing::mark("editable");
+            }
+        }
+        if !saved && !self.queue.is_empty() {
+            let n = self.queue.len();
+            self.queue.clear();
+            self.status(
+                hwnd,
+                format!("{}；其余 {n} 项未写入，请重新读取。", self.status),
+                true,
+            );
+        }
+        if writing && self.embedded {
+            let text = if self.error {
+                self.status.clone()
+            } else {
+                format!(
+                    "{} · 板载修改已读回确认",
+                    self.target
+                        .as_ref()
+                        .map_or(REGISTRY[self.model].name, |t| t.label.as_str())
+                )
+            };
+            embedded::notify_write(hwnd, self.model, text, self.error);
+        }
+        if let Some(next) = self.queue.pop_front() {
+            self.begin(hwnd, Some(next));
+        } else if embedded::detached(hwnd) {
+            PostMessageW(hwnd, embedded::RETIRE, 0, 0);
         }
     }
     unsafe fn save_binding(&mut self, hwnd: HWND) {
@@ -1127,19 +1308,14 @@ impl Editor {
         self.begin(hwnd, Some(ControlAction::Colors(desired)));
     }
     unsafe fn command(&mut self, hwnd: HWND, id: i32, event: u32) {
-        if self.pending.is_some() || self.color_open {
+        if self.color_open || (self.pending.is_some() && !(self.visual.is_some() && self.saving)) {
+            return;
+        }
+        if self.visual_page() && self.visual_command(hwnd, id, event) {
             return;
         }
         match id {
-            10..=12 if !self.embedded => {
-                let page = (id - 10) as usize;
-                if self.page == 2 || page == 2 {
-                    self.selected = 0;
-                }
-                self.page = page;
-                self.layout(hwnd);
-                SetFocus(self.child(KEYS));
-            }
+            10..=12 => self.change_page(hwnd, (id - 10) as usize),
             RELOAD => self.begin(hwnd, None),
             KEYS if event == LBN_SELCHANGE => {
                 self.remember_macro();
@@ -1214,9 +1390,13 @@ impl Editor {
         let dc = CreateCompatibleDC(dest);
         let bitmap = CreateCompatibleBitmap(dest, rect.right.max(1), rect.bottom.max(1));
         let previous = SelectObject(dc, bitmap);
-        if self.embedded {
+        if self.embedded && !self.sheet_page() {
             let c = Canvas::new(dc, self.dpi);
-            self.paint_embedded(&c);
+            if self.visual.is_some() {
+                self.paint_visual(&c);
+            } else {
+                self.paint_embedded(&c);
+            }
         } else {
             let c = Canvas::new(dc, self.dpi);
             c.rect(R::new(0, 0, WIDTH, HEIGHT), BG);
@@ -1474,11 +1654,36 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
     match msg {
         WM_CREATE => {
             editor.layout(hwnd);
+            PostMessageW(hwnd, INITIAL_READ, 0, 0);
+            0
+        }
+        INITIAL_READ => {
             editor.begin(hwnd, None);
             0
         }
         WM_PAINT => {
             editor.paint(hwnd);
+            if editor.visual.is_some() {
+                crate::mhub::timing::mark("first_frame");
+            }
+            0
+        }
+        WM_TIMER if w == visual::HOVER_TIMER => {
+            if let Some(v) = editor.visual.as_mut() {
+                v.tick_hover(hwnd);
+            }
+            0
+        }
+        WM_MOUSEMOVE | WM_MOUSELEAVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_CAPTURECHANGED
+            if editor.visual_page() =>
+        {
+            editor.visual_pointer(hwnd, msg, l);
+            0
+        }
+        embedded::RETIRE => {
+            if embedded::detached(hwnd) && editor.pending.is_none() {
+                DestroyWindow(GetParent(hwnd));
+            }
             0
         }
         WM_ERASEBKGND => 1,
@@ -1564,6 +1769,7 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
     );
     let mut editor = Box::new(Editor {
         model,
+        target: crate::plugin_manager::selected_device_target(REGISTRY[model].key),
         embedded,
         dpi,
         font,
@@ -1572,6 +1778,7 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
         children: Vec::new(),
         state: None,
         selected: 0,
+        restore_selection: None,
         pending: None,
         saving: false,
         status: "正在准备设备编辑器…".into(),
@@ -1585,6 +1792,14 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
         rgb: [255, 56, 89],
         picked: false,
         color_open: false,
+        visual: if embedded {
+            visual::Visual::load(REGISTRY[model].key)
+        } else {
+            None
+        },
+        queue: Default::default(),
+        #[cfg(test)]
+        test_device: None,
     });
     let (style, ex_style, x, y, width, height) = if embedded {
         (
@@ -1592,8 +1807,16 @@ unsafe fn create(owner: HWND, model: usize, embedded: bool) -> Result<(HWND, Box
             WS_EX_CONTROLPARENT,
             0,
             0,
-            editor.px(embedded::WIDTH),
-            editor.px(embedded::HEIGHT),
+            editor.px(if editor.visual.is_some() {
+                visual::WIDTH
+            } else {
+                embedded::WIDTH
+            }),
+            editor.px(if editor.visual.is_some() {
+                visual::HEIGHT
+            } else {
+                embedded::HEIGHT
+            }),
         )
     } else {
         let mut frame = RECT {

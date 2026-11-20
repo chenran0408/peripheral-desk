@@ -19,16 +19,17 @@ use windows_sys::Win32::{
     UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
 };
 
-mod brand;
 pub(crate) mod fx;
 mod workspace;
-use brand::Brand;
+
 use workspace::Tool;
 mod navigation;
 mod onboard;
 mod pages;
 mod pointer_editor;
+mod polling;
 mod tray;
+mod units;
 pub(crate) mod widgets;
 
 use pages::{detail_y, is_volume, sleep_label};
@@ -36,6 +37,7 @@ use pages::{detail_y, is_volume, sleep_label};
 pub(crate) use tray::pick_audio_component;
 use tray::{flyout_proc, tray_data};
 
+const POLL_DONE: u32 = WM_APP + 0x39;
 const DONE: u32 = WM_APP + 1;
 const TRAY: u32 = WM_APP + 2;
 const OPEN: u32 = WM_APP + 3;
@@ -54,8 +56,8 @@ fn widget_key(command: Command) -> u64 {
         Command::Prefs => 0x103,
         Command::Drivers => 0x104,
         Command::MHub => 0x105,
-        Command::Brand(Brand::Razer) => 0x106,
-        Command::Brand(Brand::Logitech) => 0x107,
+        Command::UnitDevice(i) => 0x100000 + i as u64,
+        Command::UnitBattery(i) => 0x200000 + i as u64,
         Command::Battery(model) => 0x4000 + model as u64,
         Command::Device(model) => 0x1000 + model as u64,
         Command::System(model) => 0x8000 + model as u64,
@@ -73,9 +75,9 @@ struct PointerSample {
     rate_indices: Option<[u8; 2]>,
 }
 enum WorkUpdate {
-    Board(usize, Result<onboard::Profiles, String>),
+    Board(usize, Option<String>, Result<onboard::Profiles, String>),
     Device(usize, backend::State),
-    Pointer(usize, Result<Box<PointerSample>, String>),
+    Pointer(usize, Option<String>, Result<Box<PointerSample>, String>),
     Finished(WorkResult),
 }
 fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
@@ -93,7 +95,6 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 enum Page {
     Home,
     Drivers,
-    Brand(Brand),
     Tool(usize, Tool),
     MHub,
     Onboard(usize),
@@ -109,6 +110,8 @@ enum Command {
     Battery(usize),
     Device(usize),
     System(usize),
+    UnitBattery(usize),
+    UnitDevice(usize),
     Refresh,
     ReadPointer,
     PointerEditor,
@@ -131,8 +134,7 @@ enum Command {
     MHub,
     HubMenu,
     SwitchHubDevice,
-    Brand(Brand),
-    BrandPlugins(Brand),
+    BrandPlugins(usize),
     Back,
     OpenBoard(usize),
     Board(onboard::Op),
@@ -147,6 +149,7 @@ enum Command {
     Notices,
     Startup,
     Diagnose,
+    WriteHistory,
     Advanced(bool),
     SettingsPage(i32),
     HomePage(i32),
@@ -167,13 +170,15 @@ struct App {
     eq_drag: Option<(Tuning, R)>,
     home_page: usize,
     drivers_page: usize,
-    brand_page: usize,
     controls: Vec<Button>,
+    units: Vec<units::Unit>,
+    polling: Option<Receiver<WorkUpdate>>,
+    poll_skip: std::collections::HashSet<usize>,
+    poll_again: bool,
     pending: Option<Receiver<WorkUpdate>>,
     modal_open: bool,
     hub_open: bool,
     hub_source: Page,
-    hub_requested: bool,
     board: onboard::Board,
     board_requested: bool,
     show_evidence: bool,
@@ -190,6 +195,8 @@ struct App {
     dragging: bool,
     status: String,
     status_error: bool,
+    write_history: std::collections::VecDeque<String>,
+    quit_after_hub: bool,
     startup_enabled: bool,
     images: Images,
     icon: HICON,
@@ -260,13 +267,15 @@ pub fn run(hidden: bool, battery: bool) {
             eq_drag: None,
             home_page: 0,
             drivers_page: 0,
-            brand_page: 0,
             controls: vec![],
+            units: Vec::new(),
+            polling: None,
+            poll_skip: Default::default(),
+            poll_again: false,
             pending: None,
             modal_open: false,
             hub_open: false,
             hub_source: Page::Drivers,
-            hub_requested: false,
             board: onboard::Board::default(),
             board_requested: false,
             show_evidence: false,
@@ -287,6 +296,8 @@ pub fn run(hidden: bool, battery: bool) {
                 "正在读取设备…".into()
             },
             status_error: false,
+            write_history: Default::default(),
+            quit_after_hub: false,
             startup_enabled: startup::is_enabled().unwrap_or(false),
             images,
             icon,
@@ -449,6 +460,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_DEVICECHANGE if w == DBT_DEVNODES_CHANGED as usize => {
             crate::mhub::devices_changed();
+            SetTimer(hwnd, 4, 250, None);
+            0
+        }
+        WM_TIMER if w == 4 => {
+            KillTimer(hwnd, 4);
+            if a.polling.is_some() {
+                a.poll_again = true;
+            } else {
+                a.start_poll(hwnd);
+            }
             0
         }
         WM_TIMER if w == 1 => {
@@ -472,11 +493,31 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             }
             0
         }
+        crate::mhub::WRITE_MESSAGE => {
+            for (message, error) in crate::mhub::take_write_notices() {
+                a.record_write(message, error);
+            }
+            a.render(hwnd);
+            0
+        }
+        crate::controls_ui::WRITE_FINISHED => {
+            while let Some((model, message, error)) = crate::controls_ui::take_write_notice() {
+                a.poll_skip.insert(model);
+                a.record_write(message, error);
+            }
+            a.start_poll(hwnd);
+            a.render(hwnd);
+            0
+        }
         crate::mhub::CLOSED_MESSAGE => {
             if !crate::mhub::active() {
                 a.hub_open = false;
+                if a.quit_after_hub {
+                    a.quit_after_hub = false;
+                    a.quit(hwnd);
+                    return 0;
+                }
                 a.pointer_requested = matches!(a.page,Page::Device(m) if REGISTRY[m].supports("polling-rate-read") || REGISTRY[m].supports("dpi-stages-read"));
-                crate::plugin_manager::set_web_driver_devices(Vec::new());
                 let error = crate::mhub::take_error();
                 if a.page == Page::MHub {
                     a.navigate(hwnd, a.hub_source);
@@ -486,6 +527,10 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                     message(&format!("迈从 M HUB 打开失败：{error}"));
                 }
             }
+            0
+        }
+        POLL_DONE => {
+            a.complete_poll(hwnd);
             0
         }
         DONE => {
@@ -613,6 +658,8 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_QUERYENDSESSION => i32::from(
             !a.modal_open
+                && !crate::mhub::closing()
+                && !crate::controls_ui::embedded_writing()
                 && !a.tool_busy()
                 && !a.board.saving
                 && a.inflight.is_none()
@@ -683,6 +730,11 @@ impl App {
             self.logical(l as i16 as i32),
             self.logical((l >> 16) as i16 as i32),
         )
+    }
+    fn record_write(&mut self, message: String, error: bool) {
+        self.set_status(&message, error);
+        self.write_history.push_front(message);
+        self.write_history.truncate(20);
     }
     fn set_status(&mut self, text: &str, error: bool) {
         self.status = text.into();
@@ -766,10 +818,23 @@ impl App {
             );
         }
         match self.page {
-            Page::Tool(_, tool) => {
+            Page::Tool(m, tool) => {
+                if REGISTRY[m].mchose() {
+                    self.add(
+                        hwnd,
+                        "更多原厂功能",
+                        R::new(w - 249, 16, 126, 34),
+                        GHOST,
+                        Command::MHub,
+                    );
+                }
                 self.add(
                     hwnd,
-                    "‹  设备设置",
+                    if REGISTRY[m].key == "mchose-g75-pro" {
+                        "灯效与性能"
+                    } else {
+                        "‹  设备设置"
+                    },
                     R::new(SIDEBAR + 16, 16, 115, 34),
                     GHOST,
                     Command::Back,
@@ -807,38 +872,34 @@ impl App {
             Page::Onboard(m) => {
                 self.add(
                     hwnd,
-                    if self.parent_page() == Page::Brand(Brand::Logitech) {
-                        "‹  罗技"
-                    } else {
-                        "‹  设备设置"
-                    },
+                    "‹  返回",
                     R::new(SIDEBAR + 16, 16, 110, 34),
                     GHOST,
                     Command::Back,
                 );
                 self.board_layout(hwnd, m);
             }
-            Page::Home | Page::Drivers | Page::Brand(_) => {
+            Page::Home | Page::Drivers => {
                 let power = self.page == Page::Home;
                 let entries = self.grid_entries();
                 let pages = entries.len().div_ceil(4).max(1);
                 let index = self.grid_page_mut();
                 *index = (*index).min(pages - 1);
                 let page = *index;
-                if let Page::Brand(brand) = self.page {
+                if self.page == Page::Drivers {
                     self.add(
                         hwnd,
-                        "‹  设备调节",
-                        R::new(SIDEBAR + 16, 16, 110, 34),
+                        "本地 M HUB",
+                        R::new(w - 292, 92, 118, 38),
                         GHOST,
-                        Command::Back,
+                        Command::MHub,
                     );
                     self.add(
                         hwnd,
                         "选择设备插件",
-                        R::new(w - 202, 86, 166, 38),
+                        R::new(w - 161, 92, 132, 38),
                         CHIP,
-                        Command::BrandPlugins(brand),
+                        Command::AddDevice,
                     );
                 }
                 if power {
@@ -867,7 +928,9 @@ impl App {
                         Command::Battery(m) | Command::Device(m) => REGISTRY[m].name.to_owned(),
                         Command::System(i) => self.snapshot.system_devices[i].name.clone(),
                         Command::MHub => "迈从 M HUB".into(),
-                        Command::Brand(b) => format!("{}驱动中心", b.name()),
+                        Command::UnitDevice(i) | Command::UnitBattery(i) => {
+                            self.units[i].name.clone()
+                        }
                         _ => unreachable!(),
                     };
                     let x = SIDEBAR + 24 + (slot as i32 % 2) * (cw + 18);
@@ -903,6 +966,15 @@ impl App {
                     GHOST,
                     Command::Evidence,
                 );
+                if self.show_evidence {
+                    self.add(
+                        hwnd,
+                        "同品牌插件",
+                        R::new(SIDEBAR + 23, h - 148, 144, 36),
+                        GHOST,
+                        Command::BrandPlugins(m),
+                    );
+                }
                 if !self.hub_controls(m) && !self.show_evidence {
                     if spec.supports("polling-rate-read") || spec.supports("dpi-stages-read") {
                         self.add(
@@ -914,8 +986,9 @@ impl App {
                         );
                     }
                     let mut tabs = Vec::new();
-                    if let Some(brand) = Brand::for_device(spec) {
-                        tabs.push((brand.back_label(), Command::Back));
+                    tabs.push(("‹  设备调节", Command::Drivers));
+                    if spec.mchose() {
+                        tabs.push(("更多原厂功能", Command::MHub));
                     }
                     if spec.supports("onboard-profiles") {
                         tabs.push(("板载配置", Command::OpenBoard(m)));
@@ -1185,7 +1258,7 @@ impl App {
                 if let Page::Battery(model) = self.page {
                     let spec = &REGISTRY[model];
                     if spec.mchose() || navigation::has_native_controls(spec) {
-                        let label = if spec.mchose() {
+                        let label = if spec.mchose() && !navigation::has_native_controls(spec) {
                             "打开迈从 M HUB"
                         } else {
                             "打开设备设置"
@@ -1249,6 +1322,7 @@ impl App {
                     ("配置备份", Command::Configuration),
                     ("导出诊断", Command::Diagnose),
                     ("常驻软件宏", Command::ResidentMacros),
+                    ("写入记录", Command::WriteHistory),
                 ]
                 .into_iter()
                 .enumerate()
@@ -1317,17 +1391,22 @@ impl App {
                     return;
                 }
             }
-            if matches!(page, Page::Brand(b) if !matches!(self.page, Page::Device(m) | Page::Onboard(m) if Brand::for_device(&REGISTRY[m]) == Some(b)))
-            {
-                self.brand_page = 0;
-            }
         }
-        self.hub_requested = false;
         if self.page == Page::MHub && page != Page::MHub {
             crate::mhub::close();
             self.hub_open = false;
-            crate::plugin_manager::set_web_driver_devices(Vec::new());
         }
+        let page = if let Page::Tool(model, tool) = page {
+            match tool.open(hwnd, model, self.hub_bounds(hwnd)) {
+                Ok(()) => page,
+                Err(error) => {
+                    self.set_status(&error, true);
+                    Page::Device(model)
+                }
+            }
+        } else {
+            page
+        };
         self.board_requested = matches!(page, Page::Onboard(_));
         if !self.board.saving {
             self.board = onboard::Board::default();
@@ -1406,81 +1485,36 @@ impl App {
         r
     }
 
-    unsafe fn open_mhub(&mut self, hwnd: HWND) {
-        if self.hub_open || self.modal_open {
+    fn current_mchose(&self) -> Option<usize> {
+        match self.page {
+            Page::Battery(m) | Page::Device(m) | Page::Tool(m, _) if REGISTRY[m].mchose() => {
+                Some(m)
+            }
+            _ => None,
+        }
+    }
+    unsafe fn open_mhub(&mut self, hwnd: HWND, selected: Option<usize>) {
+        if self.hub_open || self.modal_open || crate::mhub::closing() {
             return;
         }
-        if self.pending.is_some() || !self.queued.is_empty() {
-            self.hub_requested = true;
-            self.set_status("当前设备操作完成后将打开迈从 M HUB", false);
+        if selected.is_some_and(|m| {
+            self.queued.iter().any(|(model, _)| *model == m)
+                || self.inflight.is_some_and(|(model, _)| model == m)
+                || crate::controls_ui::writing_model(m)
+        }) {
+            self.set_status("当前设备正在保存，请在完成后打开其他功能", false);
             self.render(hwnd);
             return;
         }
-        self.hub_requested = false;
-        // A second installed model may describe another collection on the same receiver.
-        let mut receivers = std::collections::HashSet::new();
-        for spec in REGISTRY.iter().filter(|spec| spec.mchose()) {
-            receivers.extend(spec.extra_matchers.iter().map(|id| (id.vid, id.pid)));
-        }
-        if let Ok(catalog) = crate::plugin_manager::catalog() {
-            for package in catalog {
-                if package.device["brand"]
-                    .as_str()
-                    .is_some_and(|brand| brand.eq_ignore_ascii_case("MCHOSE") || brand == "迈从")
-                {
-                    if let Ok(ids) = serde_json::from_value::<Vec<crate::devices::DeviceMatch>>(
-                        package.device["matches"].clone(),
-                    ) {
-                        receivers.extend(ids.into_iter().map(|id| (id.vid, id.pid)));
-                    }
-                }
-            }
-        }
-        let peers: Vec<_> = REGISTRY
-            .iter()
-            .filter(|spec| {
-                spec.mchose()
-                    || spec
-                        .extra_matchers
-                        .iter()
-                        .any(|id| receivers.contains(&(id.vid, id.pid)))
-            })
-            .collect();
-        // Keep active software bindings intact. Opening the web driver while a macro is
-        // mapped could let the two editors change the same binding.
-        for spec in &peers {
-            if spec.supports("software-macro-trigger")
-                || matches!(
-                    spec.key,
-                    "mchose-a5-ultra" | "mchose-g75-pro" | "razer-deathadder-v3-pro"
-                )
-            {
-                match peripheral_desk::resident_macros::list(spec.key) {
-                    Ok(state) if !state.active.is_empty() || !state.library.recovery.is_empty() => {
-                        message(&format!(
-                            "{} 正在使用软件宏。请到「偏好设置 → 常驻软件宏」选择此设备，停用并恢复原键，再打开 M HUB。",
-                            spec.name
-                        ));
-                        return;
-                    }
-                    Err(error) => {
-                        message(&format!("无法确认 {} 的宏状态：{error}", spec.name));
-                        return;
-                    }
-                    _ => {}
-                }
-            }
-        }
-        crate::plugin_manager::set_web_driver_devices(
-            peers.into_iter().map(|spec| spec.key).collect(),
-        );
-        let preferred = match self.page {
-            Page::Battery(m) | Page::Device(m) if REGISTRY[m].mchose() => Some(REGISTRY[m].key),
-            _ => None,
-        };
+        let preferred = selected.map(|m| REGISTRY[m].key);
+        crate::mhub::timing::start(preferred.unwrap_or("mhub"));
         match crate::mhub::open_for_model(hwnd, self.hub_bounds(hwnd), preferred) {
             Ok(()) => {
-                self.hub_source = self.page;
+                self.hub_source = if let Page::Tool(m, _) = self.page {
+                    Page::Device(m)
+                } else {
+                    self.page
+                };
                 self.hub_open = true;
                 self.pointer_sample = None;
                 for state in &mut self.snapshot.devices {
@@ -1490,11 +1524,10 @@ impl App {
                     }
                 }
                 self.navigate(hwnd, Page::MHub);
-                self.set_status("离开 M HUB 后，自动恢复迈从设备的后台读取", false);
+                self.set_status("本地 M HUB", false);
                 self.tray(hwnd);
             }
             Err(error) => {
-                crate::plugin_manager::set_web_driver_devices(Vec::new());
                 self.set_status(&error, true);
             }
         }
@@ -1578,7 +1611,10 @@ impl App {
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
                     return;
                 }
-                if self.tool_busy() {
+                if self.tool_busy()
+                    || crate::mhub::closing()
+                    || crate::controls_ui::embedded_writing()
+                {
                     return;
                 }
                 self.modal_open = true;
@@ -1592,7 +1628,9 @@ impl App {
                         crate::configuration_ui::open(hwnd, model);
                         crate::plugin_ui::StoreExit::Close
                     }
-                    Command::BrandPlugins(b) => crate::plugin_ui::open_for_brand(hwnd, b.vendor()),
+                    Command::BrandPlugins(m) => {
+                        crate::plugin_ui::open_for_brand(hwnd, REGISTRY[m].brand)
+                    }
                     Command::CoreUpdate => crate::update_ui::open(hwnd),
                     _ => crate::plugin_ui::open(hwnd),
                 };
@@ -1608,7 +1646,7 @@ impl App {
                 self.layout(hwnd);
                 self.begin(hwnd, None);
             }
-            Command::MHub => self.open_mhub(hwnd),
+            Command::MHub => self.open_mhub(hwnd, self.current_mchose()),
             Command::SwitchHubDevice => {
                 if let Err(e) = crate::mhub::choose_device() {
                     self.set_status(&e, true);
@@ -1616,7 +1654,6 @@ impl App {
                 }
             }
             Command::Back => self.navigate(hwnd, self.parent_page()),
-            Command::Brand(b) => self.navigate(hwnd, Page::Brand(b)),
             Command::HubMenu => {
                 if let Some(b) = self.controls.iter().find(|b| b.command == Command::HubMenu) {
                     let mut rect: RECT = zeroed();
@@ -1642,15 +1679,17 @@ impl App {
                         && !self.hub_controls(model)
                         && pointer_editor::available(&REGISTRY[model])
                     {
-                        if Brand::for_device(&REGISTRY[model]) == Some(Brand::Razer) {
+                        if REGISTRY[model].mchose()
+                            || REGISTRY[model].brand.eq_ignore_ascii_case("razer")
+                        {
                             self.open_tool(hwnd, model, Tool::Pointer);
-                            return;
+                        } else {
+                            self.modal_open = true;
+                            self.pointer_sample = pointer_editor::open(hwnd, &REGISTRY[model])
+                                .map(|sample| (model, sample));
+                            self.modal_open = false;
+                            self.render(hwnd);
                         }
-                        self.modal_open = true;
-                        self.pointer_sample = pointer_editor::open(hwnd, &REGISTRY[model])
-                            .map(|sample| (model, sample));
-                        self.modal_open = false;
-                        self.render(hwnd);
                     }
                 }
             }
@@ -1663,7 +1702,9 @@ impl App {
                     return;
                 }
                 if let Page::Device(model) = self.page {
-                    if Brand::for_device(&REGISTRY[model]) == Some(Brand::Razer) {
+                    if REGISTRY[model].mchose()
+                        || REGISTRY[model].brand.eq_ignore_ascii_case("razer")
+                    {
                         let tool = match command {
                             Command::ControlsEditor => Some(Tool::Bindings),
                             Command::GenericLighting => Some(Tool::Lighting),
@@ -1718,13 +1759,39 @@ impl App {
             Command::Home => self.navigate(hwnd, Page::Home),
             Command::Drivers => self.navigate(hwnd, Page::Drivers),
             Command::Battery(m) => self.navigate(hwnd, Page::Battery(m)),
-            Command::Device(m) if REGISTRY[m].mchose() => self.open_mhub(hwnd),
+            Command::UnitDevice(unit) | Command::UnitBattery(unit) => {
+                if let Some(m) = self.select_unit(hwnd, unit) {
+                    let next = if matches!(command, Command::UnitBattery(_)) {
+                        Command::Battery(m)
+                    } else {
+                        Command::Device(m)
+                    };
+                    self.command(hwnd, next);
+                }
+            }
+            Command::Device(m)
+                if REGISTRY[m].mchose() && !navigation::has_native_controls(&REGISTRY[m]) =>
+            {
+                self.open_mhub(hwnd, Some(m))
+            }
+            Command::Device(m)
+                if (REGISTRY[m].key == "mchose-g75-pro" || REGISTRY[m].supports("keymap-home"))
+                    && REGISTRY[m].supports("bindings") =>
+            {
+                crate::mhub::timing::start("native:g75");
+                self.open_tool(hwnd, m, Tool::Bindings)
+            }
             Command::Device(m)
                 if REGISTRY[m].supports("onboard-profiles") && REGISTRY[m].read_only() =>
             {
                 self.navigate(hwnd, Page::Onboard(m))
             }
-            Command::Device(m) => self.navigate(hwnd, Page::Device(m)),
+            Command::Device(m) => {
+                if REGISTRY[m].mchose() {
+                    crate::mhub::timing::start(REGISTRY[m].key);
+                }
+                self.navigate(hwnd, Page::Device(m));
+            }
             Command::System(m) => self.navigate(hwnd, Page::System(m)),
             Command::Prefs => self.navigate(hwnd, Page::Preferences),
             Command::Minimize => {
@@ -1782,6 +1849,25 @@ impl App {
                 }
                 Err(error) => self.set_status(&error, true),
             },
+            Command::WriteHistory => {
+                let records = self
+                    .write_history
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let text = if records.is_empty() {
+                    "本次打开外设盒后暂无设备写入记录。"
+                } else {
+                    &records
+                };
+                MessageBoxW(
+                    hwnd,
+                    wide(text).as_ptr(),
+                    wide("最近的设备写入").as_ptr(),
+                    MB_OK | MB_ICONINFORMATION,
+                );
+            }
             Command::Diagnose => {
                 let path = backend::data_path().with_file_name("diagnostics.json");
                 let key = if let Page::Device(m) = self.page {
@@ -1803,26 +1889,29 @@ impl App {
         }
         self.render(hwnd);
     }
-    unsafe fn quit(&self, hwnd: HWND) {
+    unsafe fn quit(&mut self, hwnd: HWND) {
         if self.modal_open {
             return;
         }
         if self.tool_busy()
+            || crate::mhub::closing()
+            || crate::controls_ui::embedded_writing()
             || self.board.saving
             || self.inflight.is_some()
             || self.profile_notice.is_some()
             || !self.queued.is_empty()
         {
             message("设备设置正在保存，请等待完成后退出。");
+        } else if crate::mhub::active() {
+            self.quit_after_hub = true;
+            crate::mhub::close();
         } else {
             DestroyWindow(hwnd);
         }
     }
     unsafe fn poll_detail_on_entry(&mut self, hwnd: HWND) {
         if self.pending.is_none() && self.queued.is_empty() {
-            if self.hub_requested {
-                self.open_mhub(hwnd);
-            } else if self.board_requested {
+            if self.board_requested {
                 if let Page::Onboard(m) = self.page {
                     self.board_requested = false;
                     self.board_run(hwnd, m, onboard::Op::Read);
@@ -1853,63 +1942,58 @@ impl App {
         self.set_status("正在读取所选鼠标的指针参数…", false);
         self.render(hwnd);
         let window = hwnd as usize;
+        let target = crate::plugin_manager::selected_device_target(spec.key);
         thread::spawn(move || {
-            let response = crate::plugin_manager::invoke(
-                spec.key,
-                serde_json::json!({"op":"read-state","read_pointer":true}),
-            )
-            .and_then(|value| {
-                serde_json::from_value::<Box<PointerSample>>(value)
-                    .map_err(|error| error.to_string())
-            })
-            .and_then(|state| {
-                if state.state.fresh && state.state.key == spec.key {
-                    Ok(state)
-                } else {
-                    Err("所选设备未返回当前指针参数".into())
-                }
-            });
-            if tx.send(WorkUpdate::Pointer(model, response)).is_ok() {
+            let response =
+                crate::plugin_manager::with_device_target(spec.key, target.as_ref(), || {
+                    crate::plugin_manager::invoke(
+                        spec.key,
+                        serde_json::json!({"op":"read-state","read_pointer":true}),
+                    )
+                })
+                .and_then(|value| {
+                    serde_json::from_value::<Box<PointerSample>>(value)
+                        .map_err(|error| error.to_string())
+                })
+                .and_then(|state| {
+                    if state.state.fresh && state.state.key == spec.key {
+                        Ok(state)
+                    } else {
+                        Err("所选设备未返回当前指针参数".into())
+                    }
+                });
+            if tx
+                .send(WorkUpdate::Pointer(model, target.map(|t| t.id), response))
+                .is_ok()
+            {
                 PostMessageW(window as HWND, DONE, 0, 0);
             }
         });
     }
     unsafe fn begin(&mut self, hwnd: HWND, action: Option<(usize, Action)>) {
+        let Some((model, setting)) = action else {
+            self.start_poll(hwnd);
+            return;
+        };
         if self.pending.is_some() || self.modal_open {
             return;
         }
         let snapshot = self.snapshot.clone();
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
-        let editing = if let Page::Tool(m, _) = self.page {
-            Some(m)
-        } else {
-            None
-        };
+        let captured = crate::plugin_manager::selected_device_target(REGISTRY[model].key);
+        self.poll_skip.insert(model);
         self.inflight = action;
         self.profile_notice = None;
-        self.set_status(
-            if action.is_some() {
-                "正在保存到设备并读回确认…"
-            } else if REGISTRY.is_empty() && self.snapshot.system_devices.is_empty() {
-                "打开驱动仓库，添加所需设备驱动；安装后自动重启生效"
-            } else {
-                "正在读取设备…"
-            },
-            false,
-        );
+        self.set_status("正在保存到设备并读回确认…", false);
         self.render(hwnd);
         let window = hwnd as usize;
         thread::spawn(move || {
-            let result = if let Some(action) = action {
-                backend::refresh(&snapshot, Some(action))
-            } else {
-                backend::refresh_progress_except(&snapshot, editing, |model, state| {
-                    if tx.send(WorkUpdate::Device(model, state)).is_ok() {
-                        PostMessageW(window as HWND, DONE, 0, 0);
-                    }
-                })
-            };
+            let result = crate::plugin_manager::with_device_target(
+                REGISTRY[model].key,
+                captured.as_ref(),
+                || backend::refresh(&snapshot, Some((model, setting))),
+            );
             if tx.send(WorkUpdate::Finished(result)).is_ok() {
                 PostMessageW(window as HWND, DONE, 0, 0);
             }
@@ -1931,13 +2015,17 @@ impl App {
                     self.snapshot.devices[model] = state;
                     changed = true;
                 }
-                WorkUpdate::Board(model, result) => {
-                    self.board_finished(hwnd, model, result);
+                WorkUpdate::Board(model, id, result) => {
+                    self.board_finished(hwnd, model, id, result);
                     return;
                 }
-                WorkUpdate::Pointer(model, result) => {
+                WorkUpdate::Pointer(model, id, result) => {
                     self.pending = None;
-                    if self.page == Page::Device(model) {
+                    if self.page == Page::Device(model)
+                        && crate::plugin_manager::selected_device_target(REGISTRY[model].key)
+                            .map(|t| t.id)
+                            == id
+                    {
                         match result {
                             Ok(sample) => {
                                 let state = &sample.state;
@@ -1994,36 +2082,21 @@ impl App {
             return;
         };
         let (s, result) = finished.unwrap();
-        let writing = self.inflight.take().is_some();
+        let written_model = self.inflight.take().map(|(m, _)| m);
+        let writing = written_model.is_some();
         let profile_notice = self.profile_notice.take();
-        let mut s = s;
-        s.interval = self.snapshot.interval;
-        s.threshold = self.snapshot.threshold;
-        s.notices = self.snapshot.notices;
-        let selected_system = match self.page {
-            Page::System(index) => self
-                .snapshot
-                .system_devices
-                .get(index)
-                .map(|device| device.state.key.clone()),
-            _ => None,
-        };
-        self.snapshot = s;
+        if let Some(model) = written_model {
+            self.snapshot.devices[model] = s.devices[model].clone();
+            self.sync_units(model);
+        } else {
+            self.snapshot.devices = s.devices;
+        }
         if self
             .pointer_sample
             .as_ref()
-            .is_some_and(|(model, _)| !self.snapshot.devices[*model].fresh)
+            .is_some_and(|(m, _)| !self.snapshot.devices[*m].fresh)
         {
             self.pointer_sample = None;
-        }
-        if let Some(key) = selected_system {
-            self.page = self
-                .snapshot
-                .system_devices
-                .iter()
-                .position(|device| device.state.key == key)
-                .map(Page::System)
-                .unwrap_or(Page::Home);
         }
         self.update_ring_targets();
         self.fx_wake(hwnd);
@@ -2059,6 +2132,12 @@ impl App {
                     false,
                 );
             }
+        }
+        if let Some(m) = written_model {
+            self.record_write(
+                format!("{} · {}", REGISTRY[m].name, self.status),
+                self.status_error,
+            );
         }
         self.tray(hwnd);
         for i in alerts {
@@ -2315,7 +2394,7 @@ impl App {
                             false
                         }
                 }
-                Command::MHub => !self.modal_open && !self.hub_requested,
+                Command::MHub => !self.modal_open && !crate::mhub::closing(),
                 Command::Board(op) => {
                     matches!(self.page, Page::Onboard(m) if self.board_enabled(m, op))
                         && self.pending.is_none()
@@ -2350,7 +2429,6 @@ impl App {
                     let count = self.grid_entries().len();
                     let page = match self.page {
                         Page::Drivers => self.drivers_page,
-                        Page::Brand(_) => self.brand_page,
                         _ => self.home_page,
                     };
                     if delta < 0 {
@@ -2386,10 +2464,9 @@ impl App {
             match self.page {
                 Page::Home => self.home(&c),
                 Page::Drivers => self.drivers(&c),
-                Page::Brand(b) => self.brand_heading(&c, b),
                 Page::Tool(m, tool) => c.text(
                     &format!("{}  ·  {}", REGISTRY[m].name, tool.title()),
-                    R::new(SIDEBAR + 146, 16, self.width - SIDEBAR - 260, 34),
+                    R::new(SIDEBAR + 146, 16, self.width - SIDEBAR - 425, 34),
                     17,
                     600,
                     TEXT,
@@ -2406,6 +2483,17 @@ impl App {
                 Page::Onboard(m) => self.board_paint(&c, m),
                 Page::Battery(m) => self.battery_detail(&c, m),
                 Page::Device(m) => {
+                    if REGISTRY[m].mchose() {
+                        crate::mhub::timing::mark("first_frame");
+                        let state = &self.snapshot.devices[m];
+                        if state.fresh
+                            && (state.dpi.is_some()
+                                || state.rate.is_some()
+                                || self.pointer_sample.as_ref().is_some_and(|(i, _)| *i == m))
+                        {
+                            crate::mhub::timing::mark("editable");
+                        }
+                    }
                     self.detail(&c, m);
                     self.device_summary(&c, m);
                 }

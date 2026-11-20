@@ -82,3 +82,12 @@ test("manual switch stays on gallery, next native selection can change model in 
   s.scope.Ua.value=true;s.done(keyboard,mouse);assert.deepEqual(s.opened,[keyboard,mouse]);
   assert.deepEqual(s.routes,["ConnectDevice","ConnectDevice"]);
 });
+
+test("targeted receiver opens as soon as its own working card resolves", () => {
+  const s=screen("mchose-g75-pro");
+  s.scope.window.__peripheralDeskTargetInstance="receiver-2";
+  s.scope.sa.initialized=false;
+  s.scan.begin(2);s.rows({...keyboard,identificationState:"pending"});
+  assert.deepEqual(s.opened,[]);
+  s.rows(keyboard);assert.deepEqual(s.opened,[keyboard]);
+});
