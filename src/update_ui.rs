@@ -395,18 +395,8 @@ impl Updater {
         }
         match id {
             PLUGINS => {
-                let exit = crate::plugin_ui::open_updates(hwnd);
-                if exit != StoreExit::Close {
-                    self.exit = exit;
-                    DestroyWindow(hwnd);
-                    return;
-                }
-                let channel = if SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0) == 1 {
-                    "preview"
-                } else {
-                    "stable"
-                };
-                self.begin(hwnd, Operation::Check(channel.into()));
+                self.exit = StoreExit::PluginsUpdates;
+                DestroyWindow(hwnd);
             }
             CHECK => {
                 let index = SendMessageW(self.child(CHANNEL), CB_GETCURSEL, 0, 0);

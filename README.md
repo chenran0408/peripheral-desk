@@ -12,7 +12,7 @@ Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看�
 在 [发布页面](https://github.com/chenran0408/peripheral-desk/releases) 下载 `PeripheralDesk-*-windows-x64-setup.exe` 安装（当前用户，无需管理员权限），或下载以 `-portable.zip` 结尾的便携包并解压运行 `PeripheralDesk.exe`。安装版支持开始菜单与可选桌面快捷方式；安装界面为简体中文，完成后自动打开。覆盖安装和卸载保留用户配置与已下载插件。**0.4.0 起主程序与设备插件分开发布**：打开「插件管理」，按需安装设备插件。鼠标、键盘通常无需额外系统驱动或管理员权限。G2 Pro 插件附带匹配的 HECATE / C-Media x64 音效组件和底层驱动，见下文。
 
 - 在「插件管理」按品牌或型号搜索，选中需要的插件后统一安装。共用接收器会提示核对型号。可在[按厂商查找外设](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/catalog/README.md)查看各连接方式的支持记录。
-- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.4/PeripheralDesk-0.4.12-preview.4-windows-x64-setup.exe)，覆盖安装会保留配置。便携包提供相同功能。原生设备页直接打开，进入「本地 M HUB」时才需要 Microsoft Edge WebView2。
+- Windows 用户下载 [外设盒安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.5/PeripheralDesk-0.4.12-preview.5-windows-x64-setup.exe)，覆盖安装会保留配置。便携包提供相同功能。原生设备页直接打开，进入「本地 M HUB」时才需要 Microsoft Edge WebView2。
 - 外设盒采用内置 M HUB 的浅色与深色样式。「偏好设置」可切换外观。支持模板的鼠标、键盘和耳机可在设备页打开「本地模板」。
 - 在「设备调节」点选自己的实物。G75 Pro 直接打开键盘图，初代 A5 Ultra 可调指针或点图改键。其他品牌也按设备进入，驱动插件在「插件管理」按品牌查找；更多迈从功能可在右上角「本地 M HUB」打开。
 - 驱动中心从本机加载。在内置版中，匹配的迈从设备由 Windows 直接连接。连接多台时，优先打开从电量页点选或上次用过的型号。型号表、网页、改键修复和后续更新均由外设盒提供；在右上角「M HUB 菜单」可以手动更新、切换已保存的本地版本，或打开文件夹个性化修改。[驱动中心说明](docs/MHUB-WORKSPACE.md)
@@ -21,7 +21,7 @@ Rust + Win32 原生 Windows 外设设置与电量工具。在「电量」查看�
 - 点右上角关闭会留在托盘。彻底退出请使用托盘菜单或「偏好设置」中的「退出程序」。
 - 设置停止调整 1.5 秒后保存，并从设备读回核对；失败会显示提示。修改后只重新读取对应设备，避免等待其他设备唤醒。
 - 默认每 60 秒刷新，低于 20% 时提醒。工具设置中可调整。
-- 主程序在线更新完成后自动重启。插件批量安装或更新全部成功后自动重启；部分失败时保留结果，可点击“重启生效”。
+- 主程序在线更新完成后自动重启。停留在插件管理页时，批量安装或更新全部成功后会自动重启。已切到其他页面或部分失败时，可回到插件管理点「重启生效」。
 
 罗技 G304、G305、G502 LIGHTSPEED 和 G502 X PLUS 的预览插件支持板载模式、已有配置和 DPI 档位切换。雷蛇炼狱蝰蛇 V3 Pro 系列和 V3 HyperSpeed 可通过对应预览插件逐档调整横向及纵向 DPI。[罗技型号和连接方式](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/LOGITECH-ONBOARD.md) · [雷蛇型号和连接方式](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/RAZER-OPENSYNAPSE.md)
 

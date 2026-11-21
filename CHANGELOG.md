@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.4.12-preview.5
+
+- 「插件管理」现在是主窗口左侧的一个页面，跟随外设盒的浅色或深色外观。搜索型号后，可直接查看详情、勾选多个插件并安装。
+- 切去看电量再回来，搜索内容与勾选项会保留。从「检查更新」点击插件更新，会直接进入同一个页面。
+
+[下载 Windows 安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.5/PeripheralDesk-0.4.12-preview.5-windows-x64-setup.exe)
+
 ## 0.4.12-preview.4
 
 - 在「设备调节」点选迈从磁轴键盘，可在原版键位图上设置触发行程、快速触发、DKS 和 SOCD。此次覆盖 26 款有线键盘和布局版本。

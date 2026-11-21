@@ -328,7 +328,7 @@ impl App {
         c.line(SIDEBAR + 24, 65, self.width - 28, 65, palette().border, 1.);
     }
 
-    unsafe fn page_heading(&self, c: &Canvas, title: &str, description: &str) {
+    pub(super) unsafe fn page_heading(&self, c: &Canvas, title: &str, description: &str) {
         let left = SIDEBAR + 24;
         let width = self.width - left - 28;
         c.text(
@@ -1200,6 +1200,7 @@ impl App {
                         | Page::Onboard(_)
                         | Page::Device(_)
                 ),
+                Command::DriverManager => self.page == Page::Plugins,
                 Command::Prefs => self.page == Page::Preferences,
                 _ => false,
             };

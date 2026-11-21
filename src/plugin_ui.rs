@@ -1,9 +1,14 @@
 //! On-demand native driver-package manager. Package verification stays in the library.
+mod host;
+pub(crate) use host::{busy, mount, pretranslate, resize, set_visible, shutdown, theme_changed};
+mod layout;
+mod surface;
+
 use crate::paint::palette;
 use crate::{
     hid::wide,
-    paint::{blend, Canvas, R},
-    ui::widgets::{RADIUS_LG, RADIUS_MD, SPACE_2, SPACE_3, SPACE_4},
+    paint::{Canvas, R},
+    ui::widgets::{RADIUS_LG, RADIUS_MD},
 };
 use peripheral_desk::plugin_manager::{self, CatalogBrowse, DriverPackage, InstalledDriver};
 use std::{
@@ -16,7 +21,7 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::{Dwm::*, Gdi::*},
+    Graphics::Gdi::*,
     System::LibraryLoader::*,
     UI::{
         Controls::{Dialogs::*, *},
@@ -26,10 +31,16 @@ use windows_sys::Win32::{
         WindowsAndMessaging::*,
     },
 };
+#[cfg(test)]
 const WIDTH: i32 = 1040;
+#[cfg(test)]
 const HEIGHT: i32 = 700;
 const FINISHED: u32 = WM_APP + 84;
 const FOCUS_CHANGED: u32 = WM_APP + 85;
+pub(crate) const CAN_CHANGE: u32 = WM_APP + 0xAC;
+pub(crate) const CHANGED: u32 = WM_APP + 0xAD;
+pub(crate) const RESTART: u32 = WM_APP + 0xAE;
+pub(crate) const BACK: u32 = WM_APP + 0xAF;
 const LIST: i32 = 101;
 const REFRESH: i32 = 102;
 const INSTALL: i32 = 103;
@@ -45,7 +56,7 @@ const SELECT_NONE: i32 = 112;
 const SELECT_DETECTED: i32 = 113;
 const PREVIEW: i32 = 114;
 const SELECT_UPDATES: i32 = 115;
-const RESTART: i32 = 116;
+const RESTART_BUTTON: i32 = 116;
 const BRAND: i32 = 117;
 const SEARCH: i32 = 118;
 const SEARCH_LABEL: i32 = 119;
@@ -54,6 +65,7 @@ const BRAND_LABEL: i32 = 120;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum StoreExit {
     Close,
+    PluginsUpdates,
     Restart,
 }
 
@@ -148,6 +160,17 @@ impl DriverRow<'_> {
                 "battery" => "电量",
                 "settings" => "设备设置",
                 "dpi-stages-read" => "读取 DPI 档位",
+                "dpi-stages-write" => "设置 DPI 档位",
+                "polling-rate-write" => "设置回报率",
+                "onboard-macros" => "板载宏",
+                "onboard-profiles" => "板载配置",
+                "instance-target" => "区分同型号设备",
+                "pointer-controls" => "指针设置",
+                "control-sections" => "分类设置",
+                "keymap-home" => "键位编辑",
+                "lighting-direction" => "灯效方向",
+                "board-name" => "板载配置名称",
+                "mchose-audio-templates" => "音效模板",
                 "polling-rate-read" => "配置回报率（只读）",
                 "bindings" => "按键映射",
                 "lighting-editor" => "灯效编辑",
@@ -364,7 +387,7 @@ impl BatchResult {
             .count();
         let failed = self.entries.len() - installed - skipped;
         let mut lines = vec![format!(
-            "安装完成：成功 {installed} 项，失败 {failed} 项，跳过已同版 {skipped} 项。全部成功后将自动重启生效。"
+            "安装完成：成功 {installed} 项，失败 {failed} 项，跳过已同版 {skipped} 项。"
         )];
         for (target, result) in &self.entries {
             lines.push(match result {
@@ -433,7 +456,8 @@ struct Manager {
     changing_channel: bool,
     select_updates_after_refresh: bool,
     changed: bool,
-    exit: StoreExit,
+    blocking: bool,
+    queued_update_check: bool,
 }
 impl Drop for Manager {
     fn drop(&mut self) {
@@ -622,6 +646,8 @@ impl Manager {
         }
         if id == LIST {
             SetWindowSubclass(child, Some(list_proc), 1, 0);
+        } else if id == BRAND {
+            SetWindowSubclass(child, Some(surface::brand_proc), 1, 0);
         }
         self.children.push(Child {
             hwnd: child,
@@ -631,196 +657,9 @@ impl Manager {
     }
     unsafe fn text(&self, id: i32, text: &str) {
         SetWindowTextW(self.child(id), wide(text).as_ptr());
-    }
-    unsafe fn layout(&mut self, hwnd: HWND) {
-        for child in self.children.drain(..) {
-            DestroyWindow(child.hwnd);
+        if matches!(id, DESCRIPTION | STATUS) {
+            surface::fit_text_scrollbar(self.child(id));
         }
-        let channel_x = 486;
-        for (id, label, x) in [
-            (CHANNEL, "稳定版", channel_x),
-            (PREVIEW, "预览版", channel_x + 76 + SPACE_2),
-        ] {
-            self.add(
-                hwnd,
-                id,
-                "BUTTON",
-                label,
-                R::new(x, 24, 76, 32),
-                BS_OWNERDRAW as u32,
-            );
-        }
-        self.add(
-            hwnd,
-            OFFLINE,
-            "BUTTON",
-            "离线安装…",
-            R::new(channel_x + 76 * 2 + SPACE_2 + SPACE_4, 24, 136, 32),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            REFRESH,
-            "BUTTON",
-            "检查更新",
-            R::new(
-                channel_x + 76 * 2 + SPACE_2 + SPACE_4 + 136 + SPACE_3,
-                24,
-                176,
-                32,
-            ),
-            BS_OWNERDRAW as u32,
-        );
-        self.browser.refresh_brands(self.inventory.as_ref());
-        self.add(
-            hwnd,
-            BRAND_LABEL,
-            "STATIC",
-            "厂商(&B)",
-            R::new(44, 107, 76, 20),
-            0,
-        );
-        self.add(
-            hwnd,
-            BRAND,
-            "COMBOBOX",
-            "",
-            R::new(44, 132, 190, 300),
-            CBS_DROPDOWNLIST as u32 | WS_VSCROLL,
-        );
-        let brands = self.child(BRAND);
-        SendMessageW(brands, CB_ADDSTRING, 0, wide("全部厂商").as_ptr() as isize);
-        for name in &self.browser.brands {
-            SendMessageW(brands, CB_ADDSTRING, 0, wide(name).as_ptr() as isize);
-        }
-        let choice = self
-            .browser
-            .brands
-            .iter()
-            .position(|b| Some(b) == self.browser.brand.as_ref())
-            .map_or(0, |n| n + 1);
-        SendMessageW(brands, CB_SETCURSEL, choice, 0);
-        self.add(
-            hwnd,
-            SEARCH_LABEL,
-            "STATIC",
-            "搜索(&F)",
-            R::new(250, 107, 160, 20),
-            0,
-        );
-        self.add(
-            hwnd,
-            SEARCH,
-            "EDIT",
-            &self.browser.query.clone(),
-            R::new(250, 132, 335, 30),
-            ES_AUTOHSCROLL as u32,
-        );
-        SendMessageW(
-            self.child(SEARCH),
-            EM_SETMARGINS,
-            (EC_LEFTMARGIN | EC_RIGHTMARGIN) as usize,
-            (self.px(8) * 0x10001) as isize,
-        );
-        SendMessageW(
-            self.child(SEARCH),
-            EM_SETCUEBANNER,
-            1,
-            wide("输入型号、厂商或协议系列").as_ptr() as isize,
-        );
-        self.add(
-            hwnd,
-            LIST,
-            "LISTBOX",
-            "",
-            R::new(40, 238, 555, 264),
-            LBS_NOTIFY as u32
-                | LBS_NOINTEGRALHEIGHT as u32
-                | LBS_OWNERDRAWFIXED as u32
-                | LBS_HASSTRINGS as u32
-                | LBS_MULTIPLESEL as u32
-                | WS_VSCROLL,
-        );
-        SendMessageW(self.child(LIST), LB_SETITEMHEIGHT, 0, self.px(40) as isize);
-        self.populate_list();
-        for (id, label, x, width) in [
-            (SELECT_ALL, "选中筛选结果", 44, 126),
-            (SELECT_NONE, "清空已选", 178, 100),
-            (SELECT_DETECTED, "选择已识别", 286, 126),
-            (SELECT_UPDATES, "选择可更新", 420, 126),
-        ] {
-            self.add(
-                hwnd,
-                id,
-                "BUTTON",
-                label,
-                R::new(x, 176, width, 30),
-                BS_OWNERDRAW as u32,
-            );
-        }
-
-        self.add(
-            hwnd,
-            DESCRIPTION,
-            "EDIT",
-            "",
-            R::new(634, 211, 356, 282),
-            ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
-        );
-        self.add(
-            hwnd,
-            INSTALL,
-            "BUTTON",
-            "安装所选驱动",
-            R::new(44, 532, 208, 38),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            REMOVE,
-            "BUTTON",
-            "卸载焦点项 · 保留配置",
-            R::new(268, 532, 208, 38),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            ROLLBACK,
-            "BUTTON",
-            "回退焦点项",
-            R::new(492, 532, 176, 38),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            CHANGELOG,
-            "BUTTON",
-            "查看更新内容",
-            R::new(684, 532, 176, 38),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            RESTART,
-            "BUTTON",
-            "重启生效",
-            R::new(876, 532, 120, 38),
-            BS_OWNERDRAW as u32,
-        );
-        self.add(
-            hwnd,
-            STATUS,
-            "EDIT",
-            &self.status.clone(),
-            R::new(28, 636, 984, 46),
-            ES_MULTILINE as u32 | ES_READONLY as u32 | WS_VSCROLL,
-        );
-        self.selection(hwnd);
-        for child in &self.children {
-            ShowWindow(child.hwnd, SW_SHOWNA);
-        }
-        self.availability();
-        RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     unsafe fn populate_list(&mut self) {
         let list = self.child(LIST);
@@ -896,15 +735,18 @@ impl Manager {
             _ => description,
         };
         let detail = match self.installation() {
+            Installation::Present(version) => {
+                format!("已安装版本：{version}（卸载保留配置）\r\n\r\n{description}")
+            }
             Installation::Broken(error) => format!("{description}\r\n安装记录异常：{error}"),
             _ => description,
         };
         self.text(DESCRIPTION, &detail);
         let count = self.targets().len();
         let label = if count == 0 {
-            "请勾选设备插件".into()
+            "安装所选插件".into()
         } else {
-            format!("安装 / 更新已选 {count} 项")
+            format!("安装 / 更新 {count} 项")
         };
         if let Some(child) = self.children.iter_mut().find(|c| c.id == INSTALL) {
             child.label = label.clone();
@@ -915,12 +757,16 @@ impl Manager {
     }
     unsafe fn availability(&self) {
         let ready = self.pending.is_none() && !self.dialog_open;
-        EnableWindow(self.child(RESTART), (ready && self.changed) as i32);
+        ShowWindow(
+            self.child(RESTART_BUTTON),
+            if self.changed { SW_SHOWNA } else { SW_HIDE },
+        );
+        EnableWindow(self.child(RESTART_BUTTON), (ready && self.changed) as i32);
         EnableWindow(self.child(REFRESH), ready as i32);
         EnableWindow(self.child(LIST), ready as i32);
         EnableWindow(
             self.child(SEARCH),
-            (ready && self.inventory.is_some()) as i32,
+            (!self.dialog_open && self.inventory.is_some()) as i32,
         );
         EnableWindow(
             self.child(BRAND),
@@ -952,45 +798,45 @@ impl Manager {
         );
     }
     unsafe fn status(&mut self, hwnd: HWND, text: impl Into<String>, error: bool) {
+        let was_empty = self.status.is_empty();
         self.status = text.into();
         self.error = error;
         self.text(STATUS, &self.status);
+        if was_empty != self.status.is_empty() {
+            self.reflow(hwnd);
+        }
         RedrawWindow(hwnd, null(), null_mut(), RDW_INVALIDATE | RDW_ALLCHILDREN);
     }
     unsafe fn begin(&mut self, hwnd: HWND, operation: Operation) {
         if self.pending.is_some() || self.dialog_open {
             return;
         }
+        let blocking = !matches!(operation, Operation::Load | Operation::Refresh);
+        if blocking && !self.can_change(hwnd) {
+            return;
+        }
+        self.blocking = blocking;
         self.changing_channel = matches!(operation, Operation::Channel(_));
         if self.changing_channel {
             self.checked.clear();
         }
         let (progress, success) = match &operation {
-            Operation::Load => (
-                "正在读取驱动目录…",
-                "勾选所需型号后点击安装；无需按 Ctrl，可一次选择多个驱动。",
-            ),
+            Operation::Load => ("正在读取驱动目录…", ""),
             Operation::Refresh => ("正在检查驱动更新并刷新目录…", "驱动更新检查完成。"),
             Operation::Install(_) => (
                 "正在逐项下载并校验已选驱动，请等待完成…",
-                "批量安装结束，请查看各项结果。全部成功后将自动重启生效。",
+                "批量安装已完成。",
             ),
             Operation::Remove(_) => (
                 "正在卸载所选驱动，保留用户配置…",
-                "所选驱动已卸载，配置已保留。完成后将自动重启生效。",
+                "已卸载，已保留设备配置。",
             ),
-            Operation::Offline(_) => (
-                "正在校验离线驱动包并安装…",
-                "离线驱动已安装。已有设备关闭窗口后刷新；全部成功后将自动重启生效。",
-            ),
+            Operation::Offline(_) => ("正在校验离线驱动包并安装…", "离线插件已安装。"),
             Operation::Channel(_) => (
                 "正在切换通道并刷新驱动仓库…",
                 "更新通道已切换，驱动目录已刷新。",
             ),
-            Operation::Rollback(_) => (
-                "正在恢复所选驱动的上一版本…",
-                "驱动已回退。完成后将自动重启生效。",
-            ),
+            Operation::Rollback(_) => ("正在恢复所选驱动的上一版本…", "已恢复上一版本。"),
         };
         self.success = success.into();
         let (tx, rx) = mpsc::channel();
@@ -1081,10 +927,10 @@ impl Manager {
         let event = match receiver.try_recv() {
             Ok(WorkEvent::RestartReady(result)) => {
                 self.pending = None;
+                self.blocking = result.is_ok();
                 match result {
                     Ok(()) => {
-                        self.exit = StoreExit::Restart;
-                        DestroyWindow(hwnd);
+                        PostMessageW(GetParent(hwnd), RESTART, 0, 0);
                     }
                     Err(error) => {
                         self.status(
@@ -1110,6 +956,7 @@ impl Manager {
             },
         };
         self.pending = None;
+        self.blocking = false;
         self.changed |= event.changed;
         let auto_restart = event.changed
             && event.inventory.is_ok()
@@ -1135,6 +982,14 @@ impl Manager {
                         .as_ref()
                         .map(updatable_ids)
                         .unwrap_or_default();
+                    if let Some(first) = self.inventory.as_ref().and_then(|items| {
+                        items
+                            .packages
+                            .iter()
+                            .position(|p| self.checked.contains(&p.id))
+                    }) {
+                        self.selected = first;
+                    }
                     self.select_updates_after_refresh = false;
                     self.success = format!(
                         "驱动更新检查完成；已选择 {} 项可更新驱动。",
@@ -1150,6 +1005,7 @@ impl Manager {
                 self.layout(hwnd);
             }
             Err(error) => {
+                self.select_updates_after_refresh = false;
                 let message = if let Some(report) = report {
                     format!("{report}\r\n目录读取失败（已完成的安装不会撤销）：{error}")
                 } else {
@@ -1170,11 +1026,36 @@ impl Manager {
                 }
             }
         }
-        if auto_restart {
+        let restart_now = auto_restart
+            && (GetWindowLongW(hwnd, GWL_STYLE) as u32 & WS_VISIBLE) != 0
+            && SendMessageW(GetParent(hwnd), CAN_CHANGE, 0, 0) != 0;
+        if event.changed {
+            if !restart_now {
+                let status = format!("{}  在插件管理点「重启生效」以使用变更。", self.status);
+                self.status(hwnd, status, self.error);
+            }
+            PostMessageW(GetParent(hwnd), CHANGED, usize::from(!restart_now), 0);
+        }
+        if restart_now {
             self.restart(hwnd);
+        } else if std::mem::take(&mut self.queued_update_check) {
+            self.select_updates_after_refresh = true;
+            self.begin(hwnd, Operation::Refresh);
         }
     }
+    unsafe fn can_change(&mut self, hwnd: HWND) -> bool {
+        if SendMessageW(GetParent(hwnd), CAN_CHANGE, 0, 0) != 0 {
+            return true;
+        }
+        self.status(
+            hwnd,
+            "请先完成当前设备写入或关闭正在使用设备的编辑器，再操作插件。",
+            true,
+        );
+        false
+    }
     unsafe fn restart(&mut self, hwnd: HWND) {
+        self.blocking = true;
         let (tx, rx) = mpsc::channel();
         self.pending = Some(rx);
         self.status(hwnd, "正在准备重启，设备配置已保存…", false);
@@ -1198,7 +1079,7 @@ impl Manager {
         let title = wide("选择离线驱动包（必须匹配已缓存的受信驱动目录）");
         let mut dialog: OPENFILENAMEW = zeroed();
         dialog.lStructSize = size_of::<OPENFILENAMEW>() as u32;
-        dialog.hwndOwner = hwnd;
+        dialog.hwndOwner = GetAncestor(hwnd, GA_ROOT);
         dialog.lpstrFile = file.as_mut_ptr();
         dialog.nMaxFile = file.len() as u32;
         dialog.lpstrFilter = filter.as_ptr();
@@ -1219,7 +1100,7 @@ impl Manager {
         }
     }
     unsafe fn command(&mut self, hwnd: HWND, id: i32, event: u32) {
-        if self.dialog_open || (self.pending.is_some() && id != BRAND) {
+        if self.dialog_open || (self.pending.is_some() && !matches!(id, BRAND | SEARCH)) {
             return;
         }
         if matches!(id, REMOVE | ROLLBACK | CHANGELOG) {
@@ -1284,7 +1165,7 @@ impl Manager {
                 self.populate_list();
                 self.selection(hwnd);
             }
-            RESTART if self.changed => self.restart(hwnd),
+            RESTART_BUTTON if self.changed && self.can_change(hwnd) => self.restart(hwnd),
             REFRESH => self.begin(hwnd, Operation::Refresh),
             OFFLINE => self.offline(hwnd),
             CHANNEL | PREVIEW => {
@@ -1338,206 +1219,10 @@ impl Manager {
                 }
             }
             IDCANCEL => {
-                SendMessageW(hwnd, WM_CLOSE, 0, 0);
+                PostMessageW(GetParent(hwnd), BACK, 0, 0);
             }
             _ => {}
         }
-    }
-    unsafe fn paint(&self, hwnd: HWND) {
-        let mut ps = zeroed();
-        let dest = BeginPaint(hwnd, &mut ps);
-        let mut area = zeroed();
-        GetClientRect(hwnd, &mut area);
-        let dc = CreateCompatibleDC(dest);
-        let bitmap = CreateCompatibleBitmap(dest, area.right.max(1), area.bottom.max(1));
-        let old = SelectObject(dc, bitmap);
-        {
-            let c = Canvas::new(dc, self.dpi);
-            c.rect(R::new(0, 0, WIDTH, HEIGHT), palette().bg);
-            c.gradient_v(
-                R::new(0, 0, WIDTH, 84),
-                blend(palette().bg, palette().accent_surface, 0.8),
-                palette().bg,
-            );
-            c.text(
-                "插件管理",
-                R::new(28, 13, 350, 32),
-                22,
-                600,
-                palette().text,
-                DT_LEFT,
-            );
-            c.text(
-                "查找型号，按需安装设备插件",
-                R::new(28, 48, 360, 22),
-                13,
-                400,
-                palette().muted,
-                DT_LEFT,
-            );
-            c.text(
-                "更新通道",
-                R::new(404, 28, 74, 24),
-                12,
-                500,
-                palette().muted,
-                DT_RIGHT,
-            );
-            c.round(
-                R::new(24, 88, 584, 428),
-                RADIUS_LG,
-                palette().panel,
-                Some(palette().border),
-            );
-            let results = if self.inventory.is_some() {
-                format!("设备型号  ·  {} 个结果", self.browser.visible.len())
-            } else {
-                "设备型号".into()
-            };
-            c.text(
-                &results,
-                R::new(48, 211, 280, 23),
-                13,
-                500,
-                palette().text,
-                DT_LEFT,
-            );
-            c.text(
-                "安装状态",
-                R::new(431, 211, 145, 23),
-                12,
-                400,
-                palette().muted,
-                DT_RIGHT,
-            );
-            c.round(
-                R::new(618, 88, 398, 428),
-                RADIUS_LG,
-                palette().panel,
-                Some(palette().border),
-            );
-            c.round(R::new(628, 203, 370, 299), RADIUS_MD, palette().field, None);
-            if let Some(row) = self.selected() {
-                let stamp = match row.recommendation {
-                    Some(Recommendation::Clear) => ("已识别", palette().green),
-                    Some(Recommendation::Ambiguous) => ("需核对型号", palette().amber),
-                    None if !row.catalog_available => ("仅本机已安装", palette().muted),
-                    None => ("目录中的型号", palette().muted),
-                };
-                c.text(
-                    row.brand(),
-                    R::new(634, 103, 210, 22),
-                    12,
-                    500,
-                    palette().muted,
-                    DT_LEFT,
-                );
-                c.text(
-                    stamp.0,
-                    R::new(846, 103, 148, 22),
-                    12,
-                    500,
-                    stamp.1,
-                    DT_RIGHT,
-                );
-                c.text(
-                    row.name,
-                    R::new(634, 133, 362, 32),
-                    19,
-                    600,
-                    palette().text,
-                    DT_LEFT | DT_END_ELLIPSIS,
-                );
-                let version = if row.catalog_available {
-                    format!("{}  ·  {}", row.version, size(row.download_bytes))
-                } else {
-                    self.installation().label().to_owned()
-                };
-                c.text(
-                    &version,
-                    R::new(634, 173, 362, 22),
-                    13,
-                    400,
-                    palette().muted,
-                    DT_LEFT | DT_END_ELLIPSIS,
-                );
-            } else {
-                c.text(
-                    "型号详情",
-                    R::new(634, 104, 362, 32),
-                    19,
-                    600,
-                    palette().text,
-                    DT_LEFT,
-                );
-            }
-            let targets = self.targets();
-            let bytes: u64 = targets.iter().map(|t| t.bytes).sum();
-            let visible_checked = self.inventory.as_ref().map_or(0, |inv| {
-                self.browser
-                    .visible
-                    .iter()
-                    .filter(|&&i| inv.row(i).is_some_and(|row| self.checked.contains(row.id)))
-                    .count()
-            });
-            let hidden = targets.len().saturating_sub(visible_checked);
-            let summary = if hidden > 0 {
-                format!(
-                    "已选 {} 项，其中 {hidden} 项在其他筛选结果中  ·  下载 {}",
-                    targets.len(),
-                    size(bytes)
-                )
-            } else if !targets.is_empty() {
-                format!("已选 {} 项  ·  下载 {}", targets.len(), size(bytes))
-            } else {
-                "点击列表行或按空格勾选型号".into()
-            };
-            c.text(
-                &summary,
-                R::new(28, 571, 984, 18),
-                12,
-                400,
-                palette().muted,
-                DT_LEFT,
-            );
-            c.text(
-                "安装、更新、卸载或回退成功后自动重启；部分失败时先保留结果，可点击“重启生效”。",
-                R::new(28, 590, 984, 22),
-                13,
-                400,
-                palette().dim,
-                DT_LEFT,
-            );
-            c.text(
-                if self.pending.is_some() {
-                    "后台操作中 · 请等待完成后关闭"
-                } else if self.error {
-                    "操作结果 · 下方可滚动查看具体原因"
-                } else {
-                    "操作结果 · 可滚动查看每项详情"
-                },
-                R::new(28, 612, 984, 21),
-                12,
-                400,
-                if self.error {
-                    palette().error
-                } else {
-                    palette().dim
-                },
-                DT_LEFT,
-            );
-            c.round(
-                R::new(24, 634, 992, 52),
-                RADIUS_MD,
-                palette().field,
-                Some(palette().border),
-            );
-        }
-        BitBlt(dest, 0, 0, area.right, area.bottom, dc, 0, 0, SRCCOPY);
-        SelectObject(dc, old);
-        DeleteObject(bitmap);
-        DeleteDC(dc);
-        EndPaint(hwnd, &ps);
     }
     unsafe fn button(&self, item: &DRAWITEMSTRUCT) {
         let Some(child) = self.children.iter().find(|c| c.hwnd == item.hwndItem) else {
@@ -1563,18 +1248,12 @@ impl Manager {
                 child.id == CHANNEL && i.channel == "stable"
                     || child.id == PREVIEW && i.channel == "preview"
             });
-        c.rect(
-            R::new(0, 0, width, height),
-            if matches!(child.id, REFRESH | OFFLINE | CHANNEL | PREVIEW) {
-                palette().bg
-            } else {
-                palette().panel
-            },
-        );
         let pressed = item.itemState & ODS_SELECTED != 0;
         let hovered = item.itemState & ODS_HOTLIGHT != 0;
         let fill = if disabled {
             palette().field
+        } else if pressed && active {
+            palette().primary_pressed
         } else if pressed {
             palette().pressed
         } else if active {
@@ -1589,7 +1268,7 @@ impl Manager {
             RADIUS_MD,
             fill,
             Some(if item.itemState & ODS_FOCUS != 0 {
-                palette().muted
+                palette().accent
             } else {
                 palette().border
             }),
@@ -1601,7 +1280,7 @@ impl Manager {
             if active { 600 } else { 400 },
             if disabled {
                 palette().dim
-            } else if active && !pressed {
+            } else if active {
                 palette().on_primary
             } else {
                 palette().text
@@ -1610,7 +1289,9 @@ impl Manager {
         );
     }
     unsafe fn row(&self, item: &DRAWITEMSTRUCT) {
-        let physical_width = item.rcItem.right - item.rcItem.left;
+        let mut client = RECT::default();
+        GetClientRect(item.hwndItem, &mut client);
+        let physical_width = item.rcItem.right.min(client.right) - item.rcItem.left;
         let physical_height = item.rcItem.bottom - item.rcItem.top;
         if physical_width <= 0 || physical_height <= 0 {
             return;
@@ -1629,7 +1310,7 @@ impl Manager {
         DeleteObject(brush);
         {
             let c = Canvas::new(dc, self.dpi);
-            let width = (item.rcItem.right - item.rcItem.left) * 96 / self.dpi as i32;
+            let width = physical_width * 96 / self.dpi as i32;
             let height = (item.rcItem.bottom - item.rcItem.top) * 96 / self.dpi as i32;
             if let Some(row) = self.inventory.as_ref().and_then(|i| {
                 self.browser
@@ -1640,88 +1321,90 @@ impl Manager {
                 let checked = self.checked.contains(row.id);
                 let focus = self.browser.visible.get(item.itemID as usize) == Some(&self.selected);
                 let disabled = item.itemState & ODS_DISABLED != 0;
+                let p = palette();
+                let outline = if item.itemState & ODS_FOCUS != 0 {
+                    Some(p.accent)
+                } else {
+                    None
+                };
+                let r = R::new(0, 2, width - 2, height - 4);
                 c.round(
-                    R::new(0, 2, width - 2, height - 4),
-                    RADIUS_MD,
+                    r,
+                    7,
                     if checked {
-                        blend(palette().field, palette().accent, 0.12)
+                        p.accent_surface
                     } else if focus {
-                        palette().field
+                        p.field
                     } else {
-                        palette().panel
+                        p.panel
                     },
-                    Some(if checked {
-                        palette().accent
-                    } else if focus && item.itemState & ODS_FOCUS != 0 {
-                        palette().amber
-                    } else {
-                        palette().border
-                    }),
+                    outline,
                 );
+                let box_y = (height - 16) / 2;
                 c.round(
-                    R::new(8, 11, 18, 18),
-                    5,
-                    if checked {
-                        palette().accent
+                    R::new(8, box_y, 16, 16),
+                    4,
+                    if checked { p.primary } else { p.field },
+                    Some(if checked {
+                        p.primary
+                    } else if row.catalog_available {
+                        p.muted
                     } else {
-                        palette().panel
-                    },
-                    Some(if row.catalog_available {
-                        palette().muted
-                    } else {
-                        palette().border
+                        p.border
                     }),
                 );
                 if checked {
-                    c.text(
-                        "✓",
-                        R::new(8, 10, 18, 20),
-                        13,
-                        600,
-                        palette().text,
-                        DT_CENTER,
-                    );
+                    c.line(12, box_y + 8, 15, box_y + 11, p.on_primary, 1.6);
+                    c.line(15, box_y + 11, 21, box_y + 5, p.on_primary, 1.6);
                 }
-                let recommendation = self
-                    .inventory
-                    .as_ref()
-                    .and_then(|i| i.recommendation.get(row.id).copied());
-                c.ellipse(
-                    R::new(40, 17, 6, 6),
-                    match recommendation {
-                        Some(Recommendation::Clear) => palette().green,
-                        Some(Recommendation::Ambiguous) => palette().amber,
-                        None => palette().dim,
-                    },
-                );
-                let color = if disabled {
-                    palette().dim
-                } else {
-                    palette().text
-                };
-                c.text(
-                    row.name,
-                    R::new(56, 4, width - 220, height - 8),
-                    13,
-                    500,
-                    color,
-                    DT_LEFT | DT_END_ELLIPSIS,
-                );
                 let installed = self
                     .inventory
                     .as_ref()
                     .and_then(|i| i.installed.get(row.id));
+                let state = match installed {
+                    Some(Installation::Present(v))
+                        if row.catalog_available
+                            && peripheral_desk::core_update::is_newer_version(row.version, v)
+                                .unwrap_or(false) =>
+                    {
+                        ("可更新", p.accent)
+                    }
+                    Some(Installation::Present(_)) => ("已安装", p.green),
+                    Some(Installation::Broken(_)) => ("安装异常", p.error),
+                    _ => ("未安装", p.dim),
+                };
                 c.text(
-                    installed.map_or("未安装", Installation::label),
-                    R::new(width - 155, 4, 140, height - 8),
+                    row.name,
+                    R::new(35, 3, width - 109, 23),
+                    14,
+                    500,
+                    if disabled { p.dim } else { p.text },
+                    DT_LEFT | DT_END_ELLIPSIS,
+                );
+                c.text(
+                    state.0,
+                    R::new(width - 74, 3, 62, 23),
+                    12,
+                    500,
+                    state.1,
+                    DT_RIGHT,
+                );
+                let (secondary, color) = match row.recommendation {
+                    Some(Recommendation::Clear) => {
+                        (format!("已识别设备  ·  {}", row.brand()), p.green)
+                    }
+                    Some(Recommendation::Ambiguous) => {
+                        (format!("需核对型号  ·  {}", row.brand()), p.amber)
+                    }
+                    None => (row.brand().to_owned(), p.muted),
+                };
+                c.text(
+                    &secondary,
+                    R::new(35, 25, width - 48, 18),
                     12,
                     400,
-                    match installed {
-                        Some(Installation::Broken(_)) => palette().amber,
-                        Some(Installation::Present(_)) => palette().green,
-                        _ => palette().dim,
-                    },
-                    DT_RIGHT | DT_END_ELLIPSIS,
+                    color,
+                    DT_LEFT | DT_END_ELLIPSIS,
                 );
             } else {
                 c.text(
@@ -1773,6 +1456,12 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
     if message == WM_NCCREATE {
         let create = &*(l as *const CREATESTRUCTW);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+        return DefWindowProcW(hwnd, message, w, l);
+    }
+    if message == WM_NCDESTROY {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        host::destroyed(hwnd);
+        return DefWindowProcW(hwnd, message, w, l);
     }
     let pointer = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Manager;
     if pointer.is_null() {
@@ -1790,6 +1479,16 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
                     Operation::Load
                 },
             );
+            0
+        }
+        WM_SIZE => {
+            if !manager.children.is_empty() {
+                manager.reflow(hwnd);
+            }
+            0
+        }
+        WM_DPICHANGED_AFTERPARENT => {
+            host::update_appearance(hwnd, manager);
             0
         }
         WM_PAINT => {
@@ -1811,7 +1510,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
         WM_MEASUREITEM => {
             let item = &mut *(l as *mut MEASUREITEMSTRUCT);
             if item.CtlType == ODT_LISTBOX && item.CtlID == LIST as u32 {
-                item.itemHeight = manager.px(40) as u32;
+                item.itemHeight = manager.px(layout::ROW_HEIGHT) as u32;
                 1
             } else if crate::paint::measure_native_choice(item, manager.dpi) {
                 1
@@ -1850,180 +1549,13 @@ unsafe extern "system" fn window_proc(hwnd: HWND, message: u32, w: WPARAM, l: LP
             }
         }
         WM_CLOSE => {
-            if manager.pending.is_some() || manager.dialog_open {
-                manager.status(
-                    hwnd,
-                    "后台操作尚未结束，请等待下载、校验或卸载完成后关闭。",
-                    false,
-                );
-            } else {
-                DestroyWindow(hwnd);
-            }
+            PostMessageW(GetParent(hwnd), BACK, 0, 0);
             0
         }
         WM_DESTROY => 0,
         _ => DefWindowProcW(hwnd, message, w, l),
     }
 }
-/// The caller keeps the main application's modal flag set until this returns.
-pub(crate) unsafe fn open(owner: HWND) -> StoreExit {
-    open_inner(owner, false, None)
-}
-
-pub(crate) unsafe fn open_for_brand(owner: HWND, brand: &str) -> StoreExit {
-    open_inner(owner, false, Some(brand))
-}
-
-/// Opens the manager, refreshes the catalog, and selects installed packages
-/// whose catalog version is strictly newer than the installed version.
-pub(crate) unsafe fn open_updates(owner: HWND) -> StoreExit {
-    open_inner(owner, true, None)
-}
-
-unsafe fn open_inner(owner: HWND, check_updates: bool, brand: Option<&str>) -> StoreExit {
-    let monitor_dpi = GetDpiForWindow(owner).max(96);
-    let style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN;
-    let ex_style = WS_EX_DLGMODALFRAME;
-    let mut frame: RECT = zeroed();
-    AdjustWindowRectExForDpi(&mut frame, style, 0, ex_style, monitor_dpi);
-    let mut monitor: MONITORINFO = zeroed();
-    monitor.cbSize = size_of::<MONITORINFO>() as u32;
-    let work_area = (GetMonitorInfoW(
-        MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST),
-        &mut monitor,
-    ) != 0)
-        .then_some(monitor.rcWork);
-    let dpi = work_area.map_or(monitor_dpi, |work| {
-        let max_width = (work.right - work.left) - (frame.right - frame.left);
-        let max_height = (work.bottom - work.top) - (frame.bottom - frame.top);
-        monitor_dpi.min(
-            (max_width * 96 / WIDTH)
-                .min(max_height * 96 / HEIGHT)
-                .max(1) as u32,
-        )
-    });
-    let instance = GetModuleHandleW(null());
-    let class_name = wide("PeripheralDeskDriverManager");
-    let class = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(window_proc),
-        hInstance: instance,
-        hCursor: LoadCursorW(null_mut(), IDC_ARROW),
-        lpszClassName: class_name.as_ptr(),
-        ..zeroed()
-    };
-    RegisterClassExW(&class);
-    let font = CreateFontW(
-        -(14 * dpi as i32 / 96),
-        0,
-        0,
-        0,
-        400,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET as u32,
-        OUT_DEFAULT_PRECIS as u32,
-        CLIP_DEFAULT_PRECIS as u32,
-        CLEARTYPE_QUALITY as u32,
-        DEFAULT_PITCH as u32,
-        wide("Microsoft YaHei UI").as_ptr(),
-    );
-    let mut manager = Box::new(Manager {
-        dpi,
-        font,
-        brush: CreateSolidBrush(colorref(palette().field)),
-        children: Vec::new(),
-        inventory: None,
-        selected: 0,
-        browser: Browser {
-            brand: brand.map(str::to_owned),
-            ..Browser::default()
-        },
-        checked: BTreeSet::new(),
-        pending: None,
-        status: if check_updates {
-            "正在检查驱动更新…".into()
-        } else {
-            "正在准备驱动目录…".into()
-        },
-        success: String::new(),
-        error: false,
-        dialog_open: false,
-        changing_channel: false,
-        select_updates_after_refresh: check_updates,
-        changed: false,
-        exit: StoreExit::Close,
-    });
-    let width = manager.px(WIDTH) + frame.right - frame.left;
-    let height = manager.px(HEIGHT) + frame.bottom - frame.top;
-    let mut parent = zeroed();
-    GetWindowRect(owner, &mut parent);
-    let x = parent.left + (parent.right - parent.left - width) / 2;
-    let y = parent.top + (parent.bottom - parent.top - height) / 2;
-    let (x, y) = work_area.map_or((x, y), |work| {
-        (
-            x.clamp(work.left, (work.right - width).max(work.left)),
-            y.clamp(work.top, (work.bottom - height).max(work.top)),
-        )
-    });
-    EnableWindow(owner, 0);
-    let hwnd = CreateWindowExW(
-        ex_style,
-        class_name.as_ptr(),
-        wide("外设盒 · 插件管理").as_ptr(),
-        style,
-        x,
-        y,
-        width,
-        height,
-        owner,
-        null_mut(),
-        instance,
-        manager.as_mut() as *mut Manager as _,
-    );
-    if !hwnd.is_null() {
-        let dark = i32::from(crate::paint::theme::is_dark());
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            &dark as *const _ as _,
-            size_of::<i32>() as u32,
-        );
-        ShowWindow(hwnd, SW_SHOW);
-        UpdateWindow(hwnd);
-        let mut message = zeroed();
-        while IsWindow(hwnd) != 0 {
-            let result = GetMessageW(&mut message, null_mut(), 0, 0);
-            if result <= 0 {
-                if result == 0 {
-                    PostQuitMessage(message.wParam as i32);
-                }
-                break;
-            }
-            if message.message == WM_KEYDOWN
-                && message.wParam == usize::from(b'F')
-                && GetKeyState(VK_CONTROL as i32) < 0
-                && IsWindowEnabled(manager.child(SEARCH)) != 0
-            {
-                SetFocus(manager.child(SEARCH));
-                SendMessageW(manager.child(SEARCH), EM_SETSEL, 0, -1);
-                continue;
-            }
-            if IsDialogMessageW(hwnd, &message) == 0 {
-                TranslateMessage(&message);
-                DispatchMessageW(&message);
-            }
-        }
-        if IsWindow(hwnd) != 0 {
-            DestroyWindow(hwnd);
-        }
-    }
-    EnableWindow(owner, 1);
-    SetForegroundWindow(owner);
-    manager.exit
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2186,7 +1718,8 @@ mod tests {
             changing_channel: false,
             select_updates_after_refresh: false,
             changed: false,
-            exit: StoreExit::Close,
+            blocking: false,
+            queued_update_check: false,
         }
     }
 
@@ -2253,6 +1786,123 @@ mod tests {
             let details = inventory.row(row).unwrap().details();
             assert!(!details.contains("厂商别名"));
             assert!(!details.contains("协议系列"));
+        }
+    }
+
+    #[test]
+    fn embedded_store_keeps_selection_and_finishes_changes_off_page() {
+        unsafe {
+            let owner = CreateWindowExW(
+                0,
+                wide("STATIC").as_ptr(),
+                null(),
+                WS_POPUP,
+                -3000,
+                0,
+                WIDTH,
+                HEIGHT,
+                null_mut(),
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            assert!(!owner.is_null());
+            ShowWindow(owner, SW_SHOWNOACTIVATE);
+            let bounds = RECT {
+                left: 200,
+                top: 62,
+                right: WIDTH,
+                bottom: HEIGHT,
+            };
+            mount(owner, bounds, None, false).unwrap();
+            let page = FindWindowExW(
+                owner,
+                null_mut(),
+                wide("PeripheralDeskPluginPage").as_ptr(),
+                null(),
+            );
+            assert!(!page.is_null());
+            assert_eq!(GetAncestor(page, GA_ROOT), owner);
+            assert_eq!(GetWindowLongW(page, GWL_STYLE) as u32 & WS_POPUP, 0);
+            assert_ne!(IsWindowEnabled(owner), 0);
+            // Use a deterministic pending result so no network or device write participates.
+            let (tx, rx) = mpsc::channel();
+            let state = GetWindowLongPtrW(page, GWLP_USERDATA) as *mut Manager;
+            (*state).pending = Some(rx);
+            (*state).inventory = test_manager().inventory.take();
+            (*state).layout(page);
+            (*state).checked.insert("a".into());
+            SetWindowTextW((*state).child(SEARCH), wide("设备").as_ptr());
+            assert_eq!((*state).browser.query, "设备");
+            mount(owner, bounds, Some("MCHOSE"), false).unwrap();
+            assert_eq!((*state).browser.brand.as_deref(), Some("MCHOSE"));
+            assert_eq!(GetWindowTextLengthW((*state).child(SEARCH)), 0);
+            assert!(GetDlgItem(owner, SEARCH).is_null());
+            assert_eq!((*state).checked, BTreeSet::from(["a".into()]));
+            mount(owner, bounds, None, true).unwrap();
+            assert!((*state).browser.brand.is_none());
+            assert!((*state).queued_update_check);
+            (*state).queued_update_check = false;
+            (*state).select_updates_after_refresh = true;
+            (*state).blocking = true;
+            set_visible(false);
+            assert!(busy());
+            let msg = MSG {
+                hwnd: (*state).child(SEARCH),
+                message: WM_KEYDOWN,
+                wParam: VK_ESCAPE as usize,
+                ..zeroed()
+            };
+            assert!(!pretranslate(&msg));
+            tx.send(WorkEvent::Finished(WorkResult {
+                inventory: Ok(test_manager().inventory.take().unwrap()),
+                changed: true,
+                batch: None,
+            }))
+            .ok()
+            .unwrap();
+            SendMessageW(page, FINISHED, 0, 0);
+            assert!(!busy());
+            assert!((*state).pending.is_none());
+            assert_eq!((*state).selected().unwrap().id, "b");
+            assert_eq!((*state).checked, BTreeSet::from(["b".into()]));
+            let mut changed: MSG = zeroed();
+            assert_ne!(
+                PeekMessageW(&mut changed, owner, CHANGED, CHANGED, PM_REMOVE),
+                0
+            );
+            assert_eq!(changed.wParam, 1);
+            mount(owner, bounds, None, false).unwrap();
+            assert_eq!(GetParent(page), owner);
+            assert_ne!(IsWindowVisible((*state).child(RESTART_BUTTON)), 0);
+            let sidebar = CreateWindowExW(
+                0,
+                wide("BUTTON").as_ptr(),
+                wide("插件管理").as_ptr(),
+                WS_CHILD | WS_TABSTOP,
+                0,
+                0,
+                160,
+                32,
+                owner,
+                null_mut(),
+                GetModuleHandleW(null()),
+                null(),
+            );
+            let sidebar_escape = MSG {
+                hwnd: sidebar,
+                ..msg
+            };
+            EnableWindow(owner, 0);
+            assert!(!pretranslate(&sidebar_escape));
+            EnableWindow(owner, 1);
+            assert!(pretranslate(&sidebar_escape));
+            let mut back: MSG = zeroed();
+            assert_ne!(PeekMessageW(&mut back, owner, BACK, BACK, PM_REMOVE), 0);
+            assert!(IsWindow(page) != 0);
+            shutdown();
+            assert_eq!(IsWindow(page), 0);
+            DestroyWindow(owner);
         }
     }
 

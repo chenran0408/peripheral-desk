@@ -96,6 +96,7 @@ fn drain_work_updates(rx: &Receiver<WorkUpdate>) -> (Vec<WorkUpdate>, bool) {
 enum Page {
     Home,
     Drivers,
+    Plugins,
     Tool(usize, Tool),
     MHub,
     Onboard(usize),
@@ -182,6 +183,7 @@ struct App {
     modal_open: bool,
     hub_open: bool,
     hub_source: Page,
+    plugins_source: Page,
     board: onboard::Board,
     board_requested: bool,
     show_evidence: bool,
@@ -281,6 +283,7 @@ pub fn run(hidden: bool, battery: bool) {
             modal_open: false,
             hub_open: false,
             hub_source: Page::Drivers,
+            plugins_source: Page::Home,
             board: onboard::Board::default(),
             board_requested: false,
             show_evidence: false,
@@ -352,6 +355,9 @@ pub fn run(hidden: bool, battery: bool) {
                 && GetKeyState(VK_CONTROL as i32) < 0
             {
                 SendMessageW(hwnd, BATTERY, 0, 0);
+                continue;
+            }
+            if crate::plugin_ui::pretranslate(&msg) {
                 continue;
             }
             if crate::mhub::owns_input(msg.hwnd) || IsDialogMessageW(hwnd, &msg) == 0 {
@@ -507,6 +513,26 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
                 a.record_write(message, error);
             }
             a.render(hwnd);
+            0
+        }
+        crate::plugin_ui::CAN_CHANGE => i32::from(a.can_change_plugins()) as isize,
+        crate::plugin_ui::BACK => {
+            if a.page == Page::Plugins {
+                a.navigate(hwnd, a.plugins_source);
+            }
+            0
+        }
+        crate::plugin_ui::CHANGED => {
+            if w != 0 {
+                a.set_status("插件已更新，可在「插件管理」重启生效", false);
+            }
+            a.images = Images::load();
+            a.begin(hwnd, None);
+            a.render(hwnd);
+            0
+        }
+        crate::plugin_ui::RESTART => {
+            DestroyWindow(hwnd);
             0
         }
         crate::controls_ui::WRITE_FINISHED => {
@@ -672,6 +698,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
         }
         WM_QUERYENDSESSION => i32::from(
             !a.modal_open
+                && !crate::plugin_ui::busy()
                 && !crate::mhub::closing()
                 && !crate::controls_ui::embedded_writing()
                 && !a.tool_busy()
@@ -697,6 +724,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM
             0
         }
         WM_DESTROY => {
+            crate::plugin_ui::shutdown();
             if let Page::Tool(_, tool) = a.page {
                 tool.close();
             }
@@ -832,6 +860,7 @@ impl App {
             );
         }
         match self.page {
+            Page::Plugins => crate::plugin_ui::resize(self.plugin_bounds(hwnd)),
             Page::Tool(m, tool) => {
                 if crate::device_templates::supports(REGISTRY[m].key) {
                     self.add(
@@ -1427,7 +1456,60 @@ impl App {
             }
         }
     }
+    unsafe fn plugin_bounds(&self, hwnd: HWND) -> RECT {
+        let mut r: RECT = zeroed();
+        GetClientRect(hwnd, &mut r);
+        r.left = self.px(SIDEBAR + 24);
+        r.right -= self.px(28);
+        r.bottom -= self.px(18);
+        r.top = self.px(HOME_CONTENT_Y - 10);
+        r
+    }
+    unsafe fn can_change_plugins(&self) -> bool {
+        !self.modal_open
+            && !self.hub_open
+            && !crate::mhub::closing()
+            && !self.tool_busy()
+            && !crate::controls_ui::embedded_writing()
+            && !self.board.saving
+            && self.inflight.is_none()
+            && self.profile_notice.is_none()
+            && self.queued.is_empty()
+    }
+    unsafe fn open_plugins(&mut self, hwnd: HWND, brand: Option<&str>, updates: bool) {
+        if self.modal_open {
+            return;
+        }
+        let previous = self.page;
+        if previous != Page::Plugins {
+            self.navigate(hwnd, Page::Plugins);
+            if self.page != Page::Plugins {
+                return;
+            }
+            self.plugins_source = if previous == Page::MHub {
+                Page::Drivers
+            } else {
+                previous
+            };
+        }
+        if let Err(error) = crate::plugin_ui::mount(hwnd, self.plugin_bounds(hwnd), brand, updates)
+        {
+            self.navigate(hwnd, self.plugins_source);
+            self.set_status(&error, true);
+            self.render(hwnd);
+        }
+    }
     unsafe fn navigate(&mut self, hwnd: HWND, page: Page) {
+        if crate::plugin_ui::busy()
+            && matches!(
+                page,
+                Page::Tool(..) | Page::Device(_) | Page::Onboard(_) | Page::MHub
+            )
+        {
+            self.set_status("插件正在变更，完成后可继续调节设备", false);
+            self.render(hwnd);
+            return;
+        }
         if self.page != page {
             if let Page::Tool(_, tool) = self.page {
                 if !tool.close() {
@@ -1452,6 +1534,9 @@ impl App {
         } else {
             page
         };
+        if self.page == Page::Plugins && page != Page::Plugins {
+            crate::plugin_ui::set_visible(false);
+        }
         self.board_requested = matches!(page, Page::Onboard(_));
         if !self.board.saving {
             self.board = onboard::Board::default();
@@ -1539,7 +1624,12 @@ impl App {
         }
     }
     unsafe fn open_mhub(&mut self, hwnd: HWND, selected: Option<usize>) {
-        if self.hub_open || self.modal_open || self.tool_busy() || crate::mhub::closing() {
+        if self.hub_open
+            || self.modal_open
+            || self.tool_busy()
+            || crate::mhub::closing()
+            || crate::plugin_ui::busy()
+        {
             return;
         }
         if selected.is_some_and(|m| {
@@ -1658,6 +1748,7 @@ impl App {
                 let dark = !paint::theme::is_dark();
                 match paint::theme::save(dark) {
                     Ok(()) => {
+                        crate::plugin_ui::theme_changed();
                         let replacement = paint::tray_icon();
                         if !replacement.is_null() {
                             let old = std::mem::replace(&mut self.icon, replacement);
@@ -1683,12 +1774,12 @@ impl App {
                 self.audio_page = value;
                 self.layout(hwnd);
             }
-            Command::Configuration
-            | Command::DeviceTemplates(_)
-            | Command::BrandPlugins(_)
-            | Command::CoreUpdate
-            | Command::DriverManager
-            | Command::AddDevice => {
+            Command::BrandPlugins(m) => self.open_plugins(hwnd, Some(REGISTRY[m].brand), false),
+            Command::DriverManager | Command::AddDevice => self.open_plugins(hwnd, None, false),
+            Command::Configuration | Command::DeviceTemplates(_) | Command::CoreUpdate => {
+                if crate::plugin_ui::busy() {
+                    return;
+                }
                 if self.pending.is_some() || !self.queued.is_empty() || self.modal_open {
                     return;
                 }
@@ -1732,16 +1823,16 @@ impl App {
                         crate::configuration_ui::open(hwnd, model);
                         crate::plugin_ui::StoreExit::Close
                     }
-                    Command::BrandPlugins(m) => {
-                        crate::plugin_ui::open_for_brand(hwnd, REGISTRY[m].brand)
-                    }
-                    Command::CoreUpdate => crate::update_ui::open(hwnd),
-                    _ => crate::plugin_ui::open(hwnd),
+                    _ => crate::update_ui::open(hwnd),
                 };
                 self.modal_open = false;
                 match outcome {
                     crate::plugin_ui::StoreExit::Restart => {
                         DestroyWindow(hwnd);
+                        return;
+                    }
+                    crate::plugin_ui::StoreExit::PluginsUpdates => {
+                        self.open_plugins(hwnd, None, true);
                         return;
                     }
                     crate::plugin_ui::StoreExit::Close => {}
@@ -2001,6 +2092,11 @@ impl App {
         self.render(hwnd);
     }
     unsafe fn quit(&mut self, hwnd: HWND) {
+        if crate::plugin_ui::busy() {
+            self.set_status("插件操作正在进行，完成后即可退出", false);
+            self.render(hwnd);
+            return;
+        }
         if self.modal_open {
             return;
         }
@@ -2512,10 +2608,10 @@ impl App {
                         && self.queued.is_empty()
                         && !self.modal_open
                 }
+                Command::BrandPlugins(_) | Command::DriverManager | Command::AddDevice => {
+                    !self.modal_open
+                }
                 Command::ConnectAudio
-                | Command::BrandPlugins(_)
-                | Command::DriverManager
-                | Command::AddDevice
                 | Command::Configuration
                 | Command::DeviceTemplates(_)
                 | Command::CoreUpdate
@@ -2576,6 +2672,11 @@ impl App {
             match self.page {
                 Page::Home => self.home(&c),
                 Page::Drivers => self.drivers(&c),
+                Page::Plugins => self.page_heading(
+                    &c,
+                    "插件管理",
+                    "搜索设备型号或品牌，可一次安装和更新多个插件。",
+                ),
                 Page::Tool(m, tool) => c.text(
                     &format!("{}  ·  {}", REGISTRY[m].name, tool.title()),
                     R::new(SIDEBAR + 146, 16, self.width - SIDEBAR - 425, 34),
@@ -2613,41 +2714,43 @@ impl App {
                 Page::Preferences => self.preferences(&c),
             }
             self.sidebar_overlay(&c);
-            c.text(
-                &self.status,
-                if matches!(self.page,Page::Device(m) if REGISTRY[m].has_g2_audio()) {
-                    R::new(562, self.height - 58, self.width - 880, 32)
-                } else if matches!(self.page, Page::Device(_)) {
-                    R::new(
-                        SIDEBAR + 24,
-                        self.height - 54,
-                        self.width - SIDEBAR - 320,
-                        30,
-                    )
-                } else if self.page == Page::Home {
-                    R::new(
-                        SIDEBAR + 24,
-                        self.height - 52,
-                        self.width - SIDEBAR - 420,
-                        28,
-                    )
-                } else {
-                    R::new(
-                        SIDEBAR + 24,
-                        self.height - 54,
-                        self.width - SIDEBAR - 350,
-                        30,
-                    )
-                },
-                12,
-                400,
-                if self.status_error {
-                    palette().error
-                } else {
-                    palette().dim
-                },
-                DT_LEFT,
-            );
+            if self.page != Page::Plugins {
+                c.text(
+                    &self.status,
+                    if matches!(self.page,Page::Device(m) if REGISTRY[m].has_g2_audio()) {
+                        R::new(562, self.height - 58, self.width - 880, 32)
+                    } else if matches!(self.page, Page::Device(_)) {
+                        R::new(
+                            SIDEBAR + 24,
+                            self.height - 54,
+                            self.width - SIDEBAR - 320,
+                            30,
+                        )
+                    } else if self.page == Page::Home {
+                        R::new(
+                            SIDEBAR + 24,
+                            self.height - 52,
+                            self.width - SIDEBAR - 420,
+                            28,
+                        )
+                    } else {
+                        R::new(
+                            SIDEBAR + 24,
+                            self.height - 54,
+                            self.width - SIDEBAR - 350,
+                            30,
+                        )
+                    },
+                    12,
+                    400,
+                    if self.status_error {
+                        palette().error
+                    } else {
+                        palette().dim
+                    },
+                    DT_LEFT,
+                );
+            }
         }
         BitBlt(dest, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
         SelectObject(dc, old);

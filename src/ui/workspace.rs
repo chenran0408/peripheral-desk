@@ -57,6 +57,7 @@ impl App {
             Page::Onboard(m) if REGISTRY[m].read_only() => Page::Drivers,
             Page::Onboard(m) | Page::Tool(m, _) => Page::Device(m),
             Page::MHub => self.hub_source,
+            Page::Plugins => self.plugins_source,
             _ => Page::Home,
         }
     }

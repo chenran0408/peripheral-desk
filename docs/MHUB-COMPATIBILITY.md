@@ -1,6 +1,6 @@
 # 迈从驱动中心能做什么
 
-安装 Windows x64 安装程序后，在「设备调节」点选自己的设备。G75 Pro、初代 A5 Ultra、0x4D 鼠标、CZ 有线磁轴键盘和兼容迈从音频设备都有按型号提供的原生编辑器。在「插件管理」选择预览渠道并安装自己的型号。要用其他原厂编辑器，打开「本地 M HUB」或设备页的「更多原厂功能」。内置网页离线可用。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.4/PeripheralDesk-0.4.12-preview.4-windows-x64-setup.exe) · [本地工作区用法](MHUB-WORKSPACE.md)
+安装 Windows x64 安装程序后，在「设备调节」点选自己的设备。G75 Pro、初代 A5 Ultra、0x4D 鼠标、CZ 有线磁轴键盘和兼容迈从音频设备都有按型号提供的原生编辑器。在「插件管理」选择预览渠道并安装自己的型号。要用其他原厂编辑器，打开「本地 M HUB」或设备页的「更多原厂功能」。内置网页离线可用。[下载安装程序](https://github.com/chenran0408/peripheral-desk/releases/download/v0.4.12-preview.5/PeripheralDesk-0.4.12-preview.5-windows-x64-setup.exe) · [本地工作区用法](MHUB-WORKSPACE.md)
 
 [按型号查询原生功能、连接和验证范围](https://github.com/chenran0408/peripheral-desk-drivers/blob/main/docs/MCHOSE-NATIVE-FAMILIES.md)。
 
